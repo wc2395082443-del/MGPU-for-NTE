@@ -1,0 +1,73 @@
+{
+  "scope": "Historical separate captures and newly supplied user observations; not a controlled FG-on/off experiment",
+  "measured_history": [
+    {
+      "version": "M343",
+      "date": "2026-10-21",
+      "fg_requested": false,
+      "complete_tuples": 100,
+      "real_or_neural_rate": 33.020313,
+      "sdk_rate": null,
+      "record": "m343-runtime-20261021-filemode"
+    },
+    {
+      "version": "M351",
+      "date": "2026-10-21",
+      "seconds": 20,
+      "fg_multiplier_requested": 6,
+      "real_frames": 661,
+      "real_or_neural_rate": 33.05,
+      "sdk_frames": 3897,
+      "sdk_rate": 194.85,
+      "display_event_rate": 190.412,
+      "present_mode": "IndependentFlip",
+      "physical_frame_scanout_verified": false,
+      "record": "m351-output-stutter-20261021"
+    },
+    {
+      "version": "M352",
+      "date": "2026-10-21",
+      "seconds": 20,
+      "fg_multiplier_requested": 6,
+      "real_or_neural_rate": 33.1,
+      "sdk_rate": 195.2,
+      "display_event_rate": 88.2187,
+      "present_mode": "ComposedFlip",
+      "user_feedback": "Less smooth than M351",
+      "physical_frame_scanout_verified": false,
+      "record": "m352-output-runtime-20261021"
+    }
+  ],
+  "user_reported_comparison": {
+    "date_supplied": "2026-10-29",
+    "evidence_class": "User-reported gameplay FPS/readout; not newly instrumented or independently verified scanout",
+    "before": {
+      "game_gpu": "RTX 5080",
+      "secondary_gpu": null,
+      "dlss_mode": "Ultra Performance",
+      "fg_multiplier_requested": 6,
+      "dlss_nr": true,
+      "full_ray_tracing_user_description": true,
+      "reported_display_fps_approximately": 120
+    },
+    "after": {
+      "game_gpu": "RTX 4080 SUPER",
+      "secondary_gpu": "RTX 5080",
+      "dlss_mode": "Quality",
+      "fg_multiplier_requested": 6,
+      "dlss_nr": true,
+      "full_ray_tracing_user_description": true,
+      "reported_display_fps": "User reports stable above 160"
+    },
+    "resolution_scene_driver_revalidated": false,
+    "controlled_equal_quality_ab": false,
+    "exact_base_fps_from_dividing_by_six_supported": false
+  },
+  "compatibility": {
+    "tested_game_gpu": "RTX 4080 SUPER",
+    "helper_current_allowed_gpu_name": "NVIDIA GeForce RTX 5080",
+    "all_primary_gpus_supported": false,
+    "all_rtx50_secondary_gpus_supported": false,
+    "broader_hardware_scope": "Architecture direction requiring per-adapter SDK, shared-resource, guide and presentation validation"
+  }
+}

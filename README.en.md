@@ -6,6 +6,25 @@ An experimental Neverness to Everness adaptation of [Neural Coprocessor](https:/
 
 The RTX 4080 SUPER renders the game and runs its game-side DLSS super resolution. The RTX 5080 receives matched color/depth/motion/camera inputs, runs neural rendering, and uses an independent Streamline/Reflex/PCL process for frame generation and presentation. This helper currently accepts **GeForce RTX 5080 only**; other GPUs and game builds are not claimed supported.
 
+## User-reported gameplay comparison
+
+For NTE with DLSS neural rendering and the user's full-ray-tracing setting, the user reports:
+
+| Setup | Game GPU | NR/FG GPU | Game DLSS mode | FG request | Reported display FPS |
+| --- | --- | --- | --- | --- | --- |
+| Before the dual-GPU adaptation | RTX 5080 | None | Ultra Performance | 6x | Approximately 120 |
+| Dual-GPU setup | **RTX 4080 SUPER (not RTX 50-series)** | **RTX 5080** | **Quality** | 6x | **User reports stable above 160** |
+
+These are newly supplied user observations, not a new instrumented scanout measurement or equal-quality controlled A/B. Resolution, scene and driver were not independently revalidated for this comparison. The architecture demonstrates a non-50-series primary GPU; it does **not** establish arbitrary primary-GPU support. The exact first-release helper remains RTX 5080-only, with other capable RTX 50-series secondary GPUs requiring adaptation and validation.
+
+## Helper responsibilities and FG overhead
+
+The helper is the RTX 5080's independent official-FG/display endpoint. It validates same-frame NR/depth/motion/camera tuples, manages shared/private resource retirement, relays real source Reflex/PCL markers, submits the official proxy Present and maintains an isolated mouse-passthrough output window and diagnostics. It does not render the game scene or perform NR itself.
+
+Because FG runs on the secondary GPU rather than re-rendering five game scenes on the primary GPU, base throughput can remain approximately unchanged when the secondary GPU has headroom. Separate historical windows recorded **33.02 unique NR frames/s without FG (M343)** and **33.05 real frames/s with a sixfold request (M351), SDK count 194.85/s**. No clear base-frame reduction was observed in those windows; this is not a controlled FG toggle experiment or a universal zero-overhead claim. NR and FG share the 5080, and copies, synchronization and presentation backpressure still cost work.
+
+[Detailed helper documentation](docs/nte/HELPER.zh-CN.md) covers threads, fences, official/manual responsibilities, window/input isolation, rates, compatibility and current limitations. Completed six-image post-FG buffering is not implemented.
+
 ## Changes
 
 - Stabilized same-frame input ownership, frame identities, snapshots and fence-based retirement, including skipped-frame ring-slot alignment.

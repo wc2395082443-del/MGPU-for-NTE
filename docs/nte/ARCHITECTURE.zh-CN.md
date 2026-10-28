@@ -27,3 +27,5 @@ flowchart LR
 helper在5080建立独立Streamline代理swapchain，传同帧资源和Reflex/PCL标记，生成及最终Present由官方SDK管理。M362将输出窗口与游戏输入队列拆开，M363使用layered＋transparent并初始化alpha255保持鼠标穿透；不伪造鼠标/按钮/滚轮事件。
 
 现有helper不是FG后六纹理队列；官方Present同时包含生成与呈现。后级缓存再均匀送屏需要另一套生成输出所有权方案，首发未包含。源帧抖动、DWM合成、显示刷新率和FG策略都会影响可见节奏。
+
+完整功能、线程分工、三层fence、窗口穿透、六倍性能和兼容性见 **[HELPER.zh-CN.md](HELPER.zh-CN.md)**。该文同时区分用户新增的“单5080超级性能约120显示FPS、双卡4080S＋5080质量档稳定160以上”体验记录，以及可解析的源帧/SDK/显示事件历史测量。
