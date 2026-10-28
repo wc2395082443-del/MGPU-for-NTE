@@ -10,14 +10,19 @@ The RTX 4080 SUPER renders the game and runs its game-side DLSS super resolution
 
 ## User-reported gameplay comparison
 
-For NTE with DLSS neural rendering and the user's full-ray-tracing setting, the user reports:
+The user's NTE gameplay and NR-stage figures:
 
-| Setup | Game GPU | NR/FG GPU | Game DLSS mode | FG request | Reported display FPS |
+| Setup | Game GPU | NR/FG GPU | Game DLSS mode | FG request | User-reported result |
 | --- | --- | --- | --- | --- | --- |
 | Before the dual-GPU adaptation | RTX 5080 | None | Ultra Performance | 6x | Approximately 120 |
 | Dual-GPU setup | **RTX 4080 SUPER (not RTX 50-series)** | **RTX 5080** | **Quality** | 6x | **User reports stable above 160** |
+| Single 4080S, DLSS neural rendering enabled | RTX 4080 SUPER | None | Quality | Off | **Approximately 22 FPS at maximum settings + full ray tracing** |
+| Single 4080S, DLSS neural rendering disabled | RTX 4080 SUPER | None | — | Off | **Approximately 40 FPS** |
+| RTX 5080 running only NR | — | RTX 5080 | — | — | **Approximately 50 NR frames/s** |
 
-These gameplay figures were supplied by the user on 2026-10-29, using the two DLSS modes shown above. The setup demonstrates a non-50-series primary GPU. The first-release helper supports RTX 5080; other primary and secondary GPUs require adaptation and testing.
+The 4080S records approximately 40 FPS with neural rendering disabled and 22 FPS while running the game and NR together. The 5080-only NR figure describes processing throughput for the neural stage.
+
+These figures were supplied by the user on 2026-10-29, with settings shown in the table. The setup demonstrates a non-50-series primary GPU. The first-release helper supports RTX 5080; other primary and secondary GPUs require adaptation and testing.
 
 ## Helper responsibilities and FG overhead
 

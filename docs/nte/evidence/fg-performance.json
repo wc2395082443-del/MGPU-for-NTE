@@ -63,6 +63,40 @@
     "controlled_equal_quality_ab": false,
     "exact_base_fps_from_dividing_by_six_supported": false
   },
+  "user_reported_stage_references": [
+    {
+      "date_supplied": "2026-10-29",
+      "source": "User gameplay observation",
+      "gpu": "RTX 4080 SUPER",
+      "workload": "Game rendering and DLSS neural rendering on one GPU",
+      "dlss_mode": "Quality",
+      "neural_rendering_enabled": true,
+      "full_ray_tracing": true,
+      "graphics_quality": "Maximum",
+      "fg_enabled": false,
+      "approximately_fps": 22,
+      "metric": "Game frame rate"
+    },
+    {
+      "date_supplied": "2026-10-29",
+      "source": "User gameplay observation",
+      "gpu": "RTX 4080 SUPER",
+      "workload": "Game rendering with DLSS neural rendering disabled",
+      "neural_rendering_enabled": false,
+      "dlss_mode": null,
+      "fg_enabled": false,
+      "approximately_fps": 40,
+      "metric": "Game frame rate"
+    },
+    {
+      "date_supplied": "2026-10-29",
+      "source": "User stage-throughput observation",
+      "gpu": "RTX 5080",
+      "workload": "NR only",
+      "approximately_fps": 50,
+      "metric": "NR-stage processing throughput"
+    }
+  ],
   "frame_generation_implementation": {
     "algorithm_provider": "NVIDIA",
     "runtime": "Official Streamline / DLSS-G",
