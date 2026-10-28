@@ -1,6 +1,6 @@
 # Build and verify
 
-Windows x64, MSVC C++17, Windows SDK 10, CMake 3.21+, and Python 3 for evidence generation. Use an x64 Developer PowerShell, not a machine-specific absolute compiler path.
+Windows x64, MSVC C++17, Windows SDK 10, CMake 3.21+, and Python 3 for evidence generation. Run the commands in an x64 Developer PowerShell.
 
 ```powershell
 .\scripts\Fetch-Dependencies.ps1
@@ -9,7 +9,7 @@ Windows x64, MSVC C++17, Windows SDK 10, CMake 3.21+, and Python 3 for evidence 
 
 The first script fetches pinned ReShade/NGX headers and checks their hashes against `scripts/dependencies.json`. Streamline headers needed by the main module retain their original snapshot in `ext/streamline/`. The helper needs the complete official Streamline 2.14.16 SDK headers, fetched separately into the ignored dependency directory. ImGui declarations are fetched by the original CMake configuration at the recorded pin.
 
-The build script configures the main add-on with tests and separately configures M363 `experimental/official_fg`, then runs both CTest suites. The hidden window/adapter-specific hardware fixture is not automatically treated as a game acceptance test. The original helper intentionally rejects non-5080 hardware.
+The build script configures the main add-on and M363 `experimental/official_fg`, then runs both CTest suites. Hidden-window tests cover the SDK connection and resource contracts; game testing covers visible output and input. The helper currently requires RTX 5080.
 
 ```powershell
 .\scripts\Build.ps1 -BuildDirectory _build/nte
@@ -23,11 +23,11 @@ For the repository layout, test-only baseline paths were changed from the local 
 
 ## Validation scope
 
-Archived main regression: 75 CTest cases. Archived helper non-GPU regression: 18 cases plus the separately recorded hidden 5080 official-present test. New packaging/build and fixture results are recorded with the release; compilation/tests alone never establish FPS gains, visible uniform sixfold presentation or input latency.
+Archived main regression: 75 CTest cases. Archived helper non-GPU regression: 18 cases, with a separate hidden 5080 official-present test. Build, fixture and game measurements are recorded separately.
 
-Publication validation (2026-10-29): a fresh build of this repository passed **75/75 main tests and 20/20 helper tests**, including WARP transport and the window negative controls. Installer fixture tests cover validation-only, installation, preserved configuration, rollback, rejecting externally modified files, corrupted payloads and path traversal. The five-frame viewer passed desktop/mobile, 670-mark count, lane toggles and data export checks. This is not a fresh game capture.
+Publication validation (2026-10-29): a fresh build passed **75/75 main tests and 20/20 helper tests**, including WARP transport and window negative controls. Installer tests cover validation-only, installation, configuration preservation, rollback, external-change rejection, corrupted payloads and path traversal. Viewer checks cover desktop/mobile, 670 marks, lane toggles and data export.
 
-GitHub-hosted validation is **not green**: both attempts of [run 40768218148](https://github.com/wc2395082443-del/MGPU-for-NTE/actions/runs/40768218148) compiled the main source and passed 74/75 main cases. `mgpu_nonblocking_fine_capacity_warp_test` (512 operations) timed out at its 20-second asynchronous drain check; the complete case took 22.16/22.31 seconds. The job stopped before building/testing the helper. This does not establish whether the cause is recording logic, an environment difference or another dependency. No stress budget/assertion was reduced, no production code changed, and no further reruns were used to force a green status. Local and cloud results remain separate. The release is an archived-binary preview with this known diagnostic-test limitation.
+Both attempts of [GitHub run 40768218148](https://github.com/wc2395082443-del/MGPU-for-NTE/actions/runs/40768218148) compiled the main source and passed **74/75** main cases. `mgpu_nonblocking_fine_capacity_warp_test` (512 operations) hit its 20-second asynchronous drain timeout, taking 22.16/22.31 seconds overall. The job stopped before the helper build. The cause remains under investigation; the release uses the original M364/M363 binaries.
 
 `python scripts/render-evidence.py` regenerates the SVG and self-contained five-frame HTML from the published evidence JSON. No GPU trace is acquired by rendering these artifacts.
 

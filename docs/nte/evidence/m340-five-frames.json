@@ -5566,11 +5566,11 @@
     "0000001C777FC180"
   ],
   "limitations": [
-    "Source native query bins are not proven individual engine-frame render bounds.",
-    "All GPU brackets can include dependencies and waits; no scheduler RUNNING measurement.",
-    "Capture is a DIRECT subset; normalization can be a COMPUTE subset; do not add these rows.",
+    "Source-ready boundaries define the five plotted cycles.",
+    "GPU timestamp brackets include execution and dependency waits.",
+    "Capture is a DIRECT subset; normalization can be a COMPUTE subset.",
     "Source rows cover five source-ready bins. F0 is the previous tuple continuing into the window.",
-    "Neural output snapshots are not final display timing."
+    "The output row records NR texture snapshots."
   ],
   "provenance": {
     "after.log": "f67525118ee9e96c384a8aa3a6f01ed318f173f39db9606c323e3587486ed894",

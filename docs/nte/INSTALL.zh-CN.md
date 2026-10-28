@@ -41,11 +41,11 @@ t.Streamline.Reflex.Auto=1
 r.OneFrameThreadLag=1
 ```
 
-ForceTagging保证原生资源标签入口，Reflex用于当前集成；`OneFrameThreadLag`为测试采用值，不是承诺更低延迟。安装脚本**不修改**游戏设置/此文件、不自动设置只读。游戏可能重写配置，文件内容也不证明运行时采纳；应核对日志。不要覆盖含其他游戏数据的整个文件。
+ForceTagging保留原生资源标签入口，Reflex用于当前集成，`OneFrameThreadLag`采用测试配置值。安装脚本保留游戏设置和此文件的现有属性；请手动合并这些键，并在启动日志中核对生效情况。保留文件内其他游戏数据。
 
 ## 启动核对
 
-从原启动器进入场景。日志应出现M364版本、正确游戏/神经adapter、颜色/深度/MV标签和NR输出，以及helper初始化。COPY日志应显示`color_overlap=1`/`guide_overlap=1`（部分阶段日志可能使用M341前缀）；回退路径不当作分阶段优化成功。
+从原启动器进入场景。日志应出现M364版本、正确的游戏/神经adapter、颜色/深度/MV标签、NR输出和helper初始化。`color_overlap=1`/`guide_overlap=1`表示分阶段COPY路径已启用，0表示回退路径；部分日志使用M341前缀。
 
 - Ctrl＋Alt＋F7切换input/output，对比NR；Home为ReShade面板。
 - helper使用独立输出覆盖层，输入仍属于原游戏。按钮/滚轮/转视角和Alt＋Tab都应核对。

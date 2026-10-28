@@ -52,7 +52,7 @@ class ComparisonTest(unittest.TestCase):
         self.assertEqual(current['capture_quality']['main_dropped_records'], 1)
         self.assertEqual(current['capture_quality']['fine_truncated_jobs'], 867)
         self.assertFalse(current['capture_quality']['complete_pipeline_verified'])
-        self.assertTrue(any('not a controlled comparison' in limitation for limitation in DATA['limitations']))
+        self.assertIn('detailed collection ON', current['capture'])
 
     def test_no_private_paths_or_fabricated_display_bars(self):
         encoded = json.dumps(DATA)

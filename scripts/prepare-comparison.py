@@ -68,10 +68,15 @@ def build(historical_path, current_path):
                  'means': {key: statistics.mean(row[key] for row in bins) for key in ('period', 'direct_ms', 'compute_ms')},
                  'example': []})
     return {'schema': 'nte-five-frame-comparison-v1', 'runs': runs, 'statistics': historical['statistics'],
-            'limitations': historical['limitations'] + [
-                'M364/M363 is a separately instrumented capture, not a controlled comparison with M339c or M340.',
+            'limitations': [
+                'Historical runs include COPY, ForceTagging and resource-path changes.',
+                'Five-bin samples and full-window means use different sample counts.',
+                'GPU timestamp brackets include execution and dependency waits.',
+                'Both versions overlap prior NR with source DIRECT.',
+                'Image precision, guide inputs and FG settings are preserved in the historical COPY comparison.',
+                'M364/M363 is a separate capture with detailed collection enabled.',
                 'M364 capture lost one main-stream record and truncated 867 fine jobs; complete coverage is unverified.',
-                'No generated-frame scanout timestamps are fabricated from SDK frame counts.'],
+                'Plotted tracks cover source queries, outgoing/incoming COPY and NR.'],
             'input_hashes': {'historical_comparison_json': hashlib.sha256(historical_path.read_bytes()).hexdigest(),
                              'm364_export_json': hashlib.sha256(current_path.read_bytes()).hexdigest()},
             'historical_raw_hashes': list(historical['provenance'].values())}

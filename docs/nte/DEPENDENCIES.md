@@ -22,4 +22,4 @@ NVIDIA runtime/model binaries are excluded from both Git and this release, follo
 
 ## Hardware/build restrictions
 
-The exact M363 binary currently requires `NVIDIA GeForce RTX 5080` as its neural/output adapter. Do not advertise general RTX 50-series/PRO or arbitrary multi-GPU support from this release. The test rig uses an RTX 4080 SUPER as the game adapter. Some source hooks validate the known game PE/build; new game updates may require adaptation.
+M363 currently requires `NVIDIA GeForce RTX 5080` as its neural/output adapter. The tested primary GPU is RTX 4080 SUPER. Other GPU combinations need adaptation and testing. Some hooks validate the game build, so game updates may also require changes.

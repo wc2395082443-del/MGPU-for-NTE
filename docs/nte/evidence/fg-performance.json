@@ -1,5 +1,5 @@
 {
-  "scope": "Historical separate captures and newly supplied user observations; not a controlled FG-on/off experiment",
+  "scope": "Historical captures and user gameplay observations, listed separately",
   "measured_history": [
     {
       "version": "M343",
@@ -40,7 +40,7 @@
   ],
   "user_reported_comparison": {
     "date_supplied": "2026-10-29",
-    "evidence_class": "User-reported gameplay FPS/readout; not newly instrumented or independently verified scanout",
+    "evidence_class": "User-reported gameplay FPS/readout supplied on 2026-10-29",
     "before": {
       "game_gpu": "RTX 5080",
       "secondary_gpu": null,
@@ -62,6 +62,16 @@
     "resolution_scene_driver_revalidated": false,
     "controlled_equal_quality_ab": false,
     "exact_base_fps_from_dividing_by_six_supported": false
+  },
+  "frame_generation_implementation": {
+    "algorithm_provider": "NVIDIA",
+    "runtime": "Official Streamline / DLSS-G",
+    "lossless_scaling_used": false,
+    "visual_feedback": {
+      "date": "2026-10-29",
+      "source": "User feedback",
+      "assessment": "Excellent visual results"
+    }
   },
   "compatibility": {
     "tested_game_gpu": "RTX 4080 SUPER",

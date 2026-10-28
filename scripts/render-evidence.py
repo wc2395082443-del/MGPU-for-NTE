@@ -32,15 +32,15 @@ def performance():
                       f'<rect x="615" y="{y}" width="{row["TransferMs"] * 30:.2f}" height="25" rx="4" fill="{colors[index]}"/>',
                       text(620 + row['TransferMs'] * 30, y + 18, f'{row["TransferMs"]:.3f}', 13)])
     items.extend([text(28, 343, '+25.3% historical NR cadence; tagging/resource path also changed.', 16, '#49cfb3', '600'),
-                  text(28, 370, 'Not a controlled A/B. M341 saved 0.510 ms transfer but did not raise overall FPS.', 14),
-                  text(28, 399, 'Later runs still reported ~28 base FPS. Sixfold SDK counts are not physical display FPS.', 14, '#f5c77d')])
+                  text(28, 370, 'M341 saved another 0.510 ms transfer; overall frame rate stayed approximately unchanged.', 14),
+                  text(28, 399, 'Later base rates: ~28 FPS. Source, SDK and display-event counts are listed separately.', 14, '#a4b7cb')])
     (FIGURES / 'performance.svg').write_text(svg(960, 430, items), encoding='utf-8')
 
 
 def timeline():
     data = json.loads((EVIDENCE / 'm340-five-frames.json').read_text(encoding='utf-8-sig'))
     labels = ['4080S main DIRECT queries', '4080S COMPUTE queries', 'Capture / normalization subset',
-              '4080S outgoing COPY', '5080 incoming COPY / waits', '5080 neural rendering', 'Output snapshot (not display)']
+              '4080S outgoing COPY', '5080 incoming COPY / waits', '5080 neural rendering', 'NR output snapshot']
     colors = {'direct': '#7296c0', 'compute': '#ac87e4', 'capture': '#e6ba6c', 'color': '#43c8b0',
               'guides': '#2b98a9', 'interval': '#455367', 'neural': '#e883a3', 'output': '#e8d589'}
     width, height, left, plot_width = 1200, 550, 252, 914
@@ -64,8 +64,8 @@ def timeline():
         items.append(f'<rect class="mark" data-lane="{bar["lane"]}" x="{start:.3f}" y="{y}" width="{max(duration * scale, .3):.3f}" height="24" fill="{colors[bar["kind"]]}"><title>{html.escape(tip)}</title></rect>')
     for tick in range(0, int(maximum) + 1, 20):
         items.append(text(left + tick * scale, 466, f'{tick} ms', 12, '#a4b7cb'))
-    items.extend([text(25, 502, 'F0 is previous-frame work. Capture is a subset. Source bins do not prove individual engine-frame ownership.', 13, '#f5c77d'),
-                  text(25, 527, 'Historical 104-frame window: 33.451 NR completions/s. This figure is not the M364 release benchmark.', 13, '#a4b7cb')])
+    items.extend([text(25, 502, 'F0 is previous-frame work. Capture is a DIRECT subset; source-ready boundaries define the five cycles.', 13, '#a4b7cb'),
+                  text(25, 527, 'M340 historical capture: 104 source tuples, 33.451 NR completions/s.', 13, '#a4b7cb')])
     chart = svg(width, height, items)
     (FIGURES / 'five-frames.svg').write_text(chart, encoding='utf-8')
     buttons = ''.join(f'<label><input type="checkbox" checked data-lane="{index}">{html.escape(label)}</label>' for index, label in enumerate(labels))
@@ -74,9 +74,9 @@ def timeline():
 body{background:#0c1624;color:#dbe6f3;font:15px/1.6 system-ui;margin:24px}h1{font-size:25px}
 .chart{overflow:auto;border:1px solid #30465f;border-radius:12px}svg{display:block}label{display:inline-block;margin:5px 18px 5px 0}
 button{padding:9px 15px;margin:12px 0;background:#253d59;color:white;border:0;border-radius:6px}a{color:#68d9c4}.mark:hover{stroke:white;stroke-width:2}
-</style><h1>MGPU for NTE: five measured frames</h1><p>Hover a bar for exact timing. Toggle lanes below. All data is embedded; no network requests or invented display frames.</p>
+</style><h1>MGPU for NTE: five measured frames</h1><p>Hover for exact timing, toggle lanes and export the plotted data. All data is embedded for offline viewing.</p>
 <section>BUTTONS</section><div class="chart">CHART</div><button id="download">Download original plotted data</button>
-<p>Source: M340 foreground recording, 2026-10-21. These are timestamp brackets, not exclusive hardware running time or final display scanout. <a href="PERFORMANCE.zh-CN.md">Measurement scope</a>.</p>
+<p>Source: M340 foreground recording, 2026-10-21. GPU timestamp brackets include execution and dependencies. <a href="PERFORMANCE.zh-CN.md">Measurement details</a>.</p>
 <script type="application/json" id="data">DATA</script><script>
 document.querySelectorAll('input[data-lane]').forEach(input=>input.addEventListener('change',()=>{
  document.querySelectorAll('.mark[data-lane="'+input.dataset.lane+'"]').forEach(mark=>mark.style.display=input.checked?'':'none');

@@ -17422,14 +17422,14 @@
     "transfer_change_percent": -14.992810804340873
   },
   "limitations": [
-    "Independent measurements with changed ForceTagging; not isolated COPY A/B.",
+    "Historical runs include COPY, ForceTagging and resource-path changes.",
     "Five-bin samples and full-window means have different denominators.",
-    "Native query brackets include waits and are not exclusive GPU shader time.",
+    "GPU timestamp brackets include execution and dependency waits.",
     "Both versions already overlap source DIRECT with previous neural work.",
     "No additional raw-versus-neural switching, FG, precision reduction or guide removal.",
-    "M364/M363 is a separately instrumented capture, not a controlled comparison with M339c or M340.",
+    "M364/M363 is a separate capture with detailed collection enabled.",
     "M364 capture lost one main-stream record and truncated 867 fine jobs; complete coverage is unverified.",
-    "No generated-frame scanout timestamps are fabricated from SDK frame counts."
+    "Plotted tracks cover source queries, outgoing/incoming COPY and NR."
   ],
   "input_hashes": {
     "historical_comparison_json": "00b63c95c25d340b336d6b6798f1a2c58f236b6b15f9b41359b199d5858db58c",

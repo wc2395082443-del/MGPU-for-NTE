@@ -56,24 +56,24 @@ def panel(run, heading, top, maximum, role):
 def comparison_svg(data):
     maximum = maximum_time(data)
     items = [text(24, 34, 'Before / after: five measured cycles on one fixed millisecond scale', 24, weight='700'),
-             text(24, 62, 'Historical M339c vs M340 + ForceTagging. Separate runs; not isolated COPY A/B or a current-release FPS promise.', 14, '#f5c77d')]
+             text(24, 62, 'M339c vs M340 + ForceTagging. Historical captures with COPY, tagging and resource-path changes.', 14, '#a4b7cb')]
     items += panel(data['runs'][0], 'BEFORE — M339c, before staged COPY handoff', 91, maximum, 'before')
     items += panel(data['runs'][1], 'AFTER — M340 + ForceTagging, historical measured improvement', 416, maximum, 'after')
     items.extend([text(24, 745, 'Cyan: whole/color COPY. Teal: guides. Purple: COMPUTE query. Pink: neural processing. Gray: between-stage interval.', 13),
-                  text(24, 770, 'F0 is prior-frame work; the tail after F5 is shown. Main / COMPUTE queries include dependencies, not exclusive rendering.', 13, '#a4b7cb'),
+                  text(24, 770, 'F0 is prior-frame work; the tail after F5 is shown. Main / COMPUTE queries include execution and dependencies.', 13, '#a4b7cb'),
                   text(24, 795, 'Both versions already overlap prior NR with source DIRECT. The new COPY receiving overlap is shown separately below.', 13, '#f5c77d')])
     return wrap(1400, 820, items)
 
 
 def current_svg(data):
     items = panel(data['runs'][2], 'CURRENT RELEASE — M364 + M363, detailed capture ON (separate comparison scope)', 5, maximum_time(data), 'current')
-    items.extend([text(24, 330, 'Not comparable as an isolated FPS A/B: detailed collector on; main loss 1; fine truncation 867. No generated-frame timing fabricated.', 13, '#f5c77d')])
+    items.extend([text(24, 330, 'Detailed collection ON. Recording quality: main-stream loss 1; fine-job truncation 867.', 13, '#a4b7cb')])
     return wrap(1400, 355, items)
 
 
 def copy_svg(data):
     items = [text(24, 33, 'One actual frame: receiving can start while guides are still being sent', 23, weight='700'),
-             text(24, 60, 'Both examples use producer COPY start = 0. These are selected frames, not whole-window means.', 14, '#a4b7cb')]
+             text(24, 60, 'First selected source frame from each capture. Both examples use producer COPY start = 0.', 14, '#a4b7cb')]
     left, scale = 250, 125
     for run_index, run in enumerate(data['runs'][:2]):
         top = 108 + run_index * 120

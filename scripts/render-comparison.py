@@ -22,7 +22,7 @@ def render():
     rows = [
         ('所示五周期总时长', before['source_end'], after['source_end'], 'ms'),
         ('所示五周期均值', before['means']['period'], after['means']['period'], 'ms'),
-        ('所示五周期倒数节奏（非显示FPS）', 1000 / before['means']['period'], 1000 / after['means']['period'], '/s'),
+        ('所示五周期倒数节奏', 1000 / before['means']['period'], 1000 / after['means']['period'], '/s'),
         ('完整窗口唯一NR完成', stats['old']['neural_cadence_hz'], stats['new']['neural_cadence_hz'], '/s'),
         ('完整窗口传输elapsed', stats['old']['transfer_elapsed_ms'], stats['new']['transfer_elapsed_ms'], 'ms'),
         ('完整窗口收发COPY交集', stats['old_copy_overlap_ms'], stats['new_copy_overlap_ms'], 'ms'),
@@ -35,17 +35,17 @@ def render():
 h1{font-size:27px;margin-bottom:8px}h2{font-size:21px}p{max-width:1180px}a{color:#67dbc2}.note{padding:14px 18px;background:#263044;border-left:4px solid #f5c77d;border-radius:5px}
 .chart{overflow-x:auto;border:1px solid #30465f;border-radius:10px;margin:16px 0}.chart svg{display:block;max-width:none}.mark:hover{stroke:#fff;stroke-width:1.5}table{border-collapse:collapse;width:100%;max-width:1000px}th,td{padding:9px 14px;border:1px solid #30465f;text-align:left}th{background:#172438}button{padding:9px 14px;margin:10px 12px 10px 0;background:#294867;color:white;border:0;border-radius:6px}label{margin-right:18px;display:inline-block}details{margin-top:22px}summary{font-size:19px;cursor:pointer}.hidden{display:none}
 </style><h1>优化前后：两组各五帧，使用同一毫秒刻度</h1>
-<p>M339c（分阶段COPY改动前）对比 M340＋ForceTagging（历史改进后）。这是两次独立前台采样，不能隔离COPY、标签或场景变化各自造成多少收益。</p>
-<div class="note">两版原本就有“4080S渲染与前一帧5080 NR”的重叠。这里最直接的新变化是<strong>发送引导时已开始接收颜色</strong>，不能描述成“原来全串行、现在全并行”。当前首发M364＋M363的独立重采集五帧另列在下方。</div>
+<p>M339c（分阶段COPY改动前）对比M340＋ForceTagging（改进后）。两次历史前台采样使用同一毫秒刻度。</p>
+<div class="note">主要变化：<strong>4080S发送引导时，5080已经开始接收颜色</strong>。两版均有NR与游戏DIRECT重叠。当前M364＋M363的重采集五帧可在下方展开。</div>
 <p><label><input id="guides" type="checkbox" checked>显示帧分界</label><label><input id="compute" type="checkbox" checked>显示COMPUTE查询</label><label><input id="previous" type="checkbox" checked>显示F0前一帧尾部</label></p>
 <div class="chart" id="historical">HISTORICAL</div><h2>颜色先行交接：放大同一源帧的收发COPY</h2>
-<p>这一小图是各组第一个目标源帧，零点均为该帧出站COPY开始，独立于上面五周期的起点。悬停可见实际端点。灰色接收间隔是等待，不当作纯复制执行。</p>
+<p>各取第一个目标源帧，以出站COPY开始为零点。悬停可见实际端点，灰色段表示两次接收之间的等待。</p>
 <div class="chart">COPY</div><h2>数字分母分开列</h2><table><thead><tr><th>指标</th><th>M339c</th><th>M340＋ForceTagging</th></tr></thead><tbody>ROWS</tbody></table>
 <p>五周期缩短约38.476ms（20.23%）；完整窗口NR节奏历史提升25.29%，两者分母不同。M341后续又省0.510ms传输，但没有测到整体提帧。</p>
-<details id="current"><summary>查看首发M364＋M363的实测五帧（详细采集开启，不用于前后收益归因）</summary>
-<p class="note">2026-10-27重采集中的4.983–5.212秒窗口，五周期228.463ms。整轮main记录丢1条、867个fine任务截断。该窗口与旧三秒采样的测量负载/工作量不同，不能说M340的历史33.45/s就是当前首发效果，也不能直接据此判M364回退。</p>
-<div class="chart">CURRENT</div><p>没有把SDK报告六帧展开成六个伪造的显示时间条；当前图只比较可测的同类五条流水线轨道。</p></details>
-<button id="download">导出完整对比数据JSON</button><p><a href="COMPARISON.zh-CN.md">数据选择与限制</a> · <a href="PERFORMANCE.zh-CN.md">完整性能说明</a></p>
+<details id="current"><summary>查看首发M364＋M363的实测五帧（详细采集开启）</summary>
+<p class="note">2026-10-27重采集4.983–5.212秒窗口，五周期228.463ms。整轮main记录丢1条，867个fine任务截断。</p>
+<div class="chart">CURRENT</div><p>图中保留主DIRECT、COMPUTE查询、出站COPY、接收COPY和NR五条轨道。</p></details>
+<button id="download">导出完整对比数据JSON</button><p><a href="COMPARISON.zh-CN.md">数据来源</a> · <a href="PERFORMANCE.zh-CN.md">完整性能说明</a></p>
 <script id="comparison-data" type="application/json">DATA</script><script>
 const toggle=(selector,enabled)=>document.querySelectorAll(selector).forEach(item=>item.style.display=enabled?'':'none');
 document.getElementById('guides').onchange=event=>toggle('.frame-guide',event.target.checked);
