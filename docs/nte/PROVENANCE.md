@@ -24,4 +24,6 @@ This publication changes only test fixture paths in the root CMake and two helpe
 
 User feedback: the M362 input isolation helped turning responsiveness; M363 adds documented passthrough behavior. M364 was restored after a later M366 exception report. This packaging operation is not a fresh post-rollback game stability test.
 
+Hosted CI was run twice and the same asynchronous drain stress case failed both times (74/75 main cases); local publication checks passed 75 main + 20 helper cases. The selected prebuilt artifacts were not altered in response. See BUILD.md for the observable failure and scope.
+
 The release includes compact measurement evidence and test output, not private game assets, memory dumps, system-wide traces, local credentials or AI model weights. Third-party components retain their own licensing; see [DEPENDENCIES.md](DEPENDENCIES.md).

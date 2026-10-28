@@ -18,6 +18,8 @@ Historical unique neural completions increased from **26.699/s to 33.451/s (~25.
 
 Sixfold means requesting up to five generated frames per real frame, not sixfold input responsiveness or verified physical scanout. Visible pacing and latency remain imperfect. Post-generation buffering of six completed images is not implemented. M365 was withdrawn; M366/M367 experiments are excluded.
 
+Publication checks passed locally (75 main + 20 helper cases). Two GitHub-hosted runs each passed 74/75 main cases: the fine-capacity recording stress fixture timed out during asynchronous drain. The root cause remains unverified; cloud helper tests were not reached. This limitation is retained publicly, not hidden by skipping the test. See [CI](https://github.com/wc2395082443-del/MGPU-for-NTE/actions/runs/40768218148).
+
 ![Measured five frames](docs/nte/figures/five-frames.svg)
 
 The figure uses a historical measured M340 five-frame window, not an idealized schedule or a measurement of this release. It retains actual timing overlaps and explicitly distinguishes query coverage from exclusive rendering execution.

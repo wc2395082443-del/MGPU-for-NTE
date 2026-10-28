@@ -12,3 +12,9 @@ The exact helper is currently RTX 5080-only. Tested game SHA256:
 `032EB661CE65E0669FB643A2E87E727D5574BBA832CD6FE34FF0AB1D134CD788`.
 
 No anti-cheat bypass, automatic driver tuning, game launch, model download or game-setting replacement is provided.
+
+## Validation limitation / 验证限制
+
+Local publication build: 75/75 main tests and 20/20 helper tests passed; package install/rollback, integrity and viewer checks passed. GitHub-hosted source compilation passed, but both CI attempts passed only 74/75 main cases: `mgpu_nonblocking_fine_capacity_warp_test` timed out during asynchronous drain, before cloud helper tests were reached. The cause is not established. The test was not skipped or weakened, and the archived M364/M363 release binaries are unchanged. [CI evidence](https://github.com/wc2395082443-del/MGPU-for-NTE/actions/runs/40768218148).
+
+本地源码75＋20项通过；云端两次均为主工程74/75，采集压力测试排空超时，helper云端测试未执行。未降低断言或反复重试刷绿。请把首发当作带已知诊断测试限制的预览版，不视为所有环境稳定性保证。
