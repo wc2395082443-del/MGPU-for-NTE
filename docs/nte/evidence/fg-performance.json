@@ -97,6 +97,16 @@
       "metric": "NR-stage processing throughput"
     }
   ],
+  "user_reported_dual_gpu_optimization": {
+    "date_supplied": "2026-10-29",
+    "source": "User optimization-history observation",
+    "scope": "Base-frame figures from optimization history",
+    "game_gpu": "RTX 4080 SUPER",
+    "nr_gpu": "RTX 5080",
+    "before_fps_approximately": 28,
+    "after_fps_approximately": 34,
+    "increase_percent_approximately": 21.4
+  },
   "frame_generation_implementation": {
     "algorithm_provider": "NVIDIA",
     "runtime": "Official Streamline / DLSS-G",

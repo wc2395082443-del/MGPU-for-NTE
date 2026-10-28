@@ -8,21 +8,36 @@ The RTX 4080 SUPER renders the game and runs its game-side DLSS super resolution
 
 **Sixfold frame generation uses NVIDIA's official DLSS Frame Generation runtime through Streamline/DLSS-G, rather than Lossless Scaling. The user's latest feedback describes the visual result as excellent.** This project connects the NR image and guides to that runtime and manages the output window.
 
-## User-reported gameplay comparison
+## Performance: single GPU, dual-GPU optimization, then sixfold generation
 
 The user's NTE gameplay and NR-stage figures:
 
-| Setup | Game GPU | NR/FG GPU | Game DLSS mode | FG request | User-reported result |
-| --- | --- | --- | --- | --- | --- |
-| Before the dual-GPU adaptation | RTX 5080 | None | Ultra Performance | 6x | Approximately 120 |
-| Dual-GPU setup | **RTX 4080 SUPER (not RTX 50-series)** | **RTX 5080** | **Quality** | 6x | **User reports stable above 160** |
-| Single 4080S, DLSS neural rendering enabled | RTX 4080 SUPER | None | Quality | Off | **Approximately 22 FPS at maximum settings + full ray tracing** |
-| Single 4080S, DLSS neural rendering disabled | RTX 4080 SUPER | None | — | Off | **Approximately 40 FPS** |
-| RTX 5080 running only NR | — | RTX 5080 | — | — | **Approximately 50 NR frames/s** |
+### 1. Single-GPU and workload references
+
+| GPU | Workload | User-reported result |
+| --- | --- | --- |
+| RTX 4080 SUPER | Game rendering, neural rendering disabled | **Approximately 40 FPS** |
+| RTX 4080 SUPER | Game + NR, DLSS Quality, maximum settings and full ray tracing | **Approximately 22 FPS** |
+| RTX 5080 | NR stage only | **Approximately 50 NR frames/s** |
 
 The 4080S records approximately 40 FPS with neural rendering disabled and 22 FPS while running the game and NR together. The 5080-only NR figure describes processing throughput for the neural stage.
 
-These figures were supplied by the user on 2026-10-29, with settings shown in the table. The setup demonstrates a non-50-series primary GPU. The first-release helper supports RTX 5080; other primary and secondary GPUs require adaptation and testing.
+### 2. Dual-GPU DLSS neural rendering: base-frame improvement
+
+| GPU assignment | Before optimization | After optimization |
+| --- | ---: | ---: |
+| **4080S game rendering + 5080 NR** | **Approximately 28 FPS** | **Approximately 34 FPS** |
+
+These optimization-stage figures show an approximately **21.4%** base-frame increase.
+
+### 3. NVIDIA official sixfold frame generation
+
+| Setup | Game GPU | NR/FG GPU | Game DLSS mode | FG request | User-reported display FPS |
+| --- | --- | --- | --- | --- | --- |
+| Single RTX 5080 | RTX 5080 | None | Ultra Performance | 6x | Approximately 120 |
+| **Dual-GPU setup** | **RTX 4080 SUPER** | **RTX 5080** | **Quality** | 6x | **Stable above 160** |
+
+Figures were supplied by the user on 2026-10-29. This setup demonstrates a non-50-series primary GPU. The first-release helper supports RTX 5080; other GPU combinations require adaptation and testing.
 
 ## Helper responsibilities and FG overhead
 
