@@ -46,5 +46,6 @@ M366曾获更流畅反馈但无明显基础帧增益，之后收到启动异常�
 - [M340五帧原始图数据](evidence/m340-five-frames.json)
 - [M364软件测试](evidence/m364-tests.txt)、[M363软件测试](evidence/m363-tests.txt)
 - [交互时间线](five-frame-timeline.html)
+- [优化前后五帧对比](five-frame-comparison.html)、[选择与尺度说明](COMPARISON.zh-CN.md)、[三组精简时标](evidence/five-frame-comparison.json)
 
 本页每一项FPS主张都明确是基础帧/NR、提交、SDK计数或显示事件；没有将任一种自动替代另一种。

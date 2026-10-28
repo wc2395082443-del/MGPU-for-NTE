@@ -20,9 +20,13 @@ Sixfold means requesting up to five generated frames per real frame, not sixfold
 
 Publication checks passed locally (75 main + 20 helper cases). Two GitHub-hosted runs each passed 74/75 main cases: the fine-capacity recording stress fixture timed out during asynchronous drain. The root cause remains unverified; cloud helper tests were not reached. This limitation is retained publicly, not hidden by skipping the test. See [CI](https://github.com/wc2395082443-del/MGPU-for-NTE/actions/runs/40768218148).
 
-![Measured five frames](docs/nte/figures/five-frames.svg)
+![Before and after, five measured cycles on one scale](docs/nte/figures/five-frame-comparison.svg)
 
-The figure uses a historical measured M340 five-frame window, not an idealized schedule or a measurement of this release. It retains actual timing overlaps and explicitly distinguishes query coverage from exclusive rendering execution.
+Five source-ready cycles span **190.184ms before (M339c) versus 151.709ms after (historical M340 + ForceTagging)**, on the same millisecond scale. These are separate captures, not a controlled single-variable A/B or a measurement of the current release. Both already overlap neural rendering with source DIRECT work.
+
+![Staged COPY handoff detail](docs/nte/figures/copy-handoff-comparison.svg)
+
+The direct transport change is receiving color while the producer is still sending guides. [Interactive comparison](docs/nte/five-frame-comparison.html) (download and open locally) includes exact tooltips, lane controls, JSON export and a separately labelled M364 + M363 instrumented five-frame window. Current heavy-instrumentation results are not substituted for the historical improvement or compared as a clean FPS A/B. See [selection and limitations](docs/nte/COMPARISON.zh-CN.md).
 
 ## Distribution
 

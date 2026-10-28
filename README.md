@@ -32,9 +32,26 @@
 
 ## 五帧流水线
 
-![Measured five-frame pipeline](docs/nte/figures/five-frames.svg)
+![优化前后五帧流水线，同一毫秒刻度](docs/nte/figures/five-frame-comparison.svg)
 
-[打开离线交互图](docs/nte/five-frame-timeline.html)（下载 HTML 后本地打开）。图来自 **M340 已测五帧**，不是假设的理想流水线，也不是 M364 性能承诺。COPY 和 NR 的重叠按实测时标绘制；游戏命令队列区间不等于纯渲染执行。另见 [架构与改动](docs/nte/ARCHITECTURE.zh-CN.md)。
+**优化前 M339c：五周期190.184ms；历史改进后 M340＋ForceTagging：151.709ms。** 两图使用完全相同的毫秒刻度，保留前一帧尾部和F5之后的后处理。不是严格同场景单变量A/B，不能将全部差异都算成COPY收益。
+
+![收发COPY交接放大](docs/nte/figures/copy-handoff-comparison.svg)
+
+直接变化是：原来整包发完再接收；改进后可在发送深度/运动矢量时，5080已经接收颜色。两版原先就有NR与游戏DIRECT重叠，不能称“原来全串行、现在全并行”。
+
+[下载离线交互对比图](docs/nte/five-frame-comparison.html) · [数据选择与限制](docs/nte/COMPARISON.zh-CN.md) · [原M340单图](docs/nte/five-frame-timeline.html)。HTML下载后本地打开，支持悬停、轨道/F0/边界开关和数据导出。
+
+<details>
+<summary>首发M364＋M363的独立五帧实测（详细采集开启，不用于收益归因）</summary>
+
+![M364与M363重采集窗口](docs/nte/figures/m364-instrumented-five-frames.svg)
+
+该窗口五周期228.463ms，测量负载与历史窗口不同；整轮main记录丢1条，867个fine任务截断。它不冒充历史33.45/s窗口，也不能直接用来推断未开详细测量的版本退化。没有可验证的六张生成帧扫描时标，故不伪造六条显示帧。
+
+</details>
+
+另见 [架构与改动](docs/nte/ARCHITECTURE.zh-CN.md)。
 
 ## 下载与安装
 
