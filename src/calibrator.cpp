@@ -40,6 +40,7 @@
 // ---------------------------------------------------------------------------
 
 #include "calibrator.hpp"
+#include "game_work_trace.hpp"
 #include "diag.hpp"
 #include "fg_map.hpp"   // D2.0 NR step one (NRFrameFilter=1), read only; off = one load per call site
 #include "t119_keys.hpp"   // R300 (T1.19, Dom): R300b SceneHandleSet, R300f2 FeatureDiag - absent = off
@@ -188,6 +189,7 @@ std::atomic<unsigned long long> g_gpa_calls{0};    // GetProcAddress seen
 std::atomic<unsigned long long> g_resolved{0};     // times NGX eval handed out
 std::atomic<unsigned long long> g_evals{0};        // evaluates intercepted
 std::atomic<unsigned long long> g_captures{0};     // evaluates we read
+std::atomic<unsigned long long> g_camera_sequence{0};
 // R283: the thread of the evaluates capture() reads (own_reflex's thread guard).
 std::atomic<unsigned long> g_eval_tid_first{0}, g_eval_tid_last{0};
 std::atomic<unsigned>      g_eval_tid_changes{0};
@@ -608,10 +610,11 @@ void capture(const NVSDK_NGX_Parameter *p)
 // for EVERY feature that evaluates - the frame-gen feature (id 11) included,
 // which the copy below skips on purpose (R135). Reads only: nothing published
 // into g_tbl, nothing copied, the evaluate itself untouched.
-void fgmap_tap(const NVSDK_NGX_Handle *h, const NVSDK_NGX_Parameter *p)
+void fgmap_tap(const NVSDK_NGX_Handle *h, const NVSDK_NGX_Parameter *p, bool succeeded)
 {
     if (p == nullptr) return;
     mgpu::fgmap::eval_rec r{};
+    r.succeeded = succeeded;
     const unsigned long long hv = (unsigned long long)(uintptr_t)h;
     r.scene = g_handle_known.load(std::memory_order_relaxed) && is_latched_scene_handle(hv);
     if (get_res(p, K_COLOR,  r.color))  r.have |= 1u;
@@ -656,6 +659,83 @@ void fgmap_tap(const NVSDK_NGX_Handle *h, const NVSDK_NGX_Parameter *p)
                 r.g_have |= 1u << 15;
             }
         }
+
+        auto read_matrix = [&](const char *name, float *destination) -> bool
+        {
+            void *matrix = nullptr;
+            if (!ok(p->Get(name, &matrix)) || matrix == nullptr) return false;
+            memcpy(destination, matrix, sizeof(float) * 16u);
+            return true;
+        };
+        const bool matrices =
+            read_matrix(NVSDK_NGX_DLSSG_Parameter_CameraViewToClip, r.camera.camera_view_to_clip) &&
+            read_matrix(NVSDK_NGX_DLSSG_Parameter_ClipToCameraView, r.camera.clip_to_camera_view) &&
+            read_matrix(NVSDK_NGX_DLSSG_Parameter_ClipToLensClip, r.camera.clip_to_lens_clip) &&
+            read_matrix(NVSDK_NGX_DLSSG_Parameter_ClipToPrevClip, r.camera.clip_to_prev_clip) &&
+            read_matrix(NVSDK_NGX_DLSSG_Parameter_PrevClipToClip, r.camera.prev_clip_to_clip);
+        const bool scalars =
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_JitterOffsetX, r.camera.jitter[0]) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_JitterOffsetY, r.camera.jitter[1]) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_MvecScaleX, r.camera.mvec_scale[0]) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_MvecScaleY, r.camera.mvec_scale[1]) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_CameraPinholeOffsetX, r.camera.pinhole_offset[0]) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_CameraPinholeOffsetY, r.camera.pinhole_offset[1]) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_CameraPosX, r.camera.camera_pos[0]) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_CameraPosY, r.camera.camera_pos[1]) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_CameraPosZ, r.camera.camera_pos[2]) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_CameraUpX, r.camera.camera_up[0]) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_CameraUpY, r.camera.camera_up[1]) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_CameraUpZ, r.camera.camera_up[2]) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_CameraRightX, r.camera.camera_right[0]) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_CameraRightY, r.camera.camera_right[1]) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_CameraRightZ, r.camera.camera_right[2]) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_CameraFwdX, r.camera.camera_fwd[0]) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_CameraFwdY, r.camera.camera_fwd[1]) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_CameraFwdZ, r.camera.camera_fwd[2]) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_CameraNear, r.camera.camera_near) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_CameraFar, r.camera.camera_far) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_CameraFOV, r.camera.camera_fov) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_CameraAspectRatio, r.camera.camera_aspect);
+        const bool flags =
+            get_u(p, NVSDK_NGX_DLSSG_Parameter_ColorBuffersHDR, r.camera.color_buffers_hdr) &&
+            get_u(p, NVSDK_NGX_DLSSG_Parameter_DepthInverted, r.camera.depth_inverted) &&
+            get_u(p, NVSDK_NGX_DLSSG_Parameter_CameraMotionIncluded, r.camera.camera_motion_included) &&
+            get_u(p, NVSDK_NGX_DLSSG_Parameter_Reset, r.camera.reset) &&
+            get_u(p, NVSDK_NGX_DLSSG_Parameter_AutomodeOverrideReset, r.camera.automode_override_reset) &&
+            get_u(p, NVSDK_NGX_DLSSG_Parameter_NotRenderingGameFrames, r.camera.not_rendering_game_frames) &&
+            get_u(p, NVSDK_NGX_DLSSG_Parameter_OrthoProjection, r.camera.ortho_projection) &&
+            get_f(p, NVSDK_NGX_DLSSG_Parameter_MvecInvalidValue, r.camera.motion_vectors_invalid_value) &&
+            get_u(p, NVSDK_NGX_DLSSG_Parameter_MvecDilated, r.camera.motion_vectors_dilated) &&
+            get_u(p, NVSDK_NGX_DLSSG_Parameter_MenuDetectionEnabled, r.camera.menu_detection_enabled);
+        const bool subrects =
+            get_u(p, NVSDK_NGX_DLSSG_Parameter_MVecsSubrectWidth, r.camera.mvec_subrect_width) &&
+            get_u(p, NVSDK_NGX_DLSSG_Parameter_MVecsSubrectHeight, r.camera.mvec_subrect_height) &&
+            get_u(p, NVSDK_NGX_DLSSG_Parameter_DepthSubrectWidth, r.camera.depth_subrect_width) &&
+            get_u(p, NVSDK_NGX_DLSSG_Parameter_DepthSubrectHeight, r.camera.depth_subrect_height) &&
+            get_u(p, NVSDK_NGX_DLSSG_Parameter_MVecsSubrectBaseX, r.camera.mvec_subrect_x) &&
+            get_u(p, NVSDK_NGX_DLSSG_Parameter_MVecsSubrectBaseY, r.camera.mvec_subrect_y) &&
+            get_u(p, NVSDK_NGX_DLSSG_Parameter_DepthSubrectBaseX, r.camera.depth_subrect_x) &&
+            get_u(p, NVSDK_NGX_DLSSG_Parameter_DepthSubrectBaseY, r.camera.depth_subrect_y) &&
+            get_u(p, NVSDK_NGX_DLSSG_Parameter_MvecJittered, r.camera.mvec_jittered);
+        if (matrices && scalars && flags && subrects)
+        {
+            unsigned long long id = 0;
+            (void)p->Get(NVSDK_NGX_DLSSG_Parameter_BackbufferFrameID, &id);
+            LARGE_INTEGER now{}, frequency{};
+            QueryPerformanceCounter(&now);
+            QueryPerformanceFrequency(&frequency);
+            if (frequency.QuadPart > 0)
+            {
+                r.camera.frame_id = id != 0ull
+                    ? id
+                    : g_camera_sequence.fetch_add(1ull, std::memory_order_relaxed) + 1ull;
+                r.camera.capture_ns = static_cast<unsigned long long>(
+                    (static_cast<double>(now.QuadPart) * 1000000000.0) /
+                    static_cast<double>(frequency.QuadPart));
+                r.camera.valid = r.camera.capture_ns != 0ull ? 1u : 0u;
+                r.camera_valid = r.camera.valid;
+            }
+        }
     }
     mgpu::fgmap::on_evaluate(hv, r);
 }
@@ -674,9 +754,6 @@ NVSDK_NGX_Result NVSDK_CONV hook_evaluate(ID3D12GraphicsCommandList *cl,
                                           void *cb)
 {
     g_evals.fetch_add(1, std::memory_order_relaxed);
-
-    // D2.0 NR step one. Off: one load.
-    if (mgpu::fgmap::on()) fgmap_tap(h, p);
 
     const int m = g_mode.load(std::memory_order_relaxed);
     if (m != 0)
@@ -809,7 +886,13 @@ NVSDK_NGX_Result NVSDK_CONV hook_evaluate(ID3D12GraphicsCommandList *cl,
         }
     }
     if (g_real_eval == nullptr) return NVSDK_NGX_Result_Fail;
-    return g_real_eval(cl, h, p, cb);
+    mgpu::game_work::marker(cl, mgpu::game_work::phase::ngx_begin,
+        (UINT64)(uintptr_t)h);
+    const auto result = g_real_eval(cl, h, p, cb);
+    mgpu::game_work::marker(cl, mgpu::game_work::phase::ngx_end,
+        (UINT64)(uintptr_t)h);
+    if (mgpu::fgmap::on()) fgmap_tap(h, p, result == NVSDK_NGX_Result_Success);
+    return result;
 }
 
 // ---- R183: COUNT THE RELEASES, AND GET OUT OF THE WAY ----
@@ -824,7 +907,9 @@ NVSDK_NGX_Result NVSDK_CONV hook_evaluate(ID3D12GraphicsCommandList *cl,
 // pair that never completes is a different shape from one that never started.
 NVSDK_NGX_Result NVSDK_CONV hook_release(NVSDK_NGX_Handle *h)
 {
+    mgpu::game_work::feature_released((UINT64)(uintptr_t)h);
     g_releases.fetch_add(1, std::memory_order_relaxed);
+    mgpu::fgmap::on_release((unsigned long long)(uintptr_t)h);
 
     // R180. BEFORE the real release, while the handle value is still the one
     // the evaluate filter is comparing against. Afterwards the pointer may be
@@ -890,6 +975,8 @@ NVSDK_NGX_Result NVSDK_CONV hook_release(NVSDK_NGX_Handle *h)
 static void after_create(NVSDK_NGX_Feature id, NVSDK_NGX_Parameter *p,
                          NVSDK_NGX_Handle **out, NVSDK_NGX_Result r)
 {
+    if (ok(r) && out != nullptr && *out != nullptr)
+        mgpu::game_work::feature_created((UINT64)(uintptr_t)*out, unsigned(id));
     // ---- R300f2 (T1.15, FeatureDiag=1 only): EVERY CREATE, WITH ITS PARAMETERS ----
     // R134 below names an id the FIRST time only. Measured (Dom, Starfield): the game creates and releases
     // DLSS features repeatedly, and after one burst it stopped calling Evaluate for minutes. One line per
@@ -1064,7 +1151,6 @@ NVSDK_NGX_Result NVSDK_CONV hook_evaluate11(ID3D11DeviceContext *ctx,
 {
     g_evals.fetch_add(1, std::memory_order_relaxed);
     g_evals11.fetch_add(1, std::memory_order_relaxed);
-    if (mgpu::fgmap::on()) fgmap_tap(h, p);
 
     const int m = g_mode.load(std::memory_order_relaxed);
     if (m != 0)
@@ -1118,12 +1204,15 @@ NVSDK_NGX_Result NVSDK_CONV hook_evaluate11(ID3D11DeviceContext *ctx,
         }
     }
     if (g_real_eval11 == nullptr) return NVSDK_NGX_Result_Fail;
-    return g_real_eval11(ctx, h, p, cb);
+    const auto result = g_real_eval11(ctx, h, p, cb);
+    if (mgpu::fgmap::on()) fgmap_tap(h, p, result == NVSDK_NGX_Result_Success);
+    return result;
 }
 
 NVSDK_NGX_Result NVSDK_CONV hook_release11(NVSDK_NGX_Handle *h)
 {
     g_releases.fetch_add(1, std::memory_order_relaxed);
+    mgpu::fgmap::on_release((unsigned long long)(uintptr_t)h);
     unlatch_scene_handle((unsigned long long)(uintptr_t)h);
     if (g_real_release11 == nullptr)
     {

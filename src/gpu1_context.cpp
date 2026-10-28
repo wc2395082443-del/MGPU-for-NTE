@@ -25,6 +25,7 @@
                       // Cumulative include: also brings in dxgi1_2/
                       // dxgi1_3/dxgi.h.
 #include <cstdio>
+#include <cmath>
 #include <cstdlib>   // atoll, malloc/free - used throughout; made explicit for P5.0
 #include <cstring>
 #include <cwchar>    // V45: wcsrchr, for splitting our own module path. Pulled in
@@ -49,15 +50,33 @@
 #include "screen.hpp"   // R108: the idle screen. Compiled since R108, called since V26.
 #include "sl_probe.hpp"   // SL1: is our own device an SL proxy
 #include "t119_keys.hpp"         // R300 (T1.19): Dom's keys, every one absent = off
-#include "startup_trace.hpp" // R313: trace points + DcompSafeMode
 #include "temporal_diag.hpp"     // R300a1 (Dom, T1.9)
 #include "perf_diag.hpp"         // R300e1 (Dom, T1.11)
 #include "feature_diag.hpp"      // R300f1 (Dom, T1.15)
 #include "producer_diag.hpp"     // R300g1 (Dom, T1.16)
 #include "producer_gpu_timers.hpp"   // R300h (Dom, T1.16)
 #include "nr16.hpp"       // R208: experimental FP16 input path. Off unless NRInput16=4
-#include "residual.hpp"   // R316: the residual pass module (own keys, ResidualPass=1|2). Off unless set
 #include "fg_map.hpp"     // D2.0 NR step one: read-only frame-gen vector map. Off unless NRFrameFilter=1 (one load per site)
+#include "../experimental/secondary_fg/dlss_fg_stage.hpp"
+#include "../experimental/official_fg/official_bridge.hpp"
+#include "../experimental/official_fg/output_visibility.hpp"
+#include "../experimental/secondary_fg/camera_contract.hpp"
+#include "motion_source_audit.hpp"
+#include "tagged_motion_policy.hpp"
+#include "tagged_resource_validation.hpp"
+#include "present_read_retirement.hpp"
+#include "aligned_input.hpp"
+#include "neural_pipeline.hpp"
+#include "neural_snapshots.hpp"
+#include "../experimental/secondary_fg/aligned_camera.hpp"
+#include "../experimental/secondary_fg/source_gate.hpp"
+#include "presentation_feedback.hpp"
+#include <memory>
+#include "neural_difference.hpp"
+#include "calibration_policy.hpp"
+#include "gpu_timestamp_span.hpp"
+#include "frame_measurement.hpp"
+#include "queue_dependency_trace.hpp"
 
 // R111. DXGI_STATUS_OCCLUDED comes from dxgi.h by way of <dxgi1_4.h> above.
 // Guarded because it is a SUCCESS code and a build where it went missing
@@ -115,6 +134,8 @@ namespace
         // failure").
         ID3D12CommandQueue *queue = nullptr;
         IDXGISwapChain3 *swapchain = nullptr;
+        std::unique_ptr<mgpu::presentation::feedback> presentation_feedback;
+        UINT swapchain_flags = 0;
         ID3D12DescriptorHeap *rtv_heap = nullptr;
         ID3D12Resource *backbuffer[2] = {};
         // ---- D6: an allocator RING, not a single allocator ----
@@ -145,6 +166,7 @@ namespace
         ID3D12CommandAllocator *allocator[PRESENT_SLOTS] = {};
         ID3D12GraphicsCommandList *command_list[PRESENT_SLOTS] = {};
         UINT64 slot_value[PRESENT_SLOTS] = {};
+        mgpu::present_read::retirement shared_reads;
         ID3D12Fence *fence = nullptr;
         HANDLE fence_event = nullptr;
         UINT64 fence_value = 0;
@@ -302,7 +324,6 @@ bool create_device(const adapter::selection_result &sel)
              "second adapter; game rendering unaffected",
              (unsigned)luid.HighPart, (unsigned)luid.LowPart);
     mgpu::diag::info(line);
-    if (mgpu::strace::on()) { char d[64]; snprintf(d, sizeof d, "GPU 1 luid=0x%08X-0x%08X", (unsigned)luid.HighPart, (unsigned)luid.LowPart); mgpu::strace::ev(mgpu::strace::R_BT, "create-device", d); }   // R313
 
     // SL1. The device exists and nothing has been built on it yet, which
     // is the only moment where the answer is still free. If sl.interposer
@@ -387,7 +408,7 @@ static void *g_dcomp_scale = nullptr;   // IDCompositionScaleTransform, R271
 // launch, at the site that already resizes and commits the chain
 // (present_resize): no file write, no new lock use, no next-launch marker.
 static int   g_dcomp_fit = 0;           // DcompFit: 0 off, 1 on, 2 auto; read once when the chain is created
-namespace { bool ini_read_flag(const char *key); int ini_read_dcomp_fit(); bool ini_has_key(const char *key); int ini_read_depth_transport(); }   // unnamed-namespace readers, defined below (R312 added)
+namespace { bool ini_read_flag(const char *key); int ini_read_dcomp_fit(); bool ini_has_key(const char *key); }   // unnamed-namespace readers, defined below
 // R278: how many velocity candidates the census found eligible (probe.cpp), handed
 // over by dllmain each frame - this file names no probe type.
 std::atomic<unsigned> g_mvec_elig_n{0};
@@ -396,74 +417,6 @@ void set_mvec_eligible_count(unsigned n) { g_mvec_elig_n.store(n, std::memory_or
 // units are uv by construction and the warp test writes nothing: every launch is the same launch.
 std::atomic<bool> g_mvec_x_active{false};
 void set_mvec_extract_active(bool on) { g_mvec_x_active.store(on, std::memory_order_relaxed); }
-// R311d: the judge stepped aside while R280's target was the bound vectors - R280 stands down for the
-// session (mvec_extract reads this every 30 frames and runs its inert path). A title whose extract
-// carries no motion (Far Cry 6) then runs as it did before R307 compiled the extract there: no
-// per-frame dispatch and no staging copies on the game's queue, the zero field bound, the tap learning
-// on the game's own targets as before. RE4 never steps aside; contract titles never arm R280.
-std::atomic<bool> g_mvec_x_stand_down{false};
-bool mvec_extract_stand_down() { return g_mvec_x_stand_down.load(std::memory_order_relaxed); }
-// R307: the sweep (mvec_extract, MVecSweep=1). On: the R258 warp test scores each setting
-// the module puts in force (by its number) and changes nothing - no live scale, no edge
-// choice, no verdict. The scores are logged when the setting changes, with the best so far.
-std::atomic<bool> g_sweep_on{false};
-std::atomic<unsigned> g_sweep_id{0};
-void set_mvec_sweep(bool on) { g_sweep_on.store(on, std::memory_order_relaxed); }
-void set_mvec_sweep_combo(unsigned id) { g_sweep_id.store(id, std::memory_order_relaxed); }
-namespace
-{
-    // Bridge thread only (the R258 block runs there, under s.cs).
-    struct sweep_score { unsigned id = 0, probes = 0, motion = 0, decisive = 0, worse = 0; double ratio_sum = 0.0; unsigned win[13] = {}; };
-    sweep_score g_sw_cur;
-    sweep_score g_sw_done[160]; unsigned g_sw_done_n = 0;
-    const char *const kSweepCand[13] = { "none", "+W,+H", "+W,-H", "-W,+H", "-W,-H", "+W/2,+H/2", "+W/2,-H/2", "-W/2,+H/2", "-W/2,-H/2",
-                                         "+px,+px", "+px,-px", "-px,+px", "-px,-px" };
-    void sweep_close()
-    {
-        if (g_sw_cur.id == 0) return;
-        const sweep_score &c = g_sw_cur;
-        int top = 0; for (int i = 1; i < 13; ++i) if (c.win[i] > c.win[top]) top = i;
-        char l[520];
-        snprintf(l, sizeof l, "[MGPU][R307] SWEEP result #%u: probes=%u, with motion=%u | best/none over the motion probes=%.3f (lower = these vectors explain the motion; 1.0 = no better than none) | decisive=%u (most: %s) | worse than none=%u",
-                 c.id, c.probes, c.motion, c.motion ? c.ratio_sum / c.motion : 0.0, c.decisive, c.decisive ? kSweepCand[top] : "-", c.worse);
-        mgpu::diag::info(l);
-        if (g_sw_done_n < 160u) g_sw_done[g_sw_done_n++] = c;
-        // the three best so far (at least 3 motion probes)
-        int b[3] = { -1, -1, -1 };
-        for (unsigned i = 0; i < g_sw_done_n; ++i)
-        {
-            const sweep_score &d = g_sw_done[i];
-            if (d.motion < 3u) continue;
-            const double r = d.ratio_sum / d.motion;
-            for (int j = 0; j < 3; ++j)
-            {
-                if (b[j] < 0 || r < g_sw_done[b[j]].ratio_sum / g_sw_done[b[j]].motion)
-                { for (int m = 2; m > j; --m) b[m] = b[m - 1]; b[j] = (int)i; break; }
-            }
-        }
-        int at = snprintf(l, sizeof l, "[MGPU][R307] SWEEP best so far (setting #, best/none, decisive):");
-        for (int j = 0; j < 3 && b[j] >= 0 && at > 0 && at < (int)sizeof l - 48; ++j)
-            at += snprintf(l + at, sizeof l - (size_t)at, " #%u %.3f %u", g_sw_done[b[j]].id, g_sw_done[b[j]].ratio_sum / g_sw_done[b[j]].motion, g_sw_done[b[j]].decisive);
-        if (b[0] < 0) snprintf(l + at, sizeof l - (size_t)at, " none yet with 3 motion probes (the score needs camera motion; CTRL+ALT+END marks what your eye sees - R308)");
-        mgpu::diag::info(l);
-        g_sw_cur = sweep_score{};
-    }
-    void sweep_note(unsigned rec_id, double e0, double eb, bool decisive, int bestc, unsigned long long cnt0, unsigned colour_fmt)
-    {
-        const unsigned now = g_sweep_id.load(std::memory_order_relaxed);
-        if (now != g_sw_cur.id) { sweep_close(); g_sw_cur.id = now; }
-        if (rec_id != now) return;   // recorded under another setting: not scored
-        ++g_sw_cur.probes;
-        const double still = (colour_fmt == 10u) ? 0.02 : 2.0;   // RGBA16F luminance sums are ~100x smaller than 8-bit ones
-        if (cnt0 > 1000ull && e0 >= still)
-        {
-            ++g_sw_cur.motion;
-            g_sw_cur.ratio_sum += (e0 > 0.0) ? eb / e0 : 1.0;
-            if (eb > e0 * 1.10) ++g_sw_cur.worse;
-        }
-        if (decisive) { ++g_sw_cur.decisive; if (bestc >= 0 && bestc < 13) ++g_sw_cur.win[bestc]; }
-    }
-}
 // R280e: the judge's choice of write edge (0 last, 1 first) and the module's report of
 // how many write edges the last frame had. The judge alternates while undecided.
 std::atomic<int> g_mvec_x_edge_req{0};
@@ -475,72 +428,18 @@ std::atomic<bool> g_mvec_x_deciding{false};   // R280j
 // concurrently on another thread is never mistaken for the tap's.
 static thread_local bool t_tap_copy_scope = false;
 void tap_copy_scope(bool on) { t_tap_copy_scope = on; }
-// R312 (DepthTransport >= 2). The geometry dllmain pushed into the tap's .fx; the arm holds
-// for depth until the tap's resource matches it (the push reloads the effect, and the old
-// resource is what the arm would otherwise size from). Key absent: never set, the hold
-// below never engages. Written on the game's finish_effects thread, read on the same.
-static std::atomic<unsigned> g_r312_w{0}, g_r312_h{0}, g_r312_fmt{0};
-static std::atomic<bool> g_r312_set{false};
-int depth_transport() { return ini_read_depth_transport(); }
-// R315 (MVecBarrierSource=1). dllmain hands the probe's key and fire count over each game frame
-// (this file does not include the probe's header - the acquisition layer stays independent).
-static std::atomic<int> g_r315_on{0};
-static std::atomic<unsigned long long> g_r315_fires{0};
-void r315_note(int on, unsigned long long fires)
-{
-    g_r315_on.store(on, std::memory_order_relaxed); g_r315_fires.store(fires, std::memory_order_relaxed);
-}
-// R315b (MVecBarrierSource=2). The judge's phase, read on the game's thread every frame and
-// written on the bridge thread at a decision. WINDOW: the transition copy delivers (region 1)
-// and the tail copy lands beside it (region 2) for the compare. TAIL: the transition match is
-// off and the tail copy delivers. TRANSITION: as value 1. The tail scope marks the tail copy
-// inside stream_mvec_copy, like the tap's scope.
-// R315b fix 3: the REFERENCE in the window is the evaluate copy (the bytes DLSS consumed), not the
-// transition copy - run 3 showed a fixed 76-texel patch between the two and neither side of that
-// pair is known right. The fallback verdict is therefore the evaluate route (today's path).
-enum { R315_WINDOW = 0, R315_TAIL = 1, R315_EVALUATE = 2 };
-static std::atomic<int> g_r315_phase{R315_WINDOW};
-// R323 (HistoryGate=1): dllmain's per-game-frame fact - did the game's own DLSS evaluate for this
-// frame (1), not (0), or is there no table on this title to tell (-1). Stamped on the seal's slot by
-// the producer; the consumer sends DLSSNR.Reset=1 on every pass for a frame without, and once more on
-// the first frame with it again. A menu, a video or a loading screen builds no history at any fps.
-// Key absent: g_hist_gate is 0, the stamp is never read, nothing else runs.
-static std::atomic<int> g_game_dlss{-1};
-static std::atomic<int> g_hist_gate{0};
-void note_game_dlss(int evaluated) { g_game_dlss.store(evaluated, std::memory_order_relaxed); }
-int  history_gate() { return g_hist_gate.load(std::memory_order_relaxed); }
-static thread_local bool t_r315_tail = false;
-int  r315_phase() { return g_r315_phase.load(std::memory_order_relaxed); }
-void r315_tail_scope(bool on) { t_r315_tail = on; }
-void r312_set_target(unsigned w, unsigned h, unsigned fmt)
-{
-    g_r312_w.store(w, std::memory_order_relaxed); g_r312_h.store(h, std::memory_order_relaxed);
-    g_r312_fmt.store(fmt, std::memory_order_relaxed); g_r312_set.store(true, std::memory_order_release);
-}
 // T1.19 R300d (his R221; SLTagsCapture only). Set by stream_mvec_copy_tagged around its call and read by
 // stream_mvec_copy right around the copy, so the transition to COPY_SOURCE is recorded ONLY when the copy
 // itself is - after every guard in stream_mvec_copy has passed. Key absent: never set, one TLS load per copy.
 static thread_local bool     t_t119_tag_barrier = false;
+static thread_local bool     t_tag_capture_scope = false;
 static thread_local unsigned t_t119_tag_state = 0u;
+static thread_local mgpu::motion_packet::identity t_tag_engine{};
 bool game_contract_seen()   // R280k
 {
     if (mgpu::calibrator::game_ngx_init_seen()) return true;
     mgpu::calibrator::table ct;
     return mgpu::calibrator::read(ct) && ct.have != 0u;
-}
-// R311. MVecSource: 0 (absent) the path as before; 1 R280's extract, 2 the velocity tap,
-// 3 the zero field - each ALSO on a title with an NGX contract (that is what the key is
-// for: the tap / R280 path can be run and judged on a title whose own vectors are known
-// good, and a title on a non-NVIDIA game card can be told which rung to take). Stored
-// from the file read at the hold (r309::read_keys) and at R280's arm (mvec_source_mode),
-// whichever comes first. vectors_contract() is game_contract_seen() for the VECTOR path
-// only: with the key absent it returns exactly what game_contract_seen() returns. Depth,
-// the calibrator and every other reader keep calling game_contract_seen() directly.
-std::atomic<int> g_r311_src{0};
-int mvec_source_in_force() { return g_r311_src.load(std::memory_order_relaxed); }
-bool vectors_contract()
-{
-    return game_contract_seen() && g_r311_src.load(std::memory_order_relaxed) == 0;
 }
 void set_mvec_extract_deciding(bool on) { g_mvec_x_deciding.store(on, std::memory_order_relaxed); }
 // R278b: the tap the learning turned on for this session (0 = none). dllmain reads it each frame.
@@ -607,6 +506,8 @@ static void *g_dcomp_d3d11  = nullptr;
 // [OURS] atomic: written on the bridge thread, read from the game's overlay
 // callback by dcomp_visual_rooted().
 static std::atomic<bool> g_dcomp_rooted{false};
+static std::atomic<bool> g_output_overlay_closed{true}, g_output_peek_hidden{false};
+static std::atomic<unsigned> g_output_view_mode{0};
 
 // The game's HWND, pushed from dllmain's on_init_swapchain once the swapchain
 // has been confirmed to be the GAME's by LUID. Authoritative: it is the window
@@ -660,24 +561,8 @@ static bool dcomp_set_rooted(bool want, const char *why)
     IDCompositionVisual *visual = (IDCompositionVisual *)g_dcomp_visual;
     IDCompositionDevice *dcomp  = (IDCompositionDevice *)g_dcomp_device;
 
-    // R313: which thread is committing, and how long DWM took. One relaxed load when off.
-    const bool r313 = mgpu::strace::on();
-    const double r313_t0 = r313 ? mgpu::strace::now_ms() : 0.0;
-    const mgpu::strace::role r313_role = mgpu::strace::is_bridge_thread() ? mgpu::strace::R_BT : mgpu::strace::R_GT_OVERLAY;
     HRESULT hr = target->SetRoot(want ? visual : nullptr);
     if (SUCCEEDED(hr)) hr = dcomp->Commit();
-    // R313 DcompSafeMode=3: serialized with DWM - the call returns only when the
-    // compositor has the tree. Key absent: the Commit stays asynchronous as shipped.
-    HRESULT r313_wait = S_OK;
-    if (SUCCEEDED(hr) && mgpu::strace::safe_mode() == 3)
-        r313_wait = dcomp->WaitForCommitCompletion();
-    if (r313)
-    {
-        char d[96];
-        snprintf(d, sizeof d, "%s -> %s: SetRoot+Commit %.2f ms%s", why, want ? "ROOT" : "UNROOT", mgpu::strace::now_ms() - r313_t0,
-                 mgpu::strace::safe_mode() == 3 ? " (waited for DWM)" : "");
-        mgpu::strace::ev(r313_role, "set-root", d, (unsigned)(FAILED(hr) ? hr : r313_wait));
-    }
     if (FAILED(hr))
     {
         char e[320];
@@ -706,49 +591,10 @@ static bool dcomp_set_rooted(bool want, const char *why)
 
 // V53. Called on the FIRST frame that carries neural output, from the same
 // one-shot the P5.0 line uses. Before this the operator sees the game.
-// R313 DcompSafeMode: the overlay thread's request and the value-3 deferred
-// root, both applied by the bridge thread in dcomp_apply_pending() (called
-// every loop pass from worker.cpp; two relaxed loads when nothing is pending).
-static std::atomic<int> g_r313_root_req{-1};      // -1 none, 0 unroot, 1 root (DcompSafeMode>=1: the overlay thread asks, BT does)
-static std::atomic<int> g_r313_root_deferred{0};  // 1 = root once the game's chain has been quiet (DcompSafeMode=3)
-static bool r313_quiet_enough()
-{
-    return mgpu::adapter::ms_since_last_swapchain_event() >= (unsigned long long)mgpu::strace::safe_quiet_ms();
-}
 void dcomp_root_on_first_neural_frame()
 {
-    if (mgpu::strace::safe_mode() == 3 && !r313_quiet_enough())
-    {
-        g_r313_root_deferred.store(1, std::memory_order_relaxed);
-        char l[300];
-        snprintf(l, sizeof l,
-                 "[MGPU][R313] DcompSafeMode=3: first neural frame, but the game's chain had a swap-chain event %llu ms ago "
-                 "(< DcompSafeQuietMs=%u). The visual stays UNROOTED until the chain has been quiet that long; you see the game.",
-                 mgpu::adapter::ms_since_last_swapchain_event(), mgpu::strace::safe_quiet_ms());
-        mgpu::diag::info(l);
-        return;
-    }
-    (void)dcomp_set_rooted(true, "first neural frame");
-}
-void dcomp_apply_pending()
-{
-    const int req = g_r313_root_req.load(std::memory_order_relaxed);
-    if (req != -1)
-    {
-        g_r313_root_req.store(-1, std::memory_order_relaxed);
-        if (req == 0) g_r313_root_deferred.store(0, std::memory_order_relaxed);   // overlay open: a deferred root must not cover it
-        if (req == 1 && mgpu::strace::safe_mode() == 3 && !r313_quiet_enough())
-            g_r313_root_deferred.store(1, std::memory_order_relaxed);
-        else
-            dcomp_set_visible(req == 1);
-    }
-    if (g_r313_root_deferred.load(std::memory_order_relaxed) != 0 && r313_quiet_enough())
-    {
-        g_r313_root_deferred.store(0, std::memory_order_relaxed);
-        bool shown = false;
-        { auto &S = st(); std::lock_guard<std::mutex> lk(S.cs); shown = S.neural_shown; }
-        if (shown) (void)dcomp_set_rooted(true, "root after a quiet game chain (DcompSafeMode=3)");
-    }
+    if (mgpu::official_bridge::selected()) { sync_official_output_visibility(); return; }
+    (void)dcomp_set_rooted(!mgpu::official_bridge::inspect().presenting, "neural output owner");
 }
 
 // V65. Overlay opens, the visual unroots and you get the GAME's overlay: real
@@ -758,14 +604,9 @@ void dcomp_apply_pending()
 // header at the top of this file for what was tried instead.
 void dcomp_set_visible(bool on)
 {
-    // R313 DcompSafeMode>=1: never from a game thread. The overlay handler
-    // leaves a request; the bridge thread applies it on its next loop pass
-    // (dcomp_apply_pending). Key absent: this call runs here as shipped.
-    if (mgpu::strace::safe_mode() >= 1 && !mgpu::strace::is_bridge_thread())
-    {
-        g_r313_root_req.store(on ? 1 : 0, std::memory_order_relaxed);
-        return;
-    }
+    g_output_overlay_closed.store(on);
+    if (mgpu::official_bridge::selected()) return;
+    mgpu::official_bridge::set_visible(on);
     // R241a. Before the first neural frame there is nothing of ours worth
     // covering the game with: an overlay-closed before the arm rooted the
     // present chain's stale content over the game (Rise, the 'stuck logo
@@ -781,12 +622,31 @@ void dcomp_set_visible(bool on)
             return;
         }
     }
-    (void)dcomp_set_rooted(on, on ? "overlay closed" : "overlay open");
+    (void)dcomp_set_rooted(on && !mgpu::official_bridge::inspect().presenting, on ? "overlay closed" : "overlay open");
+}
+
+void sync_official_output_visibility()
+{
+    if (!mgpu::official_bridge::selected()) return;
+    const auto state = mgpu::official_bridge::inspect();
+    bool shown = false;
+    { auto &state = st(); std::lock_guard<std::mutex> lock(state.cs); shown = state.neural_shown; }
+    const auto routes = mgpu::official_fg::choose_visible_routes(g_output_overlay_closed.load(),
+        g_output_peek_hidden.load(), g_output_view_mode.load(), shown, state.presenting);
+    mgpu::official_bridge::set_visible(routes.helper);
+    (void)dcomp_set_rooted(routes.fallback, "official/view/overlay visibility owner");
 }
 
 // V52. CTRL+ALT+F6. Returns whether the bridge is on screen AFTER the call.
 bool dcomp_peek_toggle()
 {
+    if (mgpu::official_bridge::selected())
+    {
+        const bool hidden = !g_output_peek_hidden.load();
+        g_output_peek_hidden.store(hidden);
+        sync_official_output_visibility();
+        return !hidden;
+    }
     if (g_dcomp_target == nullptr || g_dcomp_visual == nullptr || g_dcomp_device == nullptr)
         return true;   // not composing: nothing is covering the overlay anyway
     return dcomp_set_rooted(!g_dcomp_rooted, "peek");
@@ -879,12 +739,16 @@ bool create_present_chain(HWND hwnd)
     ID3D12Fence *fence = nullptr;
     HANDLE event = nullptr;
     HRESULT swapchain_hr = E_FAIL;
+    constexpr bool own_pacing = false;
+    auto presentation_feedback = own_pacing ? std::make_unique<mgpu::presentation::feedback>() : nullptr;
+    const UINT swapchain_flags = own_pacing ? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT : 0u;
 
     // Failure cleanup: release everything created so far, in reverse
     // creation order. The device is not released here - it is T3's, and
     // this cycle's thread releases it in its own teardown.
     auto release_all = [&]()
     {
+        presentation_feedback.reset();
         if (event != nullptr)     { CloseHandle(event); event = nullptr; }
         if (fence != nullptr)     { fence->Release(); fence = nullptr; }
         for (unsigned i = 0; i < state::PRESENT_SLOTS; ++i)
@@ -936,17 +800,9 @@ bool create_present_chain(HWND hwnd)
                  "releasing everything created, returning false",
                  call, (unsigned)hr, (void *)hwnd, width, height);
         mgpu::diag::error(line);
-        if (mgpu::strace::on())   // R313: the record at an existing failure site
-        {
-            char w[200];
-            snprintf(w, sizeof w, "create_present_chain failed at %s hr=0x%08X", call, (unsigned)hr);
-            mgpu::strace::ev(mgpu::strace::R_BT, "chain-failed", w, (unsigned)hr);
-            mgpu::strace::record(w, 0u);
-        }
         release_all();
         return false;
     };
-    if (mgpu::strace::on()) mgpu::strace::ev(mgpu::strace::R_BT, "create-present-chain-enter", nullptr);
 
     // 1. Command queue (DIRECT). The swapchain created against it lands
     // on this queue's adapter - the T3 device's adapter (GPU 1).
@@ -1011,7 +867,7 @@ bool create_present_chain(HWND hwnd)
         scd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
         scd.Scaling = DXGI_SCALING_STRETCH;
         scd.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
-        scd.Flags = 0;
+        scd.Flags = swapchain_flags;
 
         // Gotcha 1: the first parameter is the COMMAND QUEUE, not the
         // device. It is named pDevice and typed IUnknown *, so passing
@@ -1042,16 +898,8 @@ bool create_present_chain(HWND hwnd)
         // there for the case where the HWND genuinely never arrives.
         if (dcomp_overlay_mode())
         {
-            const double r313_w0 = mgpu::strace::now_ms();
-            unsigned r313_i = 0;
             for (unsigned i = 0; i < 200u && g_game_hwnd == nullptr; ++i)
-            { Sleep(10); r313_i = i + 1u; }   // up to 2 s
-            if (mgpu::strace::on())
-            {
-                char d[96];
-                snprintf(d, sizeof d, "game hwnd %s after %u x 10 ms (%.1f ms)", g_game_hwnd ? "seen" : "NEVER SEEN", r313_i, mgpu::strace::now_ms() - r313_w0);
-                mgpu::strace::ev(mgpu::strace::R_BT, "game-hwnd-wait", d);
-            }
+                Sleep(10);   // up to 2 s
         }
 
         bool want_dcomp = dcomp_overlay_mode() && g_game_hwnd != nullptr;
@@ -1074,11 +922,13 @@ bool create_present_chain(HWND hwnd)
 
         if (want_dcomp)
         {
+            scd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
             swapchain_hr = factory->CreateSwapChainForComposition(
                 static_cast<IUnknown *>(queue), &scd, nullptr, &sc1);
-            if (mgpu::strace::on()) { mgpu::strace::note_chain_kind(true); mgpu::strace::ev(mgpu::strace::R_BT, "CreateSwapChainForComposition", "GPU 1 queue", (unsigned)swapchain_hr); }
             if (FAILED(swapchain_hr))
                 return fail("CreateSwapChainForComposition", swapchain_hr);
+            mgpu::diag::info("[MGPU][R314] neural composition is explicitly opaque (DXGI_ALPHA_MODE_IGNORE). "
+                             "Neural alpha cannot expose the underlying game image; color processing is unchanged.");
 
             // ---- V50 / V51: THE COMPOSITION DEVICE MUST BE ON GPU 1 ----
             // See the long note at the top of this file. NULL here is legal,
@@ -1110,7 +960,6 @@ bool create_present_chain(HWND hwnd)
                                                &d11, &got, nullptr);
                     gpu1_adapter->Release();
                 }
-                if (mgpu::strace::on()) mgpu::strace::ev(mgpu::strace::R_BT, "D3D11CreateDevice", "on GPU 1 (composition rendering device)", (unsigned)d11_hr);
                 if (SUCCEEDED(d11_hr) && d11 != nullptr)
                 {
                     IDXGIDevice *d11_dxgi = nullptr;
@@ -1122,7 +971,6 @@ bool create_present_chain(HWND hwnd)
                                                       reinterpret_cast<void **>(&dcomp));
                         d11_dxgi->Release();
                         on_gpu1 = SUCCEEDED(hr) && dcomp != nullptr;
-                        if (mgpu::strace::on()) mgpu::strace::ev(mgpu::strace::R_BT, "DCompositionCreateDevice", nullptr, (unsigned)hr);
                     }
                 }
                 // ---- V71: NEVER FALL BACK INTO THE BLACK CONFIGURATION ----
@@ -1210,12 +1058,6 @@ bool create_present_chain(HWND hwnd)
             // exist per window, one topmost and one not.
             IDCompositionTarget *target = nullptr;
             hr = dcomp->CreateTargetForHwnd(g_game_hwnd, TRUE, &target);
-            if (mgpu::strace::on())
-            {
-                char d[96];
-                snprintf(d, sizeof d, "game hwnd=0x%p topmost=TRUE", (void *)g_game_hwnd);
-                mgpu::strace::ev(mgpu::strace::R_BT, "CreateTargetForHwnd", d, (unsigned)hr);
-            }
             if (FAILED(hr))
             {
                 char v49e[720];
@@ -1236,9 +1078,7 @@ bool create_present_chain(HWND hwnd)
             if (SUCCEEDED(hr)) hr = visual->SetContent(sc1);
             // V53: the root is NOT set here. The tree is built and committed
             // empty, and the visual is rooted on the first neural frame.
-            const double r313_c0 = mgpu::strace::now_ms();
             if (SUCCEEDED(hr)) hr = dcomp->Commit();
-            if (mgpu::strace::on()) { char d[64]; snprintf(d, sizeof d, "empty tree, %.2f ms", mgpu::strace::now_ms() - r313_c0); mgpu::strace::ev(mgpu::strace::R_BT, "Commit", d, (unsigned)hr); }
             if (FAILED(hr))
             {
                 if (visual != nullptr) visual->Release();
@@ -1251,12 +1091,9 @@ bool create_present_chain(HWND hwnd)
             // compositor has not looked at yet. These two are the only
             // questions DirectComposition will answer about a tree it has
             // already accepted.
-            const double r313_w0 = mgpu::strace::now_ms();
             const HRESULT wait_hr = dcomp->WaitForCommitCompletion();
-            if (mgpu::strace::on()) { char d[64]; snprintf(d, sizeof d, "%.2f ms inside", mgpu::strace::now_ms() - r313_w0); mgpu::strace::ev(mgpu::strace::R_BT, "WaitForCommitCompletion", d, (unsigned)wait_hr); }
             BOOL dev_ok = FALSE;
             const HRESULT state_hr = dcomp->CheckDeviceState(&dev_ok);
-            if (mgpu::strace::on()) { mgpu::strace::ev(mgpu::strace::R_BT, "CheckDeviceState", dev_ok ? "usable" : "NOT usable", (unsigned)state_hr); }
             {
                 char v51c[560];
                 snprintf(v51c, sizeof v51c,
@@ -1304,7 +1141,6 @@ bool create_present_chain(HWND hwnd)
                              "(stack: ReShade dxgi -> sl.interposer -> BetterConsole -> abort).");
         swapchain_hr = factory->CreateSwapChainForHwnd(
             static_cast<IUnknown *>(queue), hwnd, &scd, nullptr, nullptr, &sc1);
-        if (mgpu::strace::on()) { mgpu::strace::note_chain_kind(false); mgpu::strace::ev(mgpu::strace::R_BT, "CreateSwapChainForHwnd", "bridge window", (unsigned)swapchain_hr); }
         if (FAILED(swapchain_hr))
             return fail("CreateSwapChainForHwnd", swapchain_hr);
         }
@@ -1343,6 +1179,12 @@ bool create_present_chain(HWND hwnd)
             return fail("QueryInterface(IDXGISwapChain3)", qhr);
         sc1->Release();
         sc1 = nullptr;
+        if (presentation_feedback != nullptr)
+        {
+            const HRESULT pacing_status = presentation_feedback->initialize(sc3, own_pacing);
+            if (FAILED(pacing_status)) return fail("app-owned frame latency control", pacing_status);
+            mgpu::diag::info("[MGPU][M347-PRESENT] explicit app-owned waitable swapchain, maximum frame latency=1; game Streamline device untouched");
+        }
     }
 
     // 3. RTV heap: one descriptor per backbuffer - the frame picks the
@@ -1431,6 +1273,8 @@ bool create_present_chain(HWND hwnd)
         S.chain_h = height;
         S.chain_fmt = DXGI_FORMAT_R10G10B10A2_UNORM;   // must match scd.Format above
         S.swapchain = sc3;
+        S.swapchain_flags = swapchain_flags;
+        S.presentation_feedback = std::move(presentation_feedback);
         S.rtv_heap = heap;
         S.backbuffer[0] = back0;
         S.backbuffer[1] = back1;
@@ -1443,6 +1287,7 @@ bool create_present_chain(HWND hwnd)
         S.fence = fence;
         S.fence_event = event;
         S.fence_value = 0;
+        S.shared_reads = {};
         S.present_failed_logged = false;
         // R111. A new chain starts with a clean stall history: the counters
         // describe THIS chain, and carrying them across a rebuild would make
@@ -1476,7 +1321,6 @@ bool create_present_chain(HWND hwnd)
              "hr=0x%08X hwnd=0x%p (vsync present, non-resizable window - no ResizeBuffers at P0)",
              width, height, (unsigned)swapchain_hr, (void *)hwnd);
     mgpu::diag::info(line);
-    if (mgpu::strace::on()) mgpu::strace::ev(mgpu::strace::R_BT, "create-present-chain-exit", "published", (unsigned)swapchain_hr);
     return true;
 }
 
@@ -1493,6 +1337,47 @@ bool create_present_chain(HWND hwnd)
 // path must not take the stream lock - the lock order in this file is one of
 // the two things that can reach the game.
 static std::atomic<unsigned> g_present_vsync{1u};
+static std::atomic<unsigned> g_bridge_poll_unthrottled{0u};
+static std::atomic<bool> g_present_read_fault{false};
+static mgpu::secondary_fg::source_gate g_fg_source_gate;
+static std::atomic<void *> g_fg_game_queue{nullptr};
+static std::atomic<bool> g_consumer_active{false}, g_consumer_shutdown{false};
+static thread_local bool t_consumer_poll = false;
+static std::atomic<unsigned long long> g_present_wait_us{0}, g_present_wait_count{0};
+
+static bool wait_present_reads(unsigned timeout_ms, bool &failed)
+{
+    failed = false;
+    ID3D12Fence *fence = nullptr;
+    mgpu::present_read::retirement reads;
+    {
+        auto &presentation = st();
+        std::lock_guard<std::mutex> lock(presentation.cs);
+        reads = presentation.shared_reads;
+        fence = presentation.fence;
+        if (fence != nullptr) fence->AddRef();
+    }
+    auto status = reads.check(fence != nullptr ? fence->GetCompletedValue() : 0ull);
+    if (status == mgpu::present_read::status::pending && fence != nullptr)
+    {
+        HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (event != nullptr)
+        {
+            const HRESULT armed = fence->SetEventOnCompletion(reads.value(), event);
+            const DWORD result = SUCCEEDED(armed) ? WaitForSingleObject(event, timeout_ms) : WAIT_FAILED;
+            CloseHandle(event);
+            status = reads.check(fence->GetCompletedValue());
+            if (status != mgpu::present_read::status::retired && result == WAIT_FAILED)
+                failed = true;
+        }
+        else failed = true;
+    }
+    if (status == mgpu::present_read::status::unsafe ||
+        (status == mgpu::present_read::status::pending && fence == nullptr))
+        failed = true;
+    if (fence != nullptr) fence->Release();
+    return !failed && status == mgpu::present_read::status::retired;
+}
 
 // R142. The GAME runtime's depth-tap state, pushed in from dllmain. See the
 // header. Relaxed on both ends: it is read once per present to pick an idle
@@ -1535,14 +1420,24 @@ namespace
     // when one is live, or nullptr. Takes the stream's own lock briefly and
     // never while holding this file's - stream_poll nests them the other way
     // round, and the two orders together would be a cycle.
+    struct present_stamp
+    {
+        unsigned kind = 0;
+        unsigned long long frame = 0;
+        unsigned snapshot = UINT_MAX;
+        unsigned generated_index = UINT_MAX;
+    };
     ID3D12Resource *stream_present_source(UINT &w, UINT &h, DXGI_FORMAT &fmt,
-                                          D3D12_RESOURCE_STATES &rest);
+                                          D3D12_RESOURCE_STATES &rest, present_stamp &stamp);
 
     // P7.4. Same arrangement, for the LEFT half of a split present: the frame
     // as it arrived from the game, before the model. Returns nullptr unless
     // the mode is split AND a neural output exists to put beside it - half a
     // comparison would read as the model producing nothing.
     ID3D12Resource *stream_present_split_left(D3D12_RESOURCE_STATES &rest, float &pos);
+    void stream_secondary_fg_presented(ID3D12Fence *fence, UINT64 value, bool copied);
+    void stream_snapshot_presented(unsigned index, ID3D12Fence *fence, UINT64 value);
+    std::atomic<bool> g_secondary_fg_present_active{false};
 }
 
 // R108 / V26. Defined further down, beside the stream state: present_frame
@@ -1570,6 +1465,29 @@ static double        g_pr_ms[180] = {};
 static unsigned      g_pr_n = 0u, g_pr_i = 0u;
 static LARGE_INTEGER g_pr_last{};
 static std::atomic<int> g_pr_on{0};   // R299: the sampler runs only when the NRScale path armed
+
+bool present_capacity_gate(unsigned timeout_ms)
+{
+    if (g_present_read_fault.load(std::memory_order_acquire))
+    {
+        Sleep(timeout_ms != 0 ? timeout_ms : 1u);
+        return false;
+    }
+    if (mgpu::official_bridge::selected()) return true;
+    auto &state = st();
+    mgpu::presentation::feedback *feedback = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(state.cs);
+        feedback = state.presentation_feedback.get();
+    }
+    if (feedback == nullptr) return true;
+    const auto result = feedback->acquire(timeout_ms);
+    if (result == WAIT_OBJECT_0) return true;
+    if (result == WAIT_TIMEOUT) return false;
+    g_present_read_fault.store(true);
+    mgpu::diag::error("[MGPU][M347-PRESENT] frame capacity wait failed; output held without recycling live buffers");
+    return false;
+}
 
 bool present_frame(float r, float g, float b)
 {
@@ -1660,12 +1578,6 @@ bool present_frame(float r, float g, float b)
                      "GetDeviceRemovedReason=0x%08X - the loop stops presenting",
                      step, hr, (unsigned)reason);
             mgpu::diag::error(line);
-            if (mgpu::strace::on())   // R313: the record at the existing failure site
-            {
-                char w[200];
-                snprintf(w, sizeof w, "bridge present failed at %s hr=0x%08X (GPU 1 removed reason 0x%08X)", step, hr, (unsigned)reason);
-                mgpu::strace::record(w, (unsigned)reason != 0u ? (unsigned)reason : 0u);
-            }
         }
         return false;
     };
@@ -1874,7 +1786,9 @@ bool present_frame(float r, float g, float b)
     UINT nw = 0, nh = 0;
     DXGI_FORMAT nfmt = DXGI_FORMAT_UNKNOWN;
     D3D12_RESOURCE_STATES nrest = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    ID3D12Resource *nsrc = stream_present_source(nw, nh, nfmt, nrest);
+    present_stamp stamp{};
+    ID3D12Resource *nsrc = stream_present_source(nw, nh, nfmt, nrest, stamp);
+    bool source_copied = false;
     // The format check is not paranoia: the copy is silent about a mismatch at
     // record time and would fail at execute, taking the device with it.
     //
@@ -1945,6 +1859,7 @@ bool present_frame(float r, float g, float b)
         D3D12_RESOURCE_STATES lrest = D3D12_RESOURCE_STATE_COPY_DEST;
         float spos = 0.5f;
         ID3D12Resource *lsrc = stream_present_split_left(lrest, spos);
+        if (lsrc != nullptr) stamp.kind = 4u;
         // P7.5: the seam column, from the live position. Clamped one pixel in
         // from each edge so that a seam pushed all the way over never produces
         // a zero-width CopyTextureRegion, which is invalid rather than empty.
@@ -1970,6 +1885,7 @@ bool present_frame(float r, float g, float b)
         D3D12_BOX pbox{ left + halfw, top, 0, left + cw, top + ch, 1 };
         if (lsrc == nullptr) pbox.left = left;
         cl->CopyTextureRegion(&pd, (lsrc != nullptr) ? halfw : 0u, 0, 0, &ps, &pbox);
+        source_copied = true;
 
         nb.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
         nb.Transition.StateAfter = nrest;
@@ -1996,7 +1912,6 @@ bool present_frame(float r, float g, float b)
             lb.Transition.StateAfter = lrest;
             cl->ResourceBarrier(1, &lb);
         }
-
 
         if (lsrc != nullptr)
         {
@@ -2038,7 +1953,6 @@ bool present_frame(float r, float g, float b)
             // first moment the bridge has anything worth covering the game
             // with. No-op in mode 0, where there is no visual.
             dcomp_root_on_first_neural_frame();
-            if (mgpu::strace::on()) mgpu::strace::note_first_neural_frame(g_dcomp_rooted.load(std::memory_order_relaxed));   // R313
             snprintf(line, sizeof line,
                      "[MGPU][P5.0] the bridge window is now showing the %s - %s of the %ux%u "
                      "frame at %ux%u, one CopyTextureRegion, no resampling in this add-on. The "
@@ -2138,6 +2052,43 @@ bool present_frame(float r, float g, float b)
         cl->ResourceBarrier(1, &barrier);
     }
 
+    static unsigned audit_tick = 0;
+    static bool audit_enabled = false;
+    static unsigned long long audit_counts[5] = {};
+    static unsigned long long audit_repeats = 0, audit_previous_frame = 0;
+    static unsigned audit_previous_kind = 0;
+    static int audit_alpha_mode = -1;
+    if ((audit_tick++ % 120u) == 0u)
+    {
+        const bool requested = ini_read_flag("PresentAudit");
+        if (requested && !audit_enabled)
+        {
+            DXGI_SWAP_CHAIN_DESC1 audit_desc{};
+            if (SUCCEEDED(sc->GetDesc1(&audit_desc))) audit_alpha_mode = (int)audit_desc.AlphaMode;
+            mgpu::diag::info("[MGPU][R313-PRESENT] audit enabled: cyan=neural, orange=input, "
+                             "magenta=secondary FG, white=split. Marker is painted after the "
+                             "source copy; no GPU readback. Source routing is not pixel-content proof.");
+        }
+        audit_enabled = requested;
+    }
+    if (audit_enabled && source_copied)
+    {
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        cl->ResourceBarrier(1, &barrier);
+        const float marker_colors[5][4] = {
+            {0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 1.0f, 1.0f, 1.0f},
+            {1.0f, 0.3f, 0.0f, 1.0f}, {1.0f, 0.0f, 1.0f, 1.0f},
+            {1.0f, 1.0f, 1.0f, 1.0f}};
+        const D3D12_RECT marker_border{8, 8, 64, 24};
+        const D3D12_RECT marker_fill{10, 10, 62, 22};
+        cl->ClearRenderTargetView(rtv, marker_colors[0], 1, &marker_border);
+        cl->ClearRenderTargetView(rtv, marker_colors[stamp.kind], 1, &marker_fill);
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+        cl->ResourceBarrier(1, &barrier);
+    }
+
     hr = cl->Close();
     if (FAILED(hr))
         return fail("Close", static_cast<unsigned>(hr));
@@ -2150,8 +2101,22 @@ bool present_frame(float r, float g, float b)
     // for a clear - and only then wait for the GPU to finish this frame.
     fence_value++;
     hr = queue->Signal(fence, fence_value);
+    if (source_copied)
+    {
+        std::lock_guard<std::mutex> lock(S.cs);
+        S.shared_reads.submitted(fence_value, SUCCEEDED(hr));
+        static bool announced = false;
+        if (!announced && SUCCEEDED(hr))
+        {
+            announced = true;
+            mgpu::diag::info("[MGPU][R321-READ] output read fence tracked before Present; reuse and release wait for actual copy completion, independent of SecondaryFG.");
+        }
+    }
     if (FAILED(hr))
         return fail("Signal", static_cast<unsigned>(hr));
+
+    if (source_copied && stamp.snapshot != UINT_MAX)
+        stream_snapshot_presented(stamp.snapshot, fence, fence_value);
 
     // ---- L5: THE PRESENT INTERVAL IS A LATENCY DECISION, NOT A STYLE ONE ----
     //
@@ -2169,12 +2134,65 @@ bool present_frame(float r, float g, float b)
     //
     // PresentVsync=0 asks for the immediate present. Expect tearing - that is
     // the trade, and it is the user's to make, not ours to make silently.
-    const UINT pi_interval = (g_present_vsync.load(std::memory_order_relaxed) != 0u) ? 1u : 0u;
-    const double r313_p0 = mgpu::strace::now_ms();   // R313: 0.0 when off
+    const bool present_vsync = g_present_vsync.load(std::memory_order_relaxed) != 0u;
+    const bool bridge_poll_unthrottled =
+        g_bridge_poll_unthrottled.load(std::memory_order_relaxed) != 0u;
+    const UINT pi_interval = (present_vsync && !bridge_poll_unthrottled) ? 1u : 0u;
+    LARGE_INTEGER present_before{}, present_after{}, present_frequency{};
+    QueryPerformanceCounter(&present_before);
     hr = sc->Present(pi_interval, 0);
-    if (mgpu::strace::on()) mgpu::strace::note_bridge_present((unsigned)hr, mgpu::strace::now_ms() - r313_p0);   // R313
+    QueryPerformanceCounter(&present_after);
+    QueryPerformanceFrequency(&present_frequency);
+    if (S.presentation_feedback != nullptr)
+    {
+        const auto now_ns = present_frequency.QuadPart > 0 ? static_cast<std::uint64_t>(
+            double(present_after.QuadPart) * 1000000000.0 / double(present_frequency.QuadPart)) : 0ull;
+        S.presentation_feedback->submitted(sc, stamp.frame, stamp.kind, stamp.generated_index, now_ns);
+        if (S.presentation_feedback->submissions() % 120ull == 0)
+        {
+            DXGI_FRAME_STATISTICS statistics{};
+            mgpu::presentation::stamp matched{};
+            const HRESULT status = S.presentation_feedback->statistics(sc, statistics, matched);
+            char feedback_line[700];
+            snprintf(feedback_line, sizeof feedback_line,
+                "[MGPU][M347-FEEDBACK] hr=0x%08X submitted=%llu capacity_timeouts=%llu "
+                "present_count=%u present_refresh=%u sync_refresh=%u sync_qpc=%lld "
+                "matched_seal=%llu kind=%u subframe=%u submit_ns=%llu; unsupported statistics remain unknown, not displayed FPS",
+                unsigned(status), static_cast<unsigned long long>(S.presentation_feedback->submissions()),
+                static_cast<unsigned long long>(S.presentation_feedback->capacity_timeouts()),
+                statistics.PresentCount, statistics.PresentRefreshCount, statistics.SyncRefreshCount,
+                statistics.SyncQPCTime.QuadPart, matched.seal, matched.kind, matched.generated_index, matched.submitted_ns);
+            mgpu::diag::info(feedback_line);
+        }
+    }
+    if (present_frequency.QuadPart > 0)
+    {
+        g_present_wait_us.fetch_add(static_cast<unsigned long long>(
+            (present_after.QuadPart - present_before.QuadPart) * 1000000ll / present_frequency.QuadPart));
+        g_present_wait_count.fetch_add(1);
+    }
     if (FAILED(hr))
         return fail("Present", static_cast<unsigned>(hr));
+    if (audit_enabled)
+    {
+        const unsigned kind = source_copied ? stamp.kind : 0u;
+        ++audit_counts[kind];
+        if (stamp.frame != 0 && stamp.frame == audit_previous_frame && kind == audit_previous_kind)
+            ++audit_repeats;
+        if ((audit_tick % 120u) == 1u || kind != audit_previous_kind)
+        {
+            char audit_line[480];
+            snprintf(audit_line, sizeof audit_line,
+                     "[MGPU][R313-PRESENT] kind=%u seal=%llu texture=%p copied=%u rooted=%u "
+                     "alpha=%d hr=0x%08X totals idle=%llu neural=%llu input=%llu fg=%llu split=%llu repeat=%llu",
+                     kind, stamp.frame, (void *)nsrc, source_copied ? 1u : 0u,
+                     g_dcomp_rooted.load() ? 1u : 0u, audit_alpha_mode, (unsigned)hr,
+                     audit_counts[0], audit_counts[1], audit_counts[2], audit_counts[3], audit_counts[4], audit_repeats);
+            mgpu::diag::info(audit_line);
+        }
+        audit_previous_frame = stamp.frame;
+        audit_previous_kind = kind;
+    }
 
     // ---- R111: THE SUCCESS CODES PRESENT RETURNS, WHICH WERE INVISIBLE ----
     //
@@ -2233,6 +2251,8 @@ bool present_frame(float r, float g, float b)
         // the occlusion reading is checked against.
         S.present_stall_run = 0;
     }
+    stream_secondary_fg_presented(fence, fence_value,
+        hr == S_OK && nsrc != nullptr && nfmt == bbfmt && bbfmt != DXGI_FORMAT_UNKNOWN && nw != 0 && nh != 0);
     return true;
 }
 
@@ -2252,11 +2272,15 @@ bool has_present_chain()
 // exactly as T3 did it. The chain goes first because the swapchain holds
 // a reference to the window it was created against: in T4's order
 // (DestroyWindow first) it would outlive the window.
-namespace r309 { namespace r311c { void stop_thread(); } }   // R311c: defined with the rest of r309 below
 void shutdown()
 {
+    bool read_failed = false;
+    if (!wait_present_reads(2000, read_failed))
+    {
+        mgpu::diag::error("[MGPU][R321-READ] presentation read retirement unconfirmed; retaining presentation resources until process exit.");
+        return;
+    }
     auto &S = st();
-    r309::r311c::stop_thread();   // R311c: the probe thread, if it was ever started
 
     // Detach the chain under the lock, release it outside: the lock is
     // never held across the fence wait below, and the raw pointers never
@@ -2267,6 +2291,7 @@ void shutdown()
     ID3D12DescriptorHeap *heap = nullptr;
     ID3D12Resource *backbuffer[2] = {};
     ID3D12CommandAllocator *allocator[state::PRESENT_SLOTS] = {};   // D6
+    std::unique_ptr<mgpu::presentation::feedback> presentation_feedback;
     ID3D12GraphicsCommandList *cl[state::PRESENT_SLOTS] = {};
     ID3D12Fence *fence = nullptr;
     HANDLE event = nullptr;
@@ -2291,12 +2316,15 @@ void shutdown()
         fence_value = S.fence_value;
         S.queue = nullptr;
         S.swapchain = nullptr;
+        S.swapchain_flags = 0;
+        presentation_feedback = std::move(S.presentation_feedback);
         S.rtv_heap = nullptr;
         S.backbuffer[0] = nullptr;
         S.backbuffer[1] = nullptr;
         S.fence = nullptr;
         S.fence_event = nullptr;
         S.fence_value = 0;
+        S.shared_reads = {};
         S.present_failed_logged = false;
     }
 
@@ -2347,6 +2375,7 @@ void shutdown()
         if (backbuffer[0] != nullptr)
             backbuffer[0]->Release();
         heap->Release();
+        presentation_feedback.reset();
         sc->Release();
         queue->Release();
         mgpu::diag::info("[MGPU][T5] present chain released (GPU drained, reverse creation order)");
@@ -2533,6 +2562,9 @@ namespace
     }
 
     typedef NVSDK_NGX_Result (NVSDK_CONV *ngx_pf_get_cap_params)(
+        NVSDK_NGX_Parameter **OutParameters);
+
+    typedef NVSDK_NGX_Result (NVSDK_CONV *ngx_pf_allocate_params)(
         NVSDK_NGX_Parameter **OutParameters);
 
     // The core declares InParameters non-const and the snippet declares it
@@ -2858,86 +2890,34 @@ namespace
         else { unsigned u = ((e + 112u) << 23) | (m << 13); memcpy(&v, &u, 4); }
         return s ? -v : v;
     }
-    // R305: ONE decoder for the vector pair, shared by R257 and R258 so the two
-    // can never read the same bytes two ways again. R257 read only R16G16_FLOAT
-    // and R32G32_FLOAT; on Far Cry 6 the candidate was R16G16_UNORM (35) and
-    // R257 said "not sampled" on every probe. The decode is the one R258 had
-    // since R280o (the way DLSS reads the slot): FLOAT and TYPELESS as halves /
-    // floats, UNORM / SNORM normalised, SINT as integers. The integer and R8G8
-    // rows are decode-ready only: is_mvec_format (probe.cpp) does not admit them,
-    // deliberately, so no slot of those formats is ever made today.
-    // Runs on the bridge thread over GPU 1 readbacks - nothing here touches the
-    // game's device or its threads.
-    unsigned mv_texel_bytes(unsigned fmt)
-    {
-        if (fmt >= 15u && fmt <= 18u) return 8u;    // R32G32 TYPELESS FLOAT UINT SINT
-        if (fmt >= 33u && fmt <= 38u) return 4u;    // R16G16 TYPELESS FLOAT UNORM UINT SNORM SINT
-        if (fmt >= 48u && fmt <= 52u) return 2u;    // R8G8   TYPELESS UNORM UINT SNORM SINT
-        return 0u;
-    }
-    bool mv_read(unsigned fmt, const unsigned char *px, float &vx, float &vy)
-    {
-        switch (fmt)
-        {
-        case 33: case 34: { const unsigned short *q = (const unsigned short *)px; vx = half_to_float(q[0]); vy = half_to_float(q[1]); return true; }
-        case 35: { const unsigned short *q = (const unsigned short *)px; vx = (float)q[0] / 65535.0f; vy = (float)q[1] / 65535.0f; return true; }
-        case 36: { const unsigned short *q = (const unsigned short *)px; vx = (float)q[0]; vy = (float)q[1]; return true; }
-        case 37: { const short *q = (const short *)px;
-                   vx = (q[0] <= -32767) ? -1.0f : (float)q[0] / 32767.0f; vy = (q[1] <= -32767) ? -1.0f : (float)q[1] / 32767.0f; return true; }
-        case 38: { const short *q = (const short *)px; vx = (float)q[0]; vy = (float)q[1]; return true; }
-        case 15: case 16: { const float *q = (const float *)px; vx = q[0]; vy = q[1]; return true; }
-        case 17: { const unsigned *q = (const unsigned *)px; vx = (float)q[0]; vy = (float)q[1]; return true; }
-        case 18: { const int *q = (const int *)px; vx = (float)q[0]; vy = (float)q[1]; return true; }
-        case 48: case 49: vx = (float)px[0] / 255.0f; vy = (float)px[1] / 255.0f; return true;
-        case 50: vx = (float)px[0]; vy = (float)px[1]; return true;
-        case 51: { const signed char *q = (const signed char *)px;
-                   vx = (q[0] <= -127) ? -1.0f : (float)q[0] / 127.0f; vy = (q[1] <= -127) ? -1.0f : (float)q[1] / 127.0f; return true; }
-        case 52: { const signed char *q = (const signed char *)px; vx = (float)q[0]; vy = (float)q[1]; return true; }
-        default: return false;
-        }
-    }
-    // R305: a vector field that holds ONE value everywhere and is not the format's
-    // "no motion" encoding (all bytes zero, or UNORM channels at the 0.5 centre).
-    bool mv_is_zero_encoding(unsigned fmt, const unsigned char *raw)
-    {
-        const unsigned b = mv_texel_bytes(fmt);
-        bool allz = true; for (unsigned i = 0; i < b; ++i) if (raw[i] != 0) { allz = false; break; }
-        if (allz) return true;
-        if (fmt == 33u || fmt == 34u) { const unsigned short *q = (const unsigned short *)raw;   // +-0.0 halves
-                                        return (q[0] & 0x7FFFu) == 0u && (q[1] & 0x7FFFu) == 0u; }
-        if (fmt == 15u || fmt == 16u) { const unsigned *q = (const unsigned *)raw;               // +-0.0 floats
-                                        return (q[0] & 0x7FFFFFFFu) == 0u && (q[1] & 0x7FFFFFFFu) == 0u; }
-        if (fmt == 35u) { const unsigned short *q = (const unsigned short *)raw;
-                          auto c = [](unsigned short v) { return v >= 0x7FFEu && v <= 0x8001u; }; return c(q[0]) && c(q[1]); }
-        if (fmt == 49u) { auto c = [](unsigned char v) { return v >= 0x7Fu && v <= 0x80u; }; return c(raw[0]) && c(raw[1]); }
-        return false;
-    }
-    void mv_hex(const unsigned char *raw, unsigned b, char *out, size_t cap)
-    {
-        size_t at = 0; if (cap) out[0] = 0;
-        for (unsigned i = 0; i < b && at + 3 < cap; ++i) at += (size_t)snprintf(out + at, cap - at, "%02X", raw[i]);
-    }
-
-    struct vec_probe_result { unsigned long long n, zeros; double mean_ax, mean_ay, max_ax, max_ay, pos_x, pos_y; const char *verdict;
-                              unsigned long long same_as_first; unsigned char first_raw[8]; unsigned texel_bytes; };   // R305
+    struct vec_probe_result { unsigned long long n, zeros, nonfinite; double mean_ax, mean_ay, max_ax, max_ay, pos_x, pos_y; const char *verdict; };
     vec_probe_result vec_probe_eval(const unsigned char *base, unsigned w, unsigned h, unsigned pitch, unsigned fmt)
     {
         vec_probe_result r{}; r.verdict = "UNDECIDED";
-        const unsigned tb = mv_texel_bytes(fmt);   // R305
-        r.texel_bytes = tb;
-        if (tb == 0u) { r.verdict = "format is not a two-channel vector format - not sampled"; return r; }
+        const bool f16 = (fmt == (unsigned)DXGI_FORMAT_R16G16_FLOAT);
+        const bool f32 = (fmt == (unsigned)DXGI_FORMAT_R32G32_FLOAT);
+        if (!f16 && !f32) { r.verdict = "format not R16G16_FLOAT / R32G32_FLOAT - not sampled"; return r; }
         double sax = 0, say = 0; unsigned long long px = 0, py = 0;
         for (unsigned y = 0; y < h; y += 2)
         {
             const unsigned char *row = base + (size_t)y * pitch;
             for (unsigned x = 0; x < w; x += 4)
             {
-                float vx = 0.0f, vy = 0.0f;
-                const unsigned char *t = row + (size_t)x * tb;   // R305
-                (void)mv_read(fmt, t, vx, vy);
-                if (r.n == 0) memcpy(r.first_raw, t, tb);
-                if (memcmp(t, r.first_raw, tb) == 0) ++r.same_as_first;
+                float vx, vy;
                 ++r.n;
+                if (f16)
+                {
+                    const unsigned short *values = (const unsigned short *)(row + (size_t)x * 4);
+                    if ((values[0] & 0x7c00u) == 0x7c00u || (values[1] & 0x7c00u) == 0x7c00u)
+                    { ++r.nonfinite; continue; }
+                    vx = half_to_float(values[0]); vy = half_to_float(values[1]);
+                }
+                else
+                {
+                    const float *values = (const float *)(row + (size_t)x * 8);
+                    vx = values[0]; vy = values[1];
+                    if (!std::isfinite(vx) || !std::isfinite(vy)) { ++r.nonfinite; continue; }
+                }
                 const double ax = (vx < 0) ? -(double)vx : (double)vx, ay = (vy < 0) ? -(double)vy : (double)vy;
                 if (ax < 1e-6 && ay < 1e-6) { ++r.zeros; continue; }
                 sax += ax; say += ay;
@@ -2946,19 +2926,12 @@ namespace
                 if (vx > 0) ++px; if (vy > 0) ++py;
             }
         }
-        const unsigned long long nz = r.n - r.zeros;
+        const unsigned long long nz = r.n - r.zeros - r.nonfinite;
         if (nz != 0) { r.mean_ax = sax / (double)nz; r.mean_ay = say / (double)nz; r.pos_x = (double)px / (double)nz; r.pos_y = (double)py / (double)nz; }
         if (r.n == 0) return r;
-        // R305: checked first - a field of one value says nothing about units.
-        if (r.same_as_first == r.n && !mv_is_zero_encoding(fmt, r.first_raw))
-            r.verdict = "CONSTANT: every sampled texel holds the same bytes, and they are not a no-motion value - this region is not a motion field";
-        // R306: Far Cry 6 read 99.6% one value (0000803F) and fell through to the
-        // units verdict below, which read as an endorsement. Log text only.
-        else if (r.same_as_first * 100ull >= r.n * 99ull && !mv_is_zero_encoding(fmt, r.first_raw))
-            r.verdict = "NEARLY CONSTANT: 99% or more of the sampled texels hold the same bytes, and they are not a no-motion value - units not judged";
+        if (r.nonfinite != 0) r.verdict = "NONFINITE samples: source/encoding/invalid-vector convention unverified; no units verdict";
         else if (r.zeros * 100ull >= r.n * 95ull) r.verdict = "STILL (>=95% zero): no motion in this frame, or not the per-frame velocity target";
-        else if (r.max_ax <= 4.0 && r.max_ay <= 4.0) r.verdict = "SCREEN-FRACTION units (UV/NDC): MVecScaleX/Y should be the frame size in pixels (sign to settle)";
-        else r.verdict = "PIXEL units: scale 1, only the sign to settle";
+        else r.verdict = "finite magnitudes alone do not establish units or the correct velocity resource";
         return r;
     }
 
@@ -3095,6 +3068,28 @@ namespace
 
         return dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
                                             state, nullptr, IID_PPV_ARGS(out));
+    }
+
+    HRESULT make_uav_buf(ID3D12Device *dev, UINT64 bytes, ID3D12Resource **out)
+    {
+        D3D12_HEAP_PROPERTIES hp{};
+        hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        hp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+        hp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = bytes;
+        rd.Height = 1;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels = 1;
+        rd.Format = DXGI_FORMAT_UNKNOWN;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        return dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                            nullptr, IID_PPV_ARGS(out));
     }
 
     void barrier(ID3D12GraphicsCommandList *cl, ID3D12Resource *res,
@@ -8789,6 +8784,7 @@ namespace
         // took away. THE ACTUAL FIX IS TO STOP PACING THE CONSUMER WITH THE
         // PRESENTER - see the note in stream_poll.
         static const unsigned RING = 6;
+        static const unsigned PIPELINE_SLOTS = mgpu::neural_pipeline::schedule::SLOTS;
 
         // The bound. See the header comment. Overridable with Frames= in
         // mgpu.ini so the window can be watched for longer than fifteen
@@ -8893,6 +8889,14 @@ namespace
         // Process-local memory, written and read under s.cs, so it needs none
         // of the seal's cross-adapter machinery.
         unsigned long long slot_game_frame[RING] = {};
+        std::uint64_t slot_measurement_session[RING] = {};
+
+        // M336 measurement bookkeeping. These fields are inert unless the
+        // process-scoped measurement event is armed, and never participate in
+        // admission, queue waits, or resource ownership.
+        std::uint64_t measurement_queue_session = 0;
+        unsigned measurement_queue_mask = 0;
+        double measurement_last_scheduler_ms = -1;
 
         static const unsigned long long FAULT_LOG_CAP = 20;
         unsigned long long logged_stale = 0, logged_reord = 0, logged_drop = 0;
@@ -9102,6 +9106,12 @@ namespace
         ID3D12Fence *gfence = nullptr;         // produced-count, game side
         HANDLE gfence_share = nullptr;
         ID3D12Fence *nfence = nullptr;         // the same fence on GPU 1
+        ID3D12Fence *gcolor_ready = nullptr, *ncolor_ready = nullptr;
+        HANDLE color_ready_share = nullptr;
+        bool color_copy_overlap = false;
+        ID3D12Fence *gdepth_ready = nullptr, *ndepth_ready = nullptr;
+        HANDLE depth_ready_share = nullptr;
+        bool guide_copy_overlap = false;
 
         ID3D12Resource *nseal = nullptr;       // READBACK, RING * SEAL_STRIDE
 
@@ -9195,9 +9205,15 @@ namespace
         ID3D12CommandQueue *nq = nullptr;
         ID3D12CommandAllocator *na = nullptr;
         ID3D12GraphicsCommandList *nl = nullptr;
+        ID3D12CommandAllocator *primary_na = nullptr;
+        ID3D12GraphicsCommandList *primary_nl = nullptr;
+        ID3D12CommandAllocator *async_na[PIPELINE_SLOTS] = {};
+        ID3D12GraphicsCommandList *async_nl[PIPELINE_SLOTS] = {};
+        UINT64 async_na_value[PIPELINE_SLOTS] = {};
         ID3D12Fence *nf = nullptr;
         HANDLE nev = nullptr;
         UINT64 nf_value = 0;
+        UINT64 probe_read_fence = 0;
 
         // ---- R26: a dedicated COPY queue on GPU 1 ----
         //
@@ -9228,10 +9244,14 @@ namespace
         // flight while frame N's is recorded, and an allocator may not be
         // Reset under the GPU. Two is also the bound - tex_in has two halves,
         // so frame N+2 would land in the one frame N is reading.
-        ID3D12CommandAllocator *cqa[2] = {};
-        ID3D12GraphicsCommandList *cql[2] = {};
+        ID3D12CommandAllocator *cqa[PIPELINE_SLOTS] = {};
+        ID3D12GraphicsCommandList *cql[PIPELINE_SLOTS] = {};
+        ID3D12CommandAllocator *cq_color_allocators[PIPELINE_SLOTS] = {};
+        ID3D12GraphicsCommandList *cq_color_lists[PIPELINE_SLOTS] = {};
+        ID3D12CommandAllocator *cq_depth_allocators[PIPELINE_SLOTS] = {};
+        ID3D12GraphicsCommandList *cq_depth_lists[PIPELINE_SLOTS] = {};
         ID3D12Fence *cqf = nullptr;
-        UINT64 cqf_value = 0;                  // the frame index last signalled
+        UINT64 cqf_value = 0;
         // The copy-fence value each allocator was last submitted with. NEVER
         // FREE - OR RESET - UNDER THE GPU is the existing rule and an
         // allocator is the easiest place to break it: a frame whose neural
@@ -9243,7 +9263,8 @@ namespace
         // for that frame, not to wait for the GPU with the stream mutex held.
         // That mutex is taken by the GAME's render thread; DEFECT E is what
         // blocking under it costs.
-        UINT64 cqa_value[2] = {};
+        UINT64 cqa_value[PIPELINE_SLOTS] = {};
+        UINT64 cq_frame[PIPELINE_SLOTS] = {};
         unsigned long long cq_issued = 0;      // highest frame whose copy is submitted
         unsigned long long cq_ahead = 0;       // copies that ran ahead of the previous evaluate
         unsigned long long cq_fails = 0;       // frames that fell back to the inline unpack
@@ -9277,7 +9298,7 @@ namespace
         // which the summary says out loud rather than reporting the direct
         // queue's now-empty unpack bracket as though it were the cost.
         ID3D12QueryHeap *cq_tsheap = nullptr;
-        ID3D12Resource *cq_tsread = nullptr;    // READBACK, 2 marks x 2 parities x 8 bytes
+        ID3D12Resource *cq_tsread = nullptr;
         UINT64 cq_ts_freq = 0;
         bool cq_ts_ok = false;
         double cq_ts_sum = 0.0, cq_ts_min = 1e30, cq_ts_max = 0.0;
@@ -9775,9 +9796,6 @@ namespace
         unsigned nrs_mode = 1u;      // resolve mode: 1 = residual composite (default), 0 = the model output directly
         float nrs_sharpness = 0.50f;         // RCAS, matched to the proxys ini (Sharpness=0.50)
         float nrs_color_strength = 0.90f;    // matched to the proxys ini (ColorStrength=0.90)
-        // NRScaleResolveDepth=0 (Dom / lordzaxxon555-art): the resolve's silhouette guard runs
-        // without depth (has_depth=0) while NGX keeps it. Absent or 1 = unchanged.
-        bool  nrs_res_depth = true;
         unsigned nrs_w = 0u, nrs_h = 0u;
         UINT  nrs_inc = 0u;
         ID3D12RootSignature *nrs_rs_down = nullptr;
@@ -9869,8 +9887,47 @@ namespace
         double ev_sum[EV_ROLES] = {}, ev_min[EV_ROLES] = {}, ev_max[EV_ROLES] = {};
         unsigned long long ev_n[EV_ROLES] = {};
         UINT p2r_x = 0, p2r_y = 0, p2r_w = 0, p2r_h = 0;
+        bool fg_requested = false;
+        bool fg_attempted = false;
+        bool fg_ready = false;
+        bool fg_pending = false;
+        bool fg_output_valid = false;
+        bool fg_queue_fault = false;
+        bool fg_release_blocked = false;
+        bool present_release_blocked = false;
+        bool fg_eval_ok = false;
+        unsigned long long fg_frame_id = 0;
+        unsigned long long fg_seal_frame = 0;
+        unsigned long long fg_rejected = 0;
+        unsigned long long fg_evaluations = 0;
+        unsigned long long fg_generated_presents = 0;
+        unsigned long long fg_real_presents = 0;
+        unsigned long long fg_present_value = 0;
+        ID3D12Fence *fg_present_fence = nullptr;
+        ID3D12Resource *fg_interpolated[mgpu::neural_pipeline::schedule::SLOTS][mgpu::secondary_fg::max_generated_frames] = {};
+        unsigned fg_multiplier = mgpu::secondary_fg::min_multiplier;
+        ID3D12Resource *fg_disable_interpolation = nullptr;
+        ID3D12Resource *fg_hint_readback = nullptr;
+        ID3D12Resource *fg_hint_upload = nullptr;
+        mgpu::fgmap::camera_snapshot fg_camera[RING]{};
+        unsigned long long fg_camera_seal[RING]{};
+        unsigned long long fg_input_seal[RING]{};
+        unsigned long long fg_input_capture_ns[RING]{};
+        std::atomic<unsigned long long> fg_motion_source[RING]{};
+        std::atomic<unsigned long long> fg_motion_sequence[RING]{};
+        mgpu::secondary_fg::decision fg_decision{};
+        mgpu::secondary_fg::presentation_pair fg_pair;
+        std::array<mgpu::secondary_fg::completed_output, PIPELINE_SLOTS> fg_completed{};
+        unsigned long long fg_last_real_engine = 0, fg_superseded_ready = 0, fg_preempted_generated = 0;
+        mgpu::secondary_fg::picture fg_show = mgpu::secondary_fg::picture::none;
+        mgpu::secondary_fg::dlss_fg_stage fg_stage;
+        ngx_pf_create_feature nr_create = nullptr;
+        ngx_pf_allocate_params nr_allocate = nullptr;
         ngx_pf_evaluate_feature nr_eval = nullptr;
         ngx_pf_release_feature nr_release = nullptr;
+        ngx_pf_create_feature fg_create = nullptr;
+        ngx_pf_evaluate_feature fg_eval = nullptr;
+        ngx_pf_release_feature fg_release = nullptr;
         // V40. The parameter blocks' destructor. NEVER CALLED UNTIL NOW: the
         // stream creates nr_params and sr_params and leaks both on every run,
         // because DestroyParameters only ever ran in the P1.0c probe path.
@@ -9897,7 +9954,7 @@ namespace
         // land in the texture the model is reading. Without the pair there is
         // no overlap available at all and the queue is plumbing with nothing
         // flowing through it.
-        ID3D12Resource *tex_in[2] = {};
+        ID3D12Resource *tex_in[PIPELINE_SLOTS] = {};
         // The state the pair RESTS in between frames, and what the presenter
         // must transition from. COPY_DEST on the shipped path. COMMON with the
         // copy queue on, because D3D12 decays every resource a COPY queue
@@ -9908,8 +9965,34 @@ namespace
         // and the split's left half must show THAT one, not whichever half the
         // copy queue is filling next.
         ID3D12Resource *tex_in_show = nullptr;
+        ID3D12Resource *tex_out_ring[PIPELINE_SLOTS] = {};
+        ID3D12Resource *tex_pong_ring[PIPELINE_SLOTS] = {};
         ID3D12Resource *tex_out = nullptr, *tex_pong = nullptr,
                        *nr_final = nullptr, *nr_read = nullptr;
+        unsigned long long nr_final_frame = 0;
+        mgpu::neural_pipeline::schedule pipeline;
+        mgpu::neural_history::history neural_settings_history;
+        mgpu::neural_pipeline::snapshots snapshots;
+        struct pipeline_readback
+        {
+            Microsoft::WRL::ComPtr<ID3D12Resource> timestamps, evaluations, sample;
+            unsigned evaluation_count = 0;
+            std::array<unsigned, EV_MAX> evaluation_roles{};
+            mgpu::neural_pipeline::difference_audit difference;
+        };
+        std::array<pipeline_readback, PIPELINE_SLOTS> pipeline_readbacks;
+        bool async_neural = false;
+        unsigned long long async_finished = 0, async_gap_resets = 0, async_engine_resets = 0;
+        unsigned long long async_submitted = 0, async_submitted_while_pending = 0;
+        unsigned long long async_before_arrival = 0, timeline_previous_seal = 0;
+        mgpu::timing::queue_clock_cache copy_clock_cache, neural_clock_cache;
+        std::array<mgpu::timing::calibration, PIPELINE_SLOTS> copy_clocks{};
+        mgpu::timing::span timeline_previous_neural{};
+        mgpu::timing::metric timeline_overlap{}, timeline_cadence{};
+        unsigned async_inflight_peak = 0;
+        double async_wall_sum = 0;
+        double async_gpu_previous[4]{};
+        unsigned long long async_present_us = 0, async_present_count = 0;
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT nr_fp{};   // the 64x4 liveness sample
         unsigned char nr_prev[1024] = {};
         bool nr_have_prev = false;
@@ -10011,10 +10094,9 @@ namespace
         // It is. At two passes the bridge thread's sections are twice as long
         // and the game's render thread was bailing mid-scene rather than wait.
         //
-        // These are the only things stream_mvec_copy shared with the consumer.
-        // Made atomic, they need no lock at all, and the small mutex below is
-        // left with exactly one job.
-        std::atomic<unsigned char> mvec_slot_valid[RING] = {};
+        // Pending writes/close use mvec_cs; closed packets are accessed under cs.
+        // A close never clears a slot that the next capture has already written.
+        mgpu::motion_packet::handoff<RING> mvec_packets;
 
         std::atomic<unsigned long long> mvec_copies{0}, mvec_missing{0};
         std::atomic<unsigned long long> mvec_copies_tap{0};   // R280o: the subset of mvec_copies made by the R277 tap
@@ -10125,6 +10207,9 @@ namespace
         // ELIMINATED and the remaining answer is units or sign. If it is not
         // flat, there is a desync no counter has shown us.
         unsigned long long nr_last_eval_fi = 0;
+        bool aligned_history_valid = false;
+        unsigned aligned_history_frame = 0;
+        std::array<mgpu::aligned::guide_constants, RING> aligned_constants{};
         unsigned long long mvec_elapsed_hist[8] = {};   // [0]=1 frame .. [7]=8+
         unsigned long long mvec_elapsed_max = 0;
 
@@ -10151,7 +10236,7 @@ namespace
         // tex_depth are pairs - with the copy queue one frame ahead, frame
         // f+1's vectors would otherwise land in the texture frame f is being
         // evaluated from.
-        ID3D12Resource *tex_mvec_r[2] = {};
+        ID3D12Resource *tex_mvec_r[PIPELINE_SLOTS] = {};
         // D2.0 NR2: the last rendered frame's vectors, kept for a generated
         // frame. tex_mvec_r cannot serve: its other half is being written for
         // frame f+1 by the copy queue while frame f evaluates. Copied on the
@@ -10198,33 +10283,6 @@ namespace
         unsigned long long depth_contract = 0;
         unsigned long long depth_seen_valid = 0, depth_seen_invalid = 0;
         unsigned long long depth_report_at = 0;
-        bool r312_hold_said = false;            // R312
-        unsigned long long r312_report_at = 0;  // R312
-        // R315b (MVecBarrierSource=2): the second vector region (the tail copy during the judge
-        // window), the readback for the compare, and the judge's bookkeeping. Key absent / 1:
-        // mvec2_off stays 0 and none of it is touched.
-        UINT64 mvec2_off = 0;
-        std::atomic<unsigned char> r315_both[RING] = {};   // slot holds both copies of one frame
-        // R323 (HistoryGate=1): per slot, the game's DLSS evaluated for the sealed frame (1 / 0 / -1 unknown).
-        std::atomic<signed char> slot_dlss[RING] = {};
-        bool     gate_break = false;        // the last evaluated frame had no DLSS: the next one with it resets once
-        unsigned gate_stretches = 0;        // stretches without DLSS seen (the first 3 are logged)
-        unsigned long long gate_since = 0;  // consumed frame the current stretch began at
-        ID3D12Resource *r315_rb = nullptr;                   // READBACK, 2 x mvec_bytes2
-        bool r315_rb_pending = false;
-        unsigned r315_judged = 0, r315_same = 0;             // frames judged / frames byte-identical (sampled)
-        unsigned long long r315_window_at = 0;               // sealed frame the window opened at
-        unsigned long long r315_judge_handle = 0;            // the published handle the verdict was for
-        unsigned long long r315_recheck_at = 0;              // periodic re-open (sealed frame)
-        unsigned long long r315_tail_delivered = 0;          // copies the tail delivered (TAIL phase)
-        unsigned r315_decisions = 0;
-        bool r315_fmt_said = false;
-        // R315b fix 4: the differing sample set of the previous judged frame (bit per sampled texel), to
-        // tell a FIXED patch (the same texels every frame: a deterministic write after DLSS, e.g. a HUD
-        // mask) from CHANGING content (stale motion). 1 bit per sample; 128 KB covers 1M samples.
-        std::vector<unsigned char> r315_prev_bits;
-        unsigned long long r315_prev_diff = 0;
-        unsigned r315_flat = 0;                              // R326: frames skipped in this window (no motion in the field)
 
         // ---- T1b: the GPU 1 side ----
         //
@@ -10233,7 +10291,7 @@ namespace
         // being evaluated from. Both are allocated unconditionally rather than
         // conditionally like tex_in, because 5.76 MB on a 16 GB card is not
         // worth a mode-dependent allocation path that can only ever be wrong.
-        ID3D12Resource *tex_depth[2] = {};
+        ID3D12Resource *tex_depth[PIPELINE_SLOTS] = {};
 
         // Producer to consumer, same process, under the same mutex. The SEAL
         // remains the authority - it is what crosses the adapter - and the
@@ -10252,13 +10310,6 @@ namespace
         unsigned cp_n = 0;                      // probes evaluated
         unsigned cp_worse = 0;                  // R278: probes where the warp was WORSE than no warp
         unsigned cp_win_n = 0;                  // R278f: probes on the current candidate
-        unsigned sw_rec_id = 0, sw_seen_id = 0; // R307: sweep setting at stage 1, and the last one seen
-        unsigned long long sw_seen_f = 0;       // R307: frame it was first seen (the transport needs a few frames to carry it)
-        // R305: the constant-vector judge (see the R305 block after the worse-count).
-        unsigned cp_const_run = 0;              // probes running whose region was one value, the same one
-        unsigned char cp_const_raw[8] = {};     // that value's bytes
-        double   cp_const_e0_min = 0.0, cp_const_e0_max = 0.0;   // the picture's no-motion error over the run
-        bool     cp_const_counted = false;      // counted once per candidate
         bool     learn_write = false;           // R278f-r: verdicts may write (learning, or MVecTap key) - decided at arm, no file read under the lock
         // R280e: the open judge on the virtual-target path. Edge scores: mean of
         // best/none over windows with motion, per edge (0 last, 1 first).
@@ -10269,34 +10320,8 @@ namespace
         bool     x_edge_fixed = false;          // chosen; alternation stopped
         unsigned x_edge_bad = 0;                // chosen edge's consecutive worse windows (3 reopens)
         unsigned x_verdicts = 0;                // scale applications so far (0 = still at + / +)
-        unsigned x_still_motion = 0;            // R311e: R258 probes running where the picture moved and R280's field was >= 95% zeros
+        bool cp_authoritative_seen = false;
         int      x_kx = 0, x_ky = 0;            // the applied candidates, in W/H units
-        // R309 (MVecStepAside=1, off by default): the step-aside judge and its instrument.
-        // Written under s.cs only: the key at the hold (game thread), the rest on the bridge thread.
-        bool     r309_on = false, r309_l99 = false;     // the key, and MVecLearned=99, read once at the hold
-        int      r311_src = 0;                          // R311: MVecSource 0..3, read once at the hold
-        unsigned long long r311_dropped = 0;            // R311: copies from the game's own routes dropped under MVecSource (mvec_cs)
-        bool     r311_drop_said = false;
-        bool     r309_aside = false;                     // the zero field is bound in place of the vectors
-        bool     r309_zero_ready = false;                // tex_mvec holds zeros and is in a read state
-        bool     r309_probe_own = false;                 // the probe in flight was started by R309 alone
-        int      r309_ring[6] = {0,0,0,0,0,0};          // last 6 judged probes: -1 worse, +1 better, 0 neither
-        unsigned r309_ri = 0, r309_rn = 0, r309_brun = 0, r309_own_judged = 0;
-        unsigned r309_phase = 0, r309_windows = 0, r309_switches = 0;   // 0 waiting for gameplay, 1 window, 2 asleep
-        unsigned r309_wj = 0, r309_ww = 0, r309_wb = 0;  // this window: judged, worse, better
-        int      r309_cand_seen = -1;
-        unsigned long long r309_gp_run = 0, r309_t_end = 0, r309_t_wake = 0;
-        unsigned long long r309_own_n = 0, r309_own_us = 0, r309_own_max = 0;     // R309's probes: bridge time with s.cs held
-        unsigned long long r309_base_n = 0, r309_base_us = 0, r309_base_max = 0;  // R258's other probes, timed while the key is on
-        unsigned long long r309_bytes = 0;                                       // GPU 1 readback bytes R309's probes added
-        int      r309_mode = 0;                          // MVecStepAside: 0 absent or 0 | 1 forced zero field | 2 auto (the judge)
-        bool     r310_cost = false, r310_offlock = false; // R310: ProbeCost=1, ProbeOffLock=1 (read once at the hold)
-        bool     r311c_thread = false;                    // R311c: ProbeOffLock=2 - the probe's loops run on the probe thread
-        unsigned long long r311b_last_ms = 0;             // R311b: last GPU 1 fence-timeout line (rate limit)
-        unsigned r310_test_ms = 0;                       // R310: ProbeOffLockTestMs (0..20), only with ProbeOffLock=1
-        unsigned long long r310_next_ms = 0;             // R310: ProbeCost without the judge - a COST line every 5 minutes
-        unsigned long long r310_own_off_us = 0, r310_base_off_us = 0;   // R310: probe time spent with s.cs RELEASED
-        unsigned r310_dropped = 0;                       // R310: probes whose stream was released while they scored off the lock
         bool     learn_on = false;              // R278: MVecTap on and MVecLearned absent
         bool     learn_decided = false;         // R278d: the first-launch decision, made once at the hold
         int      learn_cand = 0;                // R278: MVecCandidate this launch tests
@@ -10306,6 +10331,14 @@ namespace
         bool     cp_written = false;
         ID3D12Resource *vp_rb = nullptr;        // R257: READBACK, mvec_bytes2
         bool vp_pending = false; unsigned vp_n = 0;   // R257
+        std::atomic<unsigned long long> mvec_audit_source[RING]{};
+        mgpu::motion_audit::sample_stamp mvec_audit_sealed[RING]{};
+        mgpu::motion_audit::sample_stamp vp_stamp{};
+        unsigned long long mvec_audit_last = 0;
+        unsigned mvec_audit_names = 0;
+        mgpu::tagged_motion::source_priority mvec_source_priority;
+        std::atomic<unsigned long long> mvec_tag_switch_frame{0};
+        unsigned long long nr_tag_reset_frame = 0;
         ID3D12Resource *dp_rb = nullptr;        // READBACK, depth_bytes
         bool dp_pending = false;                // a copy recorded last frame
         unsigned dp_n = 0;                      // probes completed (3 max)
@@ -10417,6 +10450,9 @@ namespace
         bool set_is_float[MAX_SETS] = {};
         unsigned set_n = 0;
         bool nr_first = true;
+        unsigned nr_guide_mask = 3u;
+        unsigned nr_control_tick = 0u;
+        bool nr_reset_each_frame = false;
         unsigned long long resync = 0;   // seals rejected, next gap check suppressed
         bool skip_next_gap = false;
     };
@@ -10452,8 +10488,107 @@ namespace
     // it), tex_in in COPY_DEST (we copy into it) - and a present path that
     // assumed one of them would silently record an invalid transition on the
     // other. The debug layer would catch it; a release build would not.
+    unsigned long long secondary_fg_now_ns()
+    {
+        LARGE_INTEGER now{}, frequency{};
+        QueryPerformanceCounter(&now);
+        QueryPerformanceFrequency(&frequency);
+        return frequency.QuadPart > 0 ? static_cast<unsigned long long>(
+            static_cast<double>(now.QuadPart) * 1000000000.0 / frequency.QuadPart) : 0ull;
+    }
+
+    bool stream_secondary_fg_publish(stream_state &s)
+    {
+        if (!t_consumer_poll && mgpu::official_bridge::selected() && !s.fg_ready && s.async_neural && s.pipeline.ready())
+        {
+            while (s.pipeline.ready_count() > 1)
+                if (!s.pipeline.discard_oldest_ready()) return false;
+            return s.pipeline.publish_ready();
+        }
+        if (t_consumer_poll || !s.fg_ready || !s.async_neural || !s.pipeline.ready()) return true;
+        if (s.fg_pair.pending())
+        {
+            s.fg_preempted_generated += s.fg_pair.finish_with_real(secondary_fg_now_ns());
+            return true;
+        }
+        while (s.pipeline.ready_count() > 1)
+        {
+            if (!s.pipeline.discard_oldest_ready()) return false;
+            ++s.fg_superseded_ready;
+        }
+        const auto job = s.pipeline.ready_job();
+        const auto &output = s.fg_completed[job.snapshot];
+        const auto now = secondary_fg_now_ns();
+        const bool display_anchors_match = s.fg_last_real_engine != 0 &&
+            mgpu::aligned::consecutive_frame(job.engine_frame, static_cast<unsigned>(s.fg_last_real_engine));
+        const bool generated_valid = output.generated_valid && display_anchors_match;
+        if (output.seal != job.seal || !s.fg_pair.enqueue(job.seal, now, output.generation,
+            true, !generated_valid, s.fg_multiplier) || !s.pipeline.publish_ready())
+        {
+            s.fg_queue_fault = true;
+            s.finished = true;
+            g_fg_source_gate.disable();
+            return false;
+        }
+        s.fg_output_valid = generated_valid;
+        if (job.seal <= 3 || job.seal % 120 == 0)
+        {
+            char line[650];
+            const double age = output.capture_ns != 0 && now >= output.capture_ns
+                ? double(now - output.capture_ns) / 1000000.0 : -1.0;
+            snprintf(line, sizeof line,
+                "[MGPU][M347-DISPLAY] seal=%llu engine_frame=%u slot=%u generated_valid=%u "
+                "source_age_ms=%.3f completed_to_publish_ms=%.3f ready=%u pending_input=%llu "
+                "generated_presents=%llu real_presents=%llu late_drops=%llu superseded_ready=%llu "
+                "preempted_generated=%llu anchors_match=%u; publication is not scanout",
+                job.seal, job.engine_frame, job.snapshot, unsigned(generated_valid), age,
+                now >= output.completed_ns ? double(now - output.completed_ns) / 1000000.0 : -1.0,
+                s.pipeline.ready_count(), s.produced - s.consumed, s.fg_generated_presents,
+                s.fg_real_presents, static_cast<unsigned long long>(s.fg_pair.dropped_generated()),
+                s.fg_superseded_ready, s.fg_preempted_generated, unsigned(display_anchors_match));
+            mgpu::diag::info(line);
+        }
+        return true;
+    }
+
+    void stream_secondary_fg_presented(ID3D12Fence *fence, UINT64 value, bool copied)
+    {
+        if (!g_secondary_fg_present_active.load(std::memory_order_relaxed)) return;
+        stream_state &s = str();
+        std::lock_guard<std::mutex> lock(s.cs);
+        if (!s.fg_requested) return;
+        const auto shown = s.fg_show;
+        if (fence != nullptr && value != 0)
+        {
+            fence->AddRef();
+            if (s.fg_present_fence != nullptr) s.fg_present_fence->Release();
+            s.fg_present_fence = fence;
+            s.fg_present_value = value;
+        }
+        if (!s.fg_pair.pending()) return;
+        if (s.fg_pair.presented(shown, copied, secondary_fg_now_ns()))
+        {
+            if (shown == mgpu::secondary_fg::picture::interpolated) ++s.fg_generated_presents;
+            else if (shown == mgpu::secondary_fg::picture::real)
+            {
+                ++s.fg_real_presents;
+                if (s.async_neural && s.pipeline.displayed())
+                {
+                    const auto &output = s.fg_completed[s.pipeline.display_slot()];
+                    if (output.seal == s.fg_pair.frame_id() && output.camera_frame != 0)
+                    {
+                        s.fg_last_real_engine = output.camera_frame;
+                        g_fg_source_gate.presented(static_cast<unsigned>(output.camera_frame));
+                    }
+                }
+            }
+        }
+        s.fg_show = mgpu::secondary_fg::picture::none;
+        if (!s.fg_pair.pending()) s.fg_output_valid = false;
+    }
+
     ID3D12Resource *stream_present_source(UINT &w, UINT &h, DXGI_FORMAT &fmt,
-                                          D3D12_RESOURCE_STATES &rest)
+                                          D3D12_RESOURCE_STATES &rest, present_stamp &stamp)
     {
         stream_state &s = str();
         std::lock_guard<std::mutex> lk(s.cs);
@@ -10462,6 +10597,25 @@ namespace
         // the linear twin of s.format (P7.8). The P7.3 copy guard compares this
         // against the chain, and the chain is now resized to the same twin.
         w = s.width; h = s.height; fmt = nr_linear_format(s.format);
+        if (s.async_neural)
+        {
+            if (!s.pipeline.displayed()) return nullptr;
+            stamp.snapshot = s.pipeline.display_slot();
+            stamp.frame = s.pipeline.display_seal();
+            stamp.kind = s.present_mode == 1 ? 2u : 1u;
+            rest = D3D12_RESOURCE_STATE_COMMON;
+            const unsigned generated_index = s.fg_pair.generated_index();
+            if (s.present_mode == 0 && s.fg_output_valid && s.fg_pair.frame_id() == stamp.frame &&
+                s.fg_show == mgpu::secondary_fg::picture::interpolated &&
+                generated_index < mgpu::secondary_fg::max_generated_frames)
+            {
+                stamp.kind = 3u;
+                stamp.generated_index = generated_index;
+                rest = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                return s.fg_interpolated[stamp.snapshot][generated_index];
+            }
+            return s.present_mode == 1 ? s.snapshots.input(stamp.snapshot) : s.snapshots.output(stamp.snapshot);
+        }
 
         // P5.3, the discriminator. Present=in shows the frame we HANDED to
         // DLSS-NR instead of the frame it produced - same adapter, same
@@ -10480,12 +10634,24 @@ namespace
             // transition that only the debug layer would catch.
             if (s.tex_in_show == nullptr) return nullptr;
             rest = s.tex_in_rest;
+            stamp.kind = 2u;
+            stamp.frame = s.consumed;
             return s.tex_in_show;
         }
         // P6.0: the LAST pass's output, not tex_out unconditionally. With
         // Passes=1 nr_final is tex_out and this is the P5 behaviour exactly.
         if (s.nr_final == nullptr) return nullptr;
         rest = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        stamp.frame = s.nr_final_frame;
+        const unsigned fg_index = s.fg_pair.generated_index();
+        if (s.fg_output_valid && s.fg_show == mgpu::secondary_fg::picture::interpolated &&
+            fg_index < mgpu::secondary_fg::max_generated_frames &&
+            s.fg_interpolated[0][fg_index] != nullptr)
+        {
+            stamp.kind = 3u;
+            return s.fg_interpolated[0][fg_index];
+        }
+        stamp.kind = 1u;
         return s.nr_final;
     }
 
@@ -10506,10 +10672,25 @@ namespace
         std::lock_guard<std::mutex> lk(s.cs);
         if (s.present_mode != 2) return nullptr;
         if (!s.nr_ok || s.profile) return nullptr;
+        if (s.async_neural)
+        {
+            if (!s.pipeline.displayed()) return nullptr;
+            rest = D3D12_RESOURCE_STATE_COMMON;
+            pos = s.split_pos;
+            return s.snapshots.input(s.pipeline.display_slot());
+        }
         if (s.tex_in_show == nullptr || s.nr_final == nullptr) return nullptr;
         rest = s.tex_in_rest;   // R26, see stream_present_source
         pos = s.split_pos;
         return s.tex_in_show;
+    }
+
+    void stream_snapshot_presented(unsigned index, ID3D12Fence *fence, UINT64 value)
+    {
+        auto &stream = str();
+        std::lock_guard<std::mutex> lock(stream.cs);
+        if (stream.async_neural && index < stream_state::PIPELINE_SLOTS)
+            stream.snapshots.presented(index, fence, value);
     }
 
     // P5.2 / DEFECT C. Declared up beside ngx_probe; defined here, where the
@@ -11178,26 +11359,6 @@ namespace
         return (v >= 0 && v <= 2) ? v : 0;
     }
 
-    // R312. DepthTransport: 1 (absent) output-size R32F, as today; 2 output-size 16-bit;
-    // 3 render-size R32F; 4 render-size 16-bit. The tap's .fx takes the format and size
-    // as preprocessor definitions (MGPU_DEPTH_FORMAT / _WIDTH / _HEIGHT, dllmain pushes
-    // them once per launch); the lane itself is generic from the arm on and needs no
-    // change. Read once; any other value reads as 1.
-    int ini_read_depth_transport()
-    {
-        static int cached = 0;
-        if (cached != 0) return cached;
-        char buf[INI_BYTES];
-        int v = 1;
-        if (ini_slurp(buf, sizeof buf))
-        {
-            const char *k = ini_find(buf, "DepthTransport");
-            if (k != nullptr) { v = atoi(k); if (v < 1 || v > 4) v = 1; }
-        }
-        cached = v;
-        return v;
-    }
-
     int ini_read_depth_inverted()
     {
         char buf[INI_BYTES];
@@ -11561,14 +11722,103 @@ namespace
         if (i == 0) snprintf(out, n, "none");
     }
 
-    void stream_release();
-}   // R311c: forward declaration for stream_release's drain call (r309 is defined after it)
-namespace r309 { namespace r311c { void drain(stream_state &s); } }
-namespace {
     void stream_release()
     {
+        g_fg_source_gate.disable();
+        mgpu::aligned::set_ready_dispatch(false);
         stream_state &s = str();
-        r309::r311c::drain(s);   // R311c: a probe scoring on the probe thread must leave the readbacks before they are released
+        if (s.pipeline.pending())
+        {
+            const auto completed = s.nf != nullptr ? s.nf->GetCompletedValue() : 0ull;
+            if (!s.pipeline.all_complete(completed))
+            {
+                s.finished = true;
+                s.present_release_blocked = true;
+                mgpu::diag::error("[MGPU][R326-PIPE] retaining resources while neural submission is unretired");
+                return;
+            }
+        }
+        if (mgpu::aligned::enabled() && mgpu::aligned::outstanding())
+        {
+            s.finished = true;
+            s.present_release_blocked = true;
+            s.mvec_live.store(false, std::memory_order_release);
+            mgpu::diag::error("[MGPU][R323-ALIGN] outgoing copies not retired; stream resources retained until process exit");
+            return;
+        }
+        bool read_failed = false;
+        if (!wait_present_reads(2000, read_failed))
+        {
+            s.present_release_blocked = true;
+            s.finished = true;
+            s.mvec_live.store(false, std::memory_order_release);
+            mgpu::diag::error("[MGPU][R321-READ] output still referenced by an unretired presentation read; retaining stream resources and NGX parameters until process exit.");
+            return;
+        }
+        s.present_release_blocked = false;
+        if (!mgpu::official_bridge::shutdown())
+        {
+            s.present_release_blocked = true;
+            s.finished = true;
+            return;
+        }
+        if (!s.snapshots.reads_complete())
+        {
+            s.finished = true;
+            s.present_release_blocked = true;
+            return;
+        }
+        s.snapshots.release();
+        s.pipeline_readbacks = {};
+        s.pipeline = {};
+        s.neural_settings_history = {};
+        s.async_neural = false;
+        s.probe_read_fence = 0;
+
+        if (s.fg_requested && s.nq != nullptr && s.nf != nullptr)
+        {
+            s.fg_output_valid = false;
+            s.fg_pair.clear();
+            s.fg_show = mgpu::secondary_fg::picture::none;
+            if (s.fg_present_fence != nullptr && s.nq != nullptr)
+                (void)s.nq->Wait(s.fg_present_fence, s.fg_present_value);
+            bool drained = false;
+            if (s.nq != nullptr && s.nf != nullptr)
+            {
+                const UINT64 finish = ++s.nf_value;
+                if (SUCCEEDED(s.nq->Signal(s.nf, finish)))
+                {
+                    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                    if (event != nullptr)
+                    {
+                        if (SUCCEEDED(s.nf->SetEventOnCompletion(finish, event)))
+                            (void)WaitForSingleObject(event, 5000);
+                        CloseHandle(event);
+                    }
+                    const UINT64 done = s.nf->GetCompletedValue();
+                    drained = done != UINT64_MAX && done >= finish;
+                }
+            }
+            if (!drained || !s.fg_stage.release_completed())
+            {
+                s.fg_release_blocked = true;
+                s.fg_queue_fault = true;
+                s.finished = true;
+                s.mvec_live.store(false, std::memory_order_release);
+                mgpu::diag::error("[MGPU][FG2] GPU completion or FG release is unconfirmed; keeping referenced resources and NGX parameters alive until process exit.");
+                return;
+            }
+            s.fg_release_blocked = false;
+            s.fg_ready = false;
+            s.fg_pending = false;
+            if (s.fg_hint_upload != nullptr) { s.fg_hint_upload->Release(); s.fg_hint_upload = nullptr; }
+            if (s.fg_hint_readback != nullptr) { s.fg_hint_readback->Release(); s.fg_hint_readback = nullptr; }
+            if (s.fg_disable_interpolation != nullptr) { s.fg_disable_interpolation->Release(); s.fg_disable_interpolation = nullptr; }
+            for (auto &outputs : s.fg_interpolated)
+                for (auto &output : outputs)
+                    if (output != nullptr) { output->Release(); output = nullptr; }
+            if (s.fg_present_fence != nullptr) { s.fg_present_fence->Release(); s.fg_present_fence = nullptr; }
+        }
 
         // ---- R26: DRAIN THE COPY QUEUE BEFORE ANYTHING IT REFERENCES IS
         // FREED ----
@@ -11607,6 +11857,12 @@ namespace {
         {
             (void)s.nfence->Signal((UINT64)s.cq_issued);
         }
+        if (s.color_copy_overlap && s.ncolor_ready != nullptr && s.cq_issued > 0 &&
+            s.ncolor_ready->GetCompletedValue() < (UINT64)s.cq_issued)
+            (void)s.ncolor_ready->Signal((UINT64)s.cq_issued);
+        if (s.guide_copy_overlap && s.ndepth_ready != nullptr && s.cq_issued > 0 &&
+            s.ndepth_ready->GetCompletedValue() < (UINT64)s.cq_issued)
+            (void)s.ndepth_ready->Signal((UINT64)s.cq_issued);
 
         // A TRAILING SIGNAL, not a wait on the last per-frame value. A queue
         // Signal is ordered behind everything already submitted on that queue,
@@ -11615,8 +11871,9 @@ namespace {
         // alone cannot promise.
         if (s.cq != nullptr && s.cqf != nullptr)
         {
-            const UINT64 fin = s.cqf_value + 1;
-            if (SUCCEEDED(s.cq->Signal(s.cqf, fin)) && s.cqf->GetCompletedValue() < fin)
+            const UINT64 fin = ++s.cqf_value;
+            const HRESULT signal_result = s.cq->Signal(s.cqf, fin);
+            if (SUCCEEDED(signal_result) && s.cqf->GetCompletedValue() < fin)
             {
                 HANDLE drain_ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
                 if (drain_ev != nullptr)
@@ -11625,6 +11882,14 @@ namespace {
                         WaitForSingleObject(drain_ev, 5000);
                     CloseHandle(drain_ev);
                 }
+            }
+            const UINT64 completed_copy = s.cqf->GetCompletedValue();
+            if (FAILED(signal_result) || completed_copy == UINT64_MAX || completed_copy < fin)
+            {
+                s.finished = true;
+                s.present_release_blocked = true;
+                mgpu::diag::error("[MGPU][PIPE3] copy queue not drained; retaining referenced resources");
+                return;
             }
         }
 
@@ -11658,7 +11923,6 @@ namespace {
         if (s.ds_rs   != nullptr) { s.ds_rs->Release();   s.ds_rs   = nullptr; }
         if (s.ds_heap != nullptr) { s.ds_heap->Release(); s.ds_heap = nullptr; }
         mgpu::nr16::release();   // R208: same point, same reason
-        mgpu::residual::release();   // R316: same point, same reason
         // R216: same point, same reason.
         if (s.vr_pso_g != nullptr) { s.vr_pso_g->Release(); s.vr_pso_g = nullptr; }
         if (s.vr_pso   != nullptr) { s.vr_pso->Release();   s.vr_pso   = nullptr; }
@@ -11694,6 +11958,7 @@ namespace {
         if (s.sr_nrout  != nullptr) { s.sr_nrout->Release();  s.sr_nrout  = nullptr; }
         if (s.sr_expose != nullptr) { s.sr_expose->Release(); s.sr_expose = nullptr; }
         s.nr_final = nullptr;   // borrowed; released with tex_out / tex_pong
+        s.nr_final_frame = 0;
         if (s.nr_read != nullptr) { s.nr_read->Release(); s.nr_read = nullptr; }
         // P8.0, before the textures it describes.
         if (s.mvec_up != nullptr && s.mvec_cpu != nullptr) { s.mvec_up->Unmap(0, nullptr); }
@@ -11701,20 +11966,25 @@ namespace {
         if (s.mvec_up  != nullptr) { s.mvec_up->Release();  s.mvec_up = nullptr; }
         if (s.tex_mvec != nullptr) { s.tex_mvec->Release(); s.tex_mvec = nullptr; }
         // R78: the mode-3 pair, released the same way tex_depth is.
-        for (unsigned mi = 0; mi < 2; ++mi)
+        for (unsigned mi = 0; mi < stream_state::PIPELINE_SLOTS; ++mi)
             if (s.tex_mvec_r[mi] != nullptr)
             { s.tex_mvec_r[mi]->Release(); s.tex_mvec_r[mi] = nullptr; }
         if (s.tex_mvec_keep != nullptr) { s.tex_mvec_keep->Release(); s.tex_mvec_keep = nullptr; }   // D2.0 NR2
         s.mvec_keep_f = 0;
-        for (unsigned di = 0; di < 2; ++di)
+        for (unsigned di = 0; di < stream_state::PIPELINE_SLOTS; ++di)
             if (s.tex_depth[di] != nullptr)
             { s.tex_depth[di]->Release(); s.tex_depth[di] = nullptr; }
         s.mvec_dirty = true;
         s.mvec_in_read = false;
-        if (s.tex_pong != nullptr) { s.tex_pong->Release(); s.tex_pong = nullptr; }
-        if (s.tex_out != nullptr) { s.tex_out->Release(); s.tex_out = nullptr; }
+        s.tex_pong = nullptr;
+        s.tex_out = nullptr;
+        for (int oi = stream_state::PIPELINE_SLOTS - 1; oi >= 0; --oi)
+        {
+            if (s.tex_pong_ring[oi] != nullptr) { s.tex_pong_ring[oi]->Release(); s.tex_pong_ring[oi] = nullptr; }
+            if (s.tex_out_ring[oi] != nullptr) { s.tex_out_ring[oi]->Release(); s.tex_out_ring[oi] = nullptr; }
+        }
         s.tex_in_show = nullptr;   // borrowed; released with the pair below
-        for (int ti = 1; ti >= 0; --ti)
+        for (int ti = stream_state::PIPELINE_SLOTS - 1; ti >= 0; --ti)
             if (s.tex_in[ti] != nullptr) { s.tex_in[ti]->Release(); s.tex_in[ti] = nullptr; }
         // nr_params is NOT destroyed: it is the core's capability block and the
         // NGX session is deliberately kept open for the process lifetime.
@@ -11725,21 +11995,36 @@ namespace {
         if (s.cq_tsread != nullptr) { s.cq_tsread->Release(); s.cq_tsread = nullptr; }
         if (s.cq_tsheap != nullptr) { s.cq_tsheap->Release(); s.cq_tsheap = nullptr; }
         if (s.cqf != nullptr) { s.cqf->Release(); s.cqf = nullptr; }
-        for (int ci = 1; ci >= 0; --ci)
+        for (int ci = stream_state::PIPELINE_SLOTS - 1; ci >= 0; --ci)
         {
+            if (s.cq_depth_lists[ci] != nullptr) { s.cq_depth_lists[ci]->Release(); s.cq_depth_lists[ci] = nullptr; }
+            if (s.cq_depth_allocators[ci] != nullptr) { s.cq_depth_allocators[ci]->Release(); s.cq_depth_allocators[ci] = nullptr; }
+            if (s.cq_color_lists[ci] != nullptr) { s.cq_color_lists[ci]->Release(); s.cq_color_lists[ci] = nullptr; }
+            if (s.cq_color_allocators[ci] != nullptr) { s.cq_color_allocators[ci]->Release(); s.cq_color_allocators[ci] = nullptr; }
             if (s.cql[ci] != nullptr) { s.cql[ci]->Release(); s.cql[ci] = nullptr; }
             if (s.cqa[ci] != nullptr) { s.cqa[ci]->Release(); s.cqa[ci] = nullptr; }
         }
         if (s.cq  != nullptr) { s.cq->Release();  s.cq = nullptr; }
         s.cqf_value = 0;
         s.cq_gated = false;
-        s.cqa_value[0] = 0;
-        s.cqa_value[1] = 0;
+        for (unsigned ci = 0; ci < stream_state::PIPELINE_SLOTS; ++ci)
+        {
+            s.cqa_value[ci] = 0;
+            s.cq_frame[ci] = 0;
+        }
         s.cq_ts_ok = false;
         if (s.nev != nullptr) { CloseHandle(s.nev); s.nev = nullptr; }
         if (s.nf  != nullptr) { s.nf->Release();  s.nf = nullptr; }
-        if (s.nl  != nullptr) { s.nl->Release();  s.nl = nullptr; }
-        if (s.na  != nullptr) { s.na->Release();  s.na = nullptr; }
+        s.nl = nullptr;
+        s.na = nullptr;
+        for (int ni = stream_state::PIPELINE_SLOTS - 1; ni >= 0; --ni)
+        {
+            if (s.async_nl[ni] != nullptr) { s.async_nl[ni]->Release(); s.async_nl[ni] = nullptr; }
+            if (s.async_na[ni] != nullptr) { s.async_na[ni]->Release(); s.async_na[ni] = nullptr; }
+            s.async_na_value[ni] = 0;
+        }
+        if (s.primary_nl != nullptr) { s.primary_nl->Release(); s.primary_nl = nullptr; }
+        if (s.primary_na != nullptr) { s.primary_na->Release(); s.primary_na = nullptr; }
         if (s.nq  != nullptr) { s.nq->Release();  s.nq = nullptr; }
         if (s.gate_ev != nullptr) { CloseHandle(s.gate_ev); s.gate_ev = nullptr; }
         if (s.tsread != nullptr) { s.tsread->Release(); s.tsread = nullptr; }
@@ -11750,22 +12035,14 @@ namespace {
         if (s.nseal != nullptr) { s.nseal->Release(); s.nseal = nullptr; }
         for (int i = 0; i < 2; ++i) if (s.cp_rb[i] != nullptr) { s.cp_rb[i]->Release(); s.cp_rb[i] = nullptr; }   // R258
         s.cp_stage = 0; s.cp_n = 0; s.cp_written = false; s.cp_worse = 0; s.learn_on = false; s.learn_decided = false; s.cp_win_n = 0;   // R278
-        s.cp_const_run = 0; s.cp_const_counted = false; s.cp_const_e0_min = s.cp_const_e0_max = 0.0;   // R305
-        s.x_edge_used = 0; s.x_edges_rec = 0; s.x_edge_sum[0] = s.x_edge_sum[1] = 0.0; s.x_edge_n[0] = s.x_edge_n[1] = 0; s.x_edge_fixed = false; s.x_edge_bad = 0; s.x_verdicts = 0; s.x_kx = s.x_ky = 0; s.x_still_motion = 0;   // R280e, R311e
-        // R309: everything but the key, which the hold reads again (learn_decided is reset above).
-        s.r309_aside = false; s.r309_zero_ready = false; s.r309_probe_own = false;
-        for (int i = 0; i < 6; ++i) s.r309_ring[i] = 0;
-        s.r309_ri = s.r309_rn = s.r309_brun = s.r309_own_judged = 0; s.r309_phase = 0; s.r309_wj = s.r309_ww = s.r309_wb = 0;
-        s.r309_cand_seen = -1; s.r309_gp_run = s.r309_t_end = s.r309_t_wake = 0;
-        s.r310_next_ms = 0; s.r310_dropped = 0;   // R310
+        s.cp_authoritative_seen = false;
+        s.x_edge_used = 0; s.x_edges_rec = 0; s.x_edge_sum[0] = s.x_edge_sum[1] = 0.0; s.x_edge_n[0] = s.x_edge_n[1] = 0; s.x_edge_fixed = false; s.x_edge_bad = 0; s.x_verdicts = 0; s.x_kx = s.x_ky = 0;   // R280e
         g_mvec_x_edge_req.store(0, std::memory_order_relaxed);
         g_mv_cand_req.store(-1, std::memory_order_relaxed);   // R278f
         for (int i = 0; i < 4; ++i) { s.cp_kx_votes[i] = 0; s.cp_ky_votes[i] = 0; }   // R278b: 4 buckets
         if (s.vp_rb != nullptr) { s.vp_rb->Release(); s.vp_rb = nullptr; }   // R257
-        if (s.r315_rb != nullptr) { s.r315_rb->Release(); s.r315_rb = nullptr; }   // R315b
-        s.r315_rb_pending = false; s.mvec2_off = 0;
-        g_r315_phase.store(R315_WINDOW, std::memory_order_relaxed);
         s.vp_pending = false; s.vp_n = 0;
+        s.vp_stamp = {};
         if (s.dp_rb != nullptr) { s.dp_rb->Release(); s.dp_rb = nullptr; }   // R244
         s.dp_pending = false; s.dp_n = 0; s.dp_agree = s.dp_disagree = 0; s.dp_written = false;
         if (s.nfence != nullptr) { s.nfence->Release(); s.nfence = nullptr; }
@@ -11853,6 +12130,14 @@ namespace {
 
         if (s.gfence_share != nullptr) { CloseHandle(s.gfence_share); s.gfence_share = nullptr; }
         if (s.gfence != nullptr) { s.gfence->Release(); s.gfence = nullptr; }
+        if (s.ncolor_ready != nullptr) { s.ncolor_ready->Release(); s.ncolor_ready = nullptr; }
+        if (s.gcolor_ready != nullptr) { s.gcolor_ready->Release(); s.gcolor_ready = nullptr; }
+        if (s.color_ready_share != nullptr) { CloseHandle(s.color_ready_share); s.color_ready_share = nullptr; }
+        s.color_copy_overlap = false;
+        if (s.ndepth_ready != nullptr) { s.ndepth_ready->Release(); s.ndepth_ready = nullptr; }
+        if (s.gdepth_ready != nullptr) { s.gdepth_ready->Release(); s.gdepth_ready = nullptr; }
+        if (s.depth_ready_share != nullptr) { CloseHandle(s.depth_ready_share); s.depth_ready_share = nullptr; }
+        s.guide_copy_overlap = false;
         if (s.nxfer != nullptr) { s.nxfer->Release(); s.nxfer = nullptr; }
         if (s.nheap != nullptr) { s.nheap->Release(); s.nheap = nullptr; }
         if (s.gup   != nullptr) { s.gup->Release();   s.gup = nullptr; }
@@ -13136,7 +13421,7 @@ namespace
         {
             vr_block(s, ndev, p, s.tex_in[p], nullptr, s.vr_small, nullptr);
             vr_block(s, ndev, 4u + p,
-                     (s.depth_mode != 0 && s.depth_w == s.width && s.depth_h == s.height) ? s.tex_depth[p] : nullptr,   // R312: see sr_write_descriptors
+                     (s.depth_mode != 0) ? s.tex_depth[p] : nullptr,
                      (s.vr_mv != nullptr) ? s.tex_mvec_r[p] : nullptr,
                      s.vr_depth, s.vr_mv);
         }
@@ -13796,7 +14081,7 @@ namespace
     static void nrs_probe_issue(stream_state &s, unsigned ii, ID3D12Resource *composite)
     {
         if (!s.nrs_probe_ok2 || s.nl == nullptr || composite == nullptr) return;
-        ID3D12Resource *native_tex = (ii < stream_state::RING) ? s.tex_in[ii] : nullptr;
+        ID3D12Resource *native_tex = (ii < stream_state::PIPELINE_SLOTS) ? s.tex_in[ii] : nullptr;
         if (native_tex == nullptr) return;
 
         const D3D12_BOX box{ s.nrs_probe_x, s.nrs_probe_y, 0u,
@@ -14024,6 +14309,9 @@ namespace
         }
 
         char w[9][160] = {};
+        char fg_create_where[160] = {};
+        char fg_eval_where[160] = {};
+        char fg_release_where[160] = {};
         ngx_pf_init           p_init  = (ngx_pf_init)          ngx_resolve(mods, "NVSDK_NGX_D3D12_Init",                    ngx_prefer::core,    w[0], sizeof w[0]);
         char w_iext41[160];
         ngx_pf_init_ext       p_init_ext41 = (ngx_pf_init_ext)   ngx_resolve(mods, "NVSDK_NGX_D3D12_Init_Ext",                ngx_prefer::core,    w_iext41, sizeof w_iext41);   // R256
@@ -14031,8 +14319,25 @@ namespace
         ngx_pf_init_ext       p_iext  = (ngx_pf_init_ext)      ngx_resolve_strict(mods.snippet, "NVSDK_NGX_D3D12_Init_Ext", w[2], sizeof w[2]);
         ngx_pf_populate_params p_pop  = (ngx_pf_populate_params)ngx_resolve_strict(mods.snippet, "NVSDK_NGX_D3D12_PopulateParameters_Impl", w[3], sizeof w[3]);
         ngx_pf_create_feature p_cre   = (ngx_pf_create_feature)ngx_resolve(mods, "NVSDK_NGX_D3D12_CreateFeature",           ngx_prefer::snippet, w[4], sizeof w[4]);
+        char w_alloc[160] = {};
+        s.nr_create = p_cre;
+        s.nr_allocate = (ngx_pf_allocate_params)ngx_resolve(
+            mods, "NVSDK_NGX_D3D12_AllocateParameters", ngx_prefer::core, w_alloc, sizeof w_alloc);
         s.nr_eval    = (ngx_pf_evaluate_feature)ngx_resolve(mods, "NVSDK_NGX_D3D12_EvaluateFeature", ngx_prefer::snippet, w[5], sizeof w[5]);
         s.nr_release = (ngx_pf_release_feature) ngx_resolve(mods, "NVSDK_NGX_D3D12_ReleaseFeature",  ngx_prefer::snippet, w[6], sizeof w[6]);
+        // FG2 is a core NGX feature, not a DLSS-NR snippet feature. Keep the
+        // two ABI-identical entry-point families separate: the private NR
+        // module owns Reserved18, while Feature_FrameGeneration must be sent
+        // to the driver's core runtime that passed the isolated FG probe.
+        s.fg_create = (ngx_pf_create_feature)ngx_resolve(
+            mods, "NVSDK_NGX_D3D12_CreateFeature", ngx_prefer::core,
+            fg_create_where, sizeof fg_create_where);
+        s.fg_eval = (ngx_pf_evaluate_feature)ngx_resolve(
+            mods, "NVSDK_NGX_D3D12_EvaluateFeature", ngx_prefer::core,
+            fg_eval_where, sizeof fg_eval_where);
+        s.fg_release = (ngx_pf_release_feature)ngx_resolve(
+            mods, "NVSDK_NGX_D3D12_ReleaseFeature", ngx_prefer::core,
+            fg_release_where, sizeof fg_release_where);
         // V36. Keep the session's own closer, and the device it belongs to.
         // See stream_ngx_shutdown() for why this is now called.
         s.ngx_shutdown = (ngx_pf_shutdown1)ngx_resolve(mods, "NVSDK_NGX_D3D12_Shutdown1",
@@ -14191,8 +14496,6 @@ namespace
             s.nrs_mode      = (unsigned)ini_read_float("NRMode", 1.0f);
             s.nrs_sharpness = ini_read_float("NRSharpness", 0.50f);
             s.nrs_color_strength = ini_read_float("NRColorStrength", 0.90f);
-            s.nrs_res_depth = !ini_has_key("NRScaleResolveDepth") ||
-                              ini_read_flag("NRScaleResolveDepth");   // absent = unchanged
             // R299: ONE KEY. The NRScale key must be PRESENT; absent = this whole path is off
             // and the arm is identical to main (ini_read_float's 1.0 default no longer turns it on).
             const bool nrs_want = ini_has_key("NRScale") &&
@@ -14626,12 +14929,10 @@ namespace
             mgpu::diag::info(line);
         }
 
-        // ---- R26: one input texture, or two ----
+        // ---- R26 / R330: input ring ----
         //
-        // tex_in[1] is created ONLY with the copy queue on. A CopyQueue=0 run
-        // therefore allocates exactly what every published run allocated, and
-        // the extra ~14.7 MB at 1440p is charged to the experiment that asked
-        // for it rather than to the default.
+        // The third slot is used only by the ordered asynchronous path. Keeping
+        // the ring allocated at arm avoids a first-use allocation stall.
         //
         // THE RESTING STATE FOLLOWS THE MODE, and this is not a detail. D3D12
         // decays any resource a COPY queue accessed back to COMMON when that
@@ -14645,18 +14946,15 @@ namespace
         // silence. See the note above stream_cq_submit.
         s.tex_in_rest = s.copy_queue ? D3D12_RESOURCE_STATE_COMMON
                                      : D3D12_RESOURCE_STATE_COPY_DEST;
-        HRESULT h = make_tex(ndev, s.width, s.height, infmt,
-                             D3D12_RESOURCE_FLAG_NONE,
-                             s.tex_in_rest, &s.tex_in[0]);
-        if (SUCCEEDED(h) && s.copy_queue)
+        HRESULT h = S_OK;
+        for (unsigned i = 0; i < stream_state::PIPELINE_SLOTS && SUCCEEDED(h); ++i)
             h = make_tex(ndev, s.width, s.height, infmt,
-                         D3D12_RESOURCE_FLAG_NONE,
-                         s.tex_in_rest, &s.tex_in[1]);
+                         D3D12_RESOURCE_FLAG_NONE, s.tex_in_rest, &s.tex_in[i]);
         if (SUCCEEDED(h)) s.tex_in_show = s.tex_in[0];
         if (SUCCEEDED(h))
             h = make_tex(ndev, s.width, s.height, nrfmt,
                          D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, &s.tex_out);
+                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, &s.tex_out_ring[0]);
         // P6.4: always created now. The pass count is changeable at runtime, so
         // "will it be used" is no longer knowable at arm time, and allocating it
         // lazily would mean a CreateFeature-sized stall the first time someone
@@ -14664,40 +14962,26 @@ namespace
         if (SUCCEEDED(h))
             h = make_tex(ndev, s.width, s.height, nrfmt,
                          D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, &s.tex_pong);
+                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, &s.tex_pong_ring[0]);
+        if (SUCCEEDED(h))
+        {
+            for (unsigned i = 1; i < stream_state::PIPELINE_SLOTS && SUCCEEDED(h); ++i)
+            {
+                h = make_tex(ndev, s.width, s.height, nrfmt,
+                             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS, &s.tex_out_ring[i]);
+                if (SUCCEEDED(h))
+                    h = make_tex(ndev, s.width, s.height, nrfmt,
+                                 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS, &s.tex_pong_ring[i]);
+            }
+            s.tex_out = s.tex_out_ring[0];
+            s.tex_pong = s.tex_pong_ring[0];
+        }
         if (SUCCEEDED(h)) h = make_buf(ndev, 1024, D3D12_HEAP_TYPE_READBACK, &s.nr_read);
         // R208: the FP16 input path. Reads NRInput16 itself; a failure here
         // leaves it off and never fails the arm.
         if (SUCCEEDED(h)) { (void)mgpu::nr16::arm(ndev, s.width, s.height); s.n16_ini_ok = true; }
-        // R316: the residual pass module. Reads its own keys (ResidualPass=1|2 ...); absent =
-        // nothing built. Handed R299's verdict so one residual path runs at a time (theirs
-        // wins), and the table's render size for ResidualRender=1 (R318). Never fails the arm.
-        if (SUCCEEDED(h))
-        {
-            unsigned rsd_rw = 0u, rsd_rh = 0u;
-            mgpu::calibrator::table rsd_ct;
-            if (mgpu::calibrator::read(rsd_ct) && (rsd_ct.have & mgpu::calibrator::KEY_RENDER_EXT) != 0u)
-            {
-                rsd_rw = rsd_ct.render_w; rsd_rh = rsd_ct.render_h;
-                // R327 (E13): swapped Width/Height vs OutWidth/OutHeight (KCD2) - the subrect is the render size.
-                if (rsd_ct.display_w != 0u && rsd_ct.display_h != 0u && rsd_rw > rsd_ct.display_w && rsd_rh > rsd_ct.display_h &&
-                    rsd_ct.sub_w != 0u && rsd_ct.sub_h != 0u && rsd_ct.sub_w <= rsd_ct.display_w && rsd_ct.sub_h <= rsd_ct.display_h)
-                { rsd_rw = rsd_ct.sub_w; rsd_rh = rsd_ct.sub_h; }
-            }
-            // R316a: settings that change the frame's shape, all fixed by this point of the arm
-            // (the R216 list plus the region keys). The first one found is named in the OFF line.
-            const char *rsd_why = nullptr;
-            if (s.sr_on != 0u)                 rsd_why = "SRUpscale is on";
-            else if (s.subrect_pct != 100u)    rsd_why = "Subrect is below 100";
-            else if (s.cc_on != 0u)            rsd_why = "CostCurve=1 is set";
-            else if (s.vr_mode != 0u)          rsd_why = "ScaleMode is set";
-            else if (s.p1f_mode != 0u)         rsd_why = "Pass1Fovea is set";
-            else if (s.p2r_on || s.p2f_mode != 0u) rsd_why = "Pass2Region / Pass2Fovea is set";
-            // R319: MAX_PASSES, not s.passes - the panel switches x1 / x2 live, so the carrying
-            // pass's feature is built at the work extent whichever one the session starts on.
-            (void)mgpu::residual::arm(ndev, s.width, s.height, nrfmt, stream_state::MAX_PASSES,
-                                      s.nrs_on, rsd_rw, rsd_rh, rsd_why, ini_read_srgb_input());
-        }
 
         // P8.0. Always created, like tex_pong and for the same reason: the mode
         // is live, so "will it be used" is not knowable at arm time and a lazy
@@ -14729,13 +15013,10 @@ namespace
         // became wrong.
         if (SUCCEEDED(h) && s.depth_mode != 0 && s.depth_w != 0 && s.depth_h != 0)
         {
-            h = make_tex(ndev, s.depth_w, s.depth_h, (DXGI_FORMAT)s.depth_format,
-                         D3D12_RESOURCE_FLAG_NONE,
-                         D3D12_RESOURCE_STATE_COPY_DEST, &s.tex_depth[0]);
-            if (SUCCEEDED(h))
+            for (unsigned i = 0; i < stream_state::PIPELINE_SLOTS && SUCCEEDED(h); ++i)
                 h = make_tex(ndev, s.depth_w, s.depth_h, (DXGI_FORMAT)s.depth_format,
                              D3D12_RESOURCE_FLAG_NONE,
-                             D3D12_RESOURCE_STATE_COPY_DEST, &s.tex_depth[1]);
+                             D3D12_RESOURCE_STATE_COPY_DEST, &s.tex_depth[i]);
         }
 
         // ---- R78: the MVec pair, at the GAME'S velocity size and format ----
@@ -14751,13 +15032,10 @@ namespace
         // a 1440p display extent, so a colour-only run does not pay for it.
         if (SUCCEEDED(h) && s.mvec_mode == 3 && s.mvec_w != 0 && s.mvec_h != 0)
         {
-            h = make_tex(ndev, s.mvec_w, s.mvec_h, (DXGI_FORMAT)s.mvec_format,
-                         D3D12_RESOURCE_FLAG_NONE,
-                         D3D12_RESOURCE_STATE_COPY_DEST, &s.tex_mvec_r[0]);
-            if (SUCCEEDED(h))
+            for (unsigned i = 0; i < stream_state::PIPELINE_SLOTS && SUCCEEDED(h); ++i)
                 h = make_tex(ndev, s.mvec_w, s.mvec_h, (DXGI_FORMAT)s.mvec_format,
                              D3D12_RESOURCE_FLAG_NONE,
-                             D3D12_RESOURCE_STATE_COPY_DEST, &s.tex_mvec_r[1]);
+                             D3D12_RESOURCE_STATE_COPY_DEST, &s.tex_mvec_r[i]);
             // D2.0 NR2: the kept copy, same description as the pair. Always in
             // mode 3 so the panel can switch the fix on live; one more texture
             // of the pair's size. Rests in NON_PIXEL_SHADER_RESOURCE.
@@ -14852,7 +15130,7 @@ namespace
                      "field - two of the four buffers Streamline registers as required. Grep "
                      "P9.0 across titles for the format table.",
                      exe, s.width, s.height, (int)s.format, (int)nrfmt, (int)infmt, bits,
-                     (s.mvec_mode == 0) ? "no" : (s.mvec_mode == 3 ? "real (mode 3, the game's or the tap's, as transported)" : "synthetic"));   // R311: mode 3 said 'synthetic' (MVEC ledger 2.3)
+                     (s.mvec_mode == 0) ? "no" : "synthetic");
             mgpu::diag::info(line);
         }
         if (FAILED(h))
@@ -14945,7 +15223,6 @@ namespace
                 mgpu::diag::info("[MGPU][OURS][NRS] create-time block: Color/Output on the work scratch, "
                                  "subrects at the work extent (step 2)");
             }
-            mgpu::residual::bind_create(s.nr_params);   // R316: no-op unless the module is on
             arm_sentinel_set();
             for (unsigned i = 0; i < stream_state::MAX_PASSES; ++i)
             {
@@ -14956,12 +15233,8 @@ namespace
                 // point of the port. Pass 2's region feature keeps its own size.
                 const bool p2f = (i > 0u && s.p2r_on && s.p2r_feature_region);
                 const bool nrs1 = s.nrs_on && i == 0u;
-                UINT cw  = nrs1 ? s.nrs_cap_w : (p2f ? s.p2r_w : s.width);
-                UINT chh = nrs1 ? s.nrs_cap_h : (p2f ? s.p2r_h : s.height);
-                // R316: the residual pass's feature at the work extent (the module is off
-                // whenever nrs1 can be true, so the two never meet). Off: cw/chh as above.
-                if (mgpu::residual::active() && i == mgpu::residual::pass())
-                    mgpu::residual::work_extent(cw, chh);
+                const UINT cw  = nrs1 ? s.nrs_cap_w : (p2f ? s.p2r_w : s.width);
+                const UINT chh = nrs1 ? s.nrs_cap_h : (p2f ? s.p2r_h : s.height);
                 s.nr_params->Set("DLSSNR.Width",  (unsigned int)cw);
                 s.nr_params->Set("DLSSNR.Height", (unsigned int)chh);
                 const LARGE_INTEGER t0 = [] { LARGE_INTEGER v{}; QueryPerformanceCounter(&v); return v; }();
@@ -15108,6 +15381,184 @@ namespace
         // ONLY when the final pass actually wrote.
         s.nr_final = nullptr;
         return true;
+    }
+
+    bool stream_secondary_fg_create(stream_state &s, ID3D12Device *ndev)
+    {
+        if (mgpu::official_bridge::selected()) { s.fg_attempted = true; return false; }
+        if (!s.fg_requested || s.fg_attempted || s.fg_ready) return s.fg_ready;
+        s.fg_attempted = true;
+        if (ndev == nullptr || s.nr_params == nullptr || s.fg_create == nullptr ||
+            s.nr_allocate == nullptr || s.fg_eval == nullptr || s.fg_release == nullptr ||
+            s.ngx_destroy_params == nullptr || s.nl == nullptr || s.na == nullptr ||
+            s.nq == nullptr || s.nf == nullptr || s.nev == nullptr ||
+            s.width == 0u || s.height == 0u || s.mvec_w == 0u || s.mvec_h == 0u ||
+            s.depth_w != s.mvec_w || s.depth_h != s.mvec_h ||
+            s.mvec_mode != 3 || s.depth_mode == 0 || s.profile || s.present_mode != 0 ||
+            s.sr_on != 0u || s.vr_mode != 0u || s.subrect_pct != 100u ||
+            s.p1f_mode != 0u || s.p2f_mode != 0u)
+        {
+            static bool said = false;
+            if (!said)
+            {
+                said = true;
+                mgpu::diag::warn("[MGPU][FG2] SecondaryFG requested but the GPU1 NGX, guide, or queue contract is incomplete; keeping the original NR present path.");
+            }
+            return false;
+        }
+
+        const auto capability_result = s.fg_stage.check_capability(s.nr_params, s.fg_multiplier);
+        if (NVSDK_NGX_FAILED(capability_result))
+        {
+            char report[320];
+            snprintf(report, sizeof report,
+                "[MGPU][M344-FG] requested=%ux runtime_max=%ux capability_reported=%u rejected=0x%08X; no FG buffers allocated, async NR unchanged",
+                s.fg_multiplier, s.fg_stage.maximum_generated_frames() + 1u,
+                unsigned(s.fg_stage.capability_reported()), unsigned(capability_result));
+            mgpu::diag::warn(report);
+            return false;
+        }
+        const DXGI_FORMAT output_format = nr_linear_format(s.format);
+        HRESULT hr = S_OK;
+        const unsigned generated_count = mgpu::secondary_fg::generated_frame_count(s.fg_multiplier);
+        for (auto &outputs : s.fg_interpolated)
+            for (unsigned output = 0; output < generated_count && SUCCEEDED(hr); ++output)
+                hr = make_tex(ndev, s.width, s.height, output_format,
+                              D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS, &outputs[output]);
+        if (SUCCEEDED(hr)) hr = make_uav_buf(ndev, 16u, &s.fg_disable_interpolation);
+        if (SUCCEEDED(hr)) hr = make_buf(ndev, 16u, D3D12_HEAP_TYPE_READBACK, &s.fg_hint_readback);
+        if (SUCCEEDED(hr)) hr = make_buf(ndev, 16u, D3D12_HEAP_TYPE_UPLOAD, &s.fg_hint_upload);
+        if (SUCCEEDED(hr))
+        {
+            void *mapped = nullptr;
+            const D3D12_RANGE empty{0, 0};
+            hr = s.fg_hint_upload->Map(0, &empty, &mapped);
+            if (SUCCEEDED(hr) && mapped != nullptr)
+            {
+                const unsigned sentinel[4] = {1u, 0u, 0u, 0u};
+                memcpy(mapped, sentinel, sizeof sentinel);
+                const D3D12_RANGE written{0, sizeof sentinel};
+                s.fg_hint_upload->Unmap(0, &written);
+            }
+            else hr = E_FAIL;
+        }
+        if (FAILED(hr))
+        {
+            if (s.fg_hint_upload != nullptr) { s.fg_hint_upload->Release(); s.fg_hint_upload = nullptr; }
+            if (s.fg_hint_readback != nullptr) { s.fg_hint_readback->Release(); s.fg_hint_readback = nullptr; }
+            if (s.fg_disable_interpolation != nullptr) { s.fg_disable_interpolation->Release(); s.fg_disable_interpolation = nullptr; }
+            for (auto &outputs : s.fg_interpolated)
+                for (auto &output : outputs)
+                    if (output != nullptr) { output->Release(); output = nullptr; }
+            mgpu::diag::warn("[MGPU][FG2] could not allocate the GPU1 interpolation outputs; original NR output remains active.");
+            return false;
+        }
+
+        mgpu::secondary_fg::ngx_api api{};
+        api.allocate = s.nr_allocate;
+        api.destroy = s.ngx_destroy_params;
+        api.create = reinterpret_cast<decltype(api.create)>(s.fg_create);
+        api.evaluate = reinterpret_cast<decltype(api.evaluate)>(s.fg_eval);
+        api.release = s.fg_release;
+        mgpu::secondary_fg::configuration config{};
+        config.width = s.width;
+        config.height = s.height;
+        config.guide_width = s.mvec_w;
+        config.guide_height = s.mvec_h;
+        config.format = output_format;
+        config.adapter_luid = ndev->GetAdapterLuid();
+        config.multiplier = s.fg_multiplier;
+
+        HRESULT list_hr = s.na->Reset();
+        if (SUCCEEDED(list_hr)) list_hr = s.nl->Reset(s.na, nullptr);
+        NVSDK_NGX_Result create_result = NVSDK_NGX_Result_FAIL_InvalidParameter;
+        if (SUCCEEDED(list_hr))
+        {
+            mgpu::diag::info("[MGPU][FG2] entering GPU1 DLSS FG CreateFeature; experimental path, no game-side FG replacement.");
+            create_result = s.fg_stage.create(ndev, s.nl, s.nr_params, api, config);
+            char capability_line[300];
+            snprintf(capability_line, sizeof capability_line,
+                "[MGPU][M344-FG] requested=%ux runtime_max=%ux capability_reported=%u create=0x%08X; maximum is runtime-reported, not a quality validation",
+                s.fg_multiplier, s.fg_stage.maximum_generated_frames() + 1u,
+                unsigned(s.fg_stage.capability_reported()), unsigned(create_result));
+            mgpu::diag::info(capability_line);
+            list_hr = s.nl->Close();
+        }
+        bool submitted = false;
+        if (SUCCEEDED(list_hr))
+        {
+            ID3D12CommandList *lists[1] = {s.nl};
+            s.nq->ExecuteCommandLists(1, lists);
+            submitted = true;
+            ++s.nf_value;
+            list_hr = s.nq->Signal(s.nf, s.nf_value);
+            if (SUCCEEDED(list_hr) && s.fg_stage.recording() &&
+                !s.fg_stage.track_submission(s.nf, s.nf_value)) list_hr = E_FAIL;
+            if (SUCCEEDED(list_hr))
+            {
+                list_hr = s.nf->SetEventOnCompletion(s.nf_value, s.nev);
+                if (SUCCEEDED(list_hr) && WaitForSingleObject(s.nev, 5000) != WAIT_OBJECT_0) list_hr = E_FAIL;
+                const UINT64 done = s.nf->GetCompletedValue();
+                if (done == UINT64_MAX || done < s.nf_value) list_hr = E_FAIL;
+            }
+        }
+        if (!submitted && s.fg_stage.recording()) (void)s.fg_stage.cancel_recording();
+        if (submitted && FAILED(list_hr))
+        {
+            s.fg_queue_fault = true;
+            s.finished = true;
+            s.mvec_live.store(false, std::memory_order_release);
+            mgpu::diag::error("[MGPU][FG2] initialization submission did not retire; stream stopped without freeing GPU resources.");
+            return false;
+        }
+        if (FAILED(list_hr) || NVSDK_NGX_FAILED(create_result) || !s.fg_stage.live())
+        {
+            char line[300];
+            snprintf(line, sizeof line,
+                     "[MGPU][FG2] secondary DLSS FG create refused: list=0x%08X ngx=0x%08X; original NR output remains active.",
+                     (unsigned)list_hr, (unsigned)create_result);
+            mgpu::diag::warn(line);
+            return false;
+        }
+        s.fg_ready = true;
+        mgpu::diag::info("[MGPU][FG2] secondary DLSS FG created on GPU1; it remains a fallback until a complete camera/depth/MV frame is accepted.");
+        return true;
+    }
+
+    void stream_secondary_fg_camera(const mgpu::fgmap::camera_snapshot &source,
+                                    NVSDK_NGX_DLSSG_Opt_Eval_Params &target)
+    {
+        memcpy(target.cameraViewToClip, source.camera_view_to_clip, sizeof target.cameraViewToClip);
+        memcpy(target.clipToCameraView, source.clip_to_camera_view, sizeof target.clipToCameraView);
+        memcpy(target.clipToLensClip, source.clip_to_lens_clip, sizeof target.clipToLensClip);
+        memcpy(target.clipToPrevClip, source.clip_to_prev_clip, sizeof target.clipToPrevClip);
+        memcpy(target.prevClipToClip, source.prev_clip_to_clip, sizeof target.prevClipToClip);
+        memcpy(target.jitterOffset, source.jitter, sizeof target.jitterOffset);
+        memcpy(target.mvecScale, source.mvec_scale, sizeof target.mvecScale);
+        memcpy(target.cameraPinholeOffset, source.pinhole_offset, sizeof target.cameraPinholeOffset);
+        memcpy(target.cameraPos, source.camera_pos, sizeof target.cameraPos);
+        memcpy(target.cameraUp, source.camera_up, sizeof target.cameraUp);
+        memcpy(target.cameraRight, source.camera_right, sizeof target.cameraRight);
+        memcpy(target.cameraFwd, source.camera_fwd, sizeof target.cameraFwd);
+        target.cameraNear = source.camera_near;
+        target.cameraFar = source.camera_far;
+        target.cameraFOV = source.camera_fov;
+        target.cameraAspectRatio = source.camera_aspect;
+        target.colorBuffersHDR = source.color_buffers_hdr != 0u;
+        target.depthInverted = source.depth_inverted != 0u;
+        target.cameraMotionIncluded = source.camera_motion_included != 0u;
+        target.reset = source.reset != 0u;
+        target.automodeOverrideReset = source.automode_override_reset != 0u;
+        target.notRenderingGameFrames = source.not_rendering_game_frames != 0u;
+        target.orthoProjection = source.ortho_projection != 0u;
+        target.motionVectorsInvalidValue = source.motion_vectors_invalid_value;
+        target.motionVectorsDilated = source.motion_vectors_dilated != 0u;
+        target.menuDetectionEnabled = source.menu_detection_enabled != 0u;
+        target.mvecsSubrectBase = {0, 0};
+        target.mvecsSubrectSize = {source.mvec_subrect_width, source.mvec_subrect_height};
+        target.depthSubrectBase = {0, 0};
+        target.depthSubrectSize = {source.depth_subrect_width, source.depth_subrect_height};
     }
 }
 
@@ -15291,17 +15742,6 @@ bool present_resize(UINT src_w, UINT src_h, int mode, DXGI_FORMAT src_fmt)   // 
                      "NOT paused, so expect one burst of DROPPED / REORDERED / STALE seals across "
                      "the next few frames. That is this resize, not the transport; frames after it "
                      "return to gap=1 OK.");
-    const double r313_r0 = mgpu::strace::now_ms();
-    if (mgpu::strace::on()) { char d[96]; snprintf(d, sizeof d, "%ux%u -> %ux%u mode=%d", cur_w, cur_h, src_w, src_h, mode); mgpu::strace::ev(mgpu::strace::R_BT, "present-resize-enter", d); }
-    // R313 DcompSafeMode=3: the composition chain is resized UNROOTED, so DWM
-    // never composes a chain that is changing size; rooted again (through the
-    // quiet gate) once the new size is committed. Key absent: nothing here.
-    bool r313_reroot = false;
-    if (mgpu::strace::safe_mode() == 3 && g_dcomp_device != nullptr && g_dcomp_rooted.load(std::memory_order_relaxed))
-    {
-        r313_reroot = true;
-        (void)dcomp_set_rooted(false, "resize (DcompSafeMode=3: unrooted while the chain changes size)");
-    }
 
     // GPU idle first. ResizeBuffers requires every backbuffer reference
     // released, and releasing a resource the GPU is still reading is the P1.0
@@ -15341,9 +15781,16 @@ bool present_resize(UINT src_w, UINT src_h, int mode, DXGI_FORMAT src_fmt)   // 
     }
 
     // want_fmt, not a constant. This is DEFECT H's actual repair.
-    const double r313_rb0 = mgpu::strace::now_ms();
-    const HRESULT rb = sc->ResizeBuffers(2, buf_w, buf_h, want_fmt, 0);
-    if (mgpu::strace::on()) { char d[96]; snprintf(d, sizeof d, "%ux%u fmt=%d, %.2f ms", buf_w, buf_h, (int)want_fmt, mgpu::strace::now_ms() - r313_rb0); mgpu::strace::ev(mgpu::strace::R_BT, "ResizeBuffers", d, (unsigned)rb); }
+    const HRESULT rb = sc->ResizeBuffers(2, buf_w, buf_h, want_fmt, S.swapchain_flags);
+    if (SUCCEEDED(rb) && S.presentation_feedback != nullptr)
+    {
+        const HRESULT pacing_status = S.presentation_feedback->initialize(sc, true);
+        if (FAILED(pacing_status))
+        {
+            g_present_read_fault.store(true);
+            mgpu::diag::error("[MGPU][M347-PRESENT] pacing reinitialization failed after resize; output held");
+        }
+    }
 
     // ---- V69: A COMPOSITION SWAPCHAIN NEEDS A COMMIT AFTER A RESIZE ----
     //
@@ -15364,11 +15811,7 @@ bool present_resize(UINT src_w, UINT src_h, int mode, DXGI_FORMAT src_fmt)   // 
     {
         dcomp_fit_apply(buf_w, buf_h, "present_resize");   // R271: no-op unless DcompFit=1
         IDCompositionDevice *dc = (IDCompositionDevice *)g_dcomp_device;
-        const double r313_c0 = mgpu::strace::now_ms();
         const HRESULT ch = dc->Commit();
-        HRESULT r313_wait = S_OK;
-        if (SUCCEEDED(ch) && mgpu::strace::safe_mode() == 3) r313_wait = dc->WaitForCommitCompletion();   // R313 value 3: serialized
-        if (mgpu::strace::on()) { char d[96]; snprintf(d, sizeof d, "after ResizeBuffers (V69), %.2f ms%s", mgpu::strace::now_ms() - r313_c0, mgpu::strace::safe_mode() == 3 ? " (waited for DWM)" : ""); mgpu::strace::ev(mgpu::strace::R_BT, "Commit", d, (unsigned)(FAILED(ch) ? ch : r313_wait)); }
         if (FAILED(ch))
         {
             char v69[300];
@@ -15423,12 +15866,8 @@ bool present_resize(UINT src_w, UINT src_h, int mode, DXGI_FORMAT src_fmt)   // 
                  "path only. Set Window=crop in mgpu.ini to get the P5 1280x720 window back.",
                  (unsigned)rb, buf_w, buf_h);
         mgpu::diag::error(l);
-        if (mgpu::strace::on()) mgpu::strace::ev(mgpu::strace::R_BT, "present-resize-exit", "RESIZE FAILED", (unsigned)rb);
-        if (r313_reroot) g_r313_root_deferred.store(1, std::memory_order_relaxed);   // R313 value 3: back on screen through the gate
         return false;
     }
-    if (mgpu::strace::on()) { char d[64]; snprintf(d, sizeof d, "ok, %.1f ms in all", mgpu::strace::now_ms() - r313_r0); mgpu::strace::ev(mgpu::strace::R_BT, "present-resize-exit", d); }
-    if (r313_reroot) g_r313_root_deferred.store(1, std::memory_order_relaxed);   // R313 value 3: rooted again once the game's chain is quiet
 
     snprintf(l, sizeof l,
              "[MGPU][P7.3] present chain resized: mode=%s source=%ux%u fmt=%d -> window %ux%u at "
@@ -15629,495 +16068,18 @@ namespace sfdiag
         }
     }
 }
-// =====================================================================
-// R309 (MVecStepAside=1, off by default; absent or 0 and nothing below runs).
-//
-// Far Cry 6, 2026-10-15: no buffer the tap, R280 or the R307/R308 sweep could
-// reach carries the camera's motion. The picture that did not strobe was the
-// ZERO field. Two things kept the add-on from landing there by itself:
-//   1. R258 rejects a candidate only when its BEST of 12 unit readings is worse
-//      than no motion. Colour, a constant 1.0, a G-buffer channel all read as
-//      PIXELS shift by under a pixel and score like no motion - never rejected -
-//      while the add-on binds them as UV, ~770 px of shift.
-//   2. MVecLearned=99 left MVec=3 armed on the probe's own pick with no copy
-//      route, so every evaluate ran with MVec UNSET - more strobe than zeros.
-// R309 scores the vectors AS BOUND (MVecScale in force) against no motion on
-// R258's own readbacks. 5 of the last 6 probes worse and none better (R311; 4 in R309): the
-// zero field is bound in place of the vectors, live; the copies and the judge
-// carry on, and 2 probes running that line up better step back. 99 binds the
-// zero field from the arm. A contract title is never touched.
-// COST, by construction and MEASURED by the lines below: probes run only in a
-// WINDOW - opened by gameplay (300 seals running with fresh vectors and valid
-// depth), 180 s of probes every 100 frames, then none for 20 minutes. Each
-// probe: three GPU 1 readback copies and a CPU loop on the bridge thread WITH
-// s.cs HELD - which is the lock the game's render thread takes every frame.
-// So the instrument times both sides: the bridge's hold per probe, and the
-// game thread's WAIT for s.cs (R168 times its hold, never its wait), inside
-// and outside the windows. QPC wall clock: not a GPU timing (P2.2).
-// =====================================================================
-namespace r309
-{
-    // R310 (ProbeCost=1): the game thread's wait for s.cs. One relaxed load a frame when off.
-    std::atomic<bool> time_game{false};
-    std::atomic<unsigned long long> gw_n{0}, gw_us_sum{0}, gw_us_max{0};
-
-    inline unsigned long long us_since(LONGLONG t0)
-    {
-        return (unsigned long long)(sfdiag::ms(t0, sfdiag::qpc()) * 1000.0);
-    }
-
-    inline void note_game_wait(LONGLONG t0)
-    {
-        const unsigned long long us = us_since(t0);
-        gw_n.fetch_add(1, std::memory_order_relaxed);
-        gw_us_sum.fetch_add(us, std::memory_order_relaxed);
-        unsigned long long m = gw_us_max.load(std::memory_order_relaxed);
-        while (us > m && !gw_us_max.compare_exchange_weak(m, us, std::memory_order_relaxed)) { }
-    }
-
-    // R309/R310: the keys, read from the file itself (ini_slurp + ini_find), never through
-    // ui_ini_read - its 12-slot mirror caches the first keys asked for, and a key of ours
-    // taking a slot would push a panel key out of the cache. Once per arm, and once per
-    // R280 init for MVecStepAside. A stack buffer, as the arm's own reads use.
-    struct keys { int step_aside; bool cost; bool offlock; unsigned test_ms; int learned; int source; bool thread; };   // R311: source; R311c: thread (ProbeOffLock=2)
-    keys read_keys()
-    {
-        keys k{ 0, false, false, 0u, -1, 0, false };
-        char vb[INI_BYTES];
-        if (!ini_slurp(vb, sizeof vb)) return k;
-        const char *v = ini_find(vb, "MVecStepAside");
-        if (v != nullptr)
-        {
-            if (_strnicmp(v, "auto", 4) == 0 || *v == '2') k.step_aside = 2;
-            else if (*v == '1') k.step_aside = 1;
-        }
-        // R311: MVecSource 0..3. MVecStepAside=1 (R309's forced zero field) is kept as the alias of
-        // MVecSource=3, so what was written down for it stays true; MVecSource wins when both are set.
-        v = ini_find(vb, "MVecSource");
-        if (v != nullptr && *v >= '0' && *v <= '3') k.source = *v - '0';
-        if (k.source == 0 && k.step_aside == 1) k.source = 3;
-        v = ini_find(vb, "ProbeCost");    k.cost = (v != nullptr && *v == '1');
-        v = ini_find(vb, "ProbeOffLock"); k.offlock = (v != nullptr && (*v == '1' || *v == '2')); k.thread = (v != nullptr && *v == '2');   // R311c: 2 = the loops on the probe thread
-        v = ini_find(vb, "ProbeOffLockTestMs");
-        if (v != nullptr) { int t = atoi(v); if (t < 0) t = 0; if (t > 20) t = 20; k.test_ms = (unsigned)t; }
-        v = ini_find(vb, "MVecLearned");
-        if (v != nullptr && *v >= '0' && *v <= '9') k.learned = atoi(v);
-        return k;
-    }
-
-    // R310: a probe's bridge time. HELD = total minus the time it ran with s.cs released.
-    inline void note_hold(stream_state &s, LONGLONG t0, bool own, unsigned long long off_us)
-    {
-        const unsigned long long tot = us_since(t0);
-        const unsigned long long held = (tot > off_us) ? tot - off_us : 0ull;
-        if (own) { ++s.r309_own_n;  s.r309_own_us  += held; if (held > s.r309_own_max)  s.r309_own_max  = held; s.r310_own_off_us  += off_us; }
-        else     { ++s.r309_base_n; s.r309_base_us += held; if (held > s.r309_base_max) s.r309_base_max = held; s.r310_base_off_us += off_us; }
-    }
-
-    // R310 (ProbeCost=1): the cost since the last call, then the counters start again.
-    void cost_line(stream_state &s, const char *what)
-    {
-        if (!s.r310_cost) return;
-        const unsigned long long gn = gw_n.exchange(0, std::memory_order_relaxed);
-        const unsigned long long gs = gw_us_sum.exchange(0, std::memory_order_relaxed);
-        const unsigned long long gm = gw_us_max.exchange(0, std::memory_order_relaxed);
-        char l[900];
-        snprintf(l, sizeof l,
-                 "[MGPU][R310] COST %s: R309's own probes %llu - bridge time per probe WITH s.cs HELD mean %.3f max %.3f ms, "
-                 "with s.cs released mean %.3f ms, %.1f MB of GPU 1 readback copies | R258's probes %llu - held mean %.3f max %.3f ms, "
-                 "released mean %.3f ms | GAME render thread waiting to take s.cs: %llu frames, mean %.4f max %.3f ms | "
-                 "ProbeOffLock=%d, %u probe(s) dropped by a release. QPC wall clock, not a GPU timing. A game-side max near "
-                 "a probe's held max means that probe stalled a game frame by about that much.",
-                 what,
-                 s.r309_own_n, s.r309_own_n ? (double)s.r309_own_us / 1000.0 / (double)s.r309_own_n : 0.0, (double)s.r309_own_max / 1000.0,
-                 s.r309_own_n ? (double)s.r310_own_off_us / 1000.0 / (double)s.r309_own_n : 0.0, (double)s.r309_bytes / 1048576.0,
-                 s.r309_base_n, s.r309_base_n ? (double)s.r309_base_us / 1000.0 / (double)s.r309_base_n : 0.0, (double)s.r309_base_max / 1000.0,
-                 s.r309_base_n ? (double)s.r310_base_off_us / 1000.0 / (double)s.r309_base_n : 0.0,
-                 gn, gn ? (double)gs / 1000.0 / (double)gn : 0.0, (double)gm / 1000.0,
-                 s.r310_offlock ? 1 : 0, s.r310_dropped);
-        mgpu::diag::info(l);
-        s.r309_own_n = s.r309_own_us = s.r309_own_max = 0; s.r309_base_n = s.r309_base_us = s.r309_base_max = 0;
-        s.r310_own_off_us = s.r310_base_off_us = 0; s.r309_bytes = 0;
-    }
-
-    // R310 (ProbeOffLock=1): s.cs released around a probe's pixel loops. Between off_begin and
-    // off_end the loops read only the three mapped readbacks - AddRef'd here, so a release on
-    // another thread (the NGX shutdown takes s.cs, then stream_release) cannot free them under
-    // the loop - and stream fields that nothing writes while the stream is armed: the arm writes
-    // them before s.armed, stream_release never writes them, the R280 verdict writes the scale
-    // on THIS thread. See the R310 section of the ledger for the review.
-    inline LONGLONG off_begin(stream_state &s, std::unique_lock<std::mutex> &lk, ID3D12Resource *ref[3])
-    {
-        ref[0] = s.cp_rb[0]; ref[1] = s.cp_rb[1]; ref[2] = s.vp_rb;
-        for (int i = 0; i < 3; ++i) if (ref[i] != nullptr) ref[i]->AddRef();
-        const unsigned ms = s.r310_test_ms;   // read before the unlock
-        const LONGLONG t0 = sfdiag::qpc();
-        lk.unlock();
-        if (ms != 0u) Sleep(ms);   // ProbeOffLockTestMs: widens the window ON PURPOSE, for the teardown test
-        return t0;
-    }
-    // Relocks. False when the stream was released meanwhile: the caller calls off_drop and returns.
-    inline bool off_end(stream_state &s, std::unique_lock<std::mutex> &lk, LONGLONG t0, unsigned long long &off_us)
-    {
-        lk.lock();
-        off_us += us_since(t0);
-        return s.armed && !s.ngx_shut_done;
-    }
-    void off_drop(stream_state &s, ID3D12Resource *ref[3], bool ok0, bool ok1, bool okm)
-    {
-        D3D12_RANGE none{ 0, 0 };
-        if (ok0 && ref[0] != nullptr) ref[0]->Unmap(0, &none);
-        if (ok1 && ref[1] != nullptr) ref[1]->Unmap(0, &none);
-        if (okm && ref[2] != nullptr) ref[2]->Unmap(0, &none);
-        for (int i = 0; i < 3; ++i) if (ref[i] != nullptr) { ref[i]->Release(); ref[i] = nullptr; }
-        ++s.r310_dropped;
-        mgpu::diag::warn("[MGPU][R310] the stream was released while a probe scored with s.cs released (ProbeOffLock=1): "
-                         "its results are dropped, the readbacks it held are unmapped and released, and this poll ends here. "
-                         "This is the teardown case the key's design covers - expected only when the game quits mid-probe.");
-    }
-
-    // =====================================================================
-    // R311c (ProbeOffLock=2): THE PROBE'S PIXEL LOOPS ON A THREAD OF THEIR OWN.
-    // R310 moved the loops off s.cs but left them on the bridge thread: at Far
-    // Cry 6's 250 fps the 16-17 ms of scoring held the consumer 4-7 frames and
-    // the ring dropped seals at every probe ([SEAL] DROPPED gap=7 on R258 probe
-    // frames in F0 / F0-PC and the R308-R310 runs with ProbeOffLock=1, never
-    // with 0). The loops read three mapped readbacks and locals only, so they
-    // do not need the bridge thread at all: the bridge thread maps, hands the
-    // pointers over, continues with the next seal, and on a later poll - with
-    // s.cs held as always - takes the result and runs the SAME decision code
-    // (votes, R278, R305, R309's judge, the lines) that it ran inline before.
-    // Nothing of the decision moved; only where the arithmetic runs.
-    // The compute functions below are the loops of the inline block, moved
-    // verbatim into functions so the inline path (ProbeOffLock=0/1) and the
-    // thread run one copy of them.
-    // While a job runs: no new probe is recorded (the readbacks are in use);
-    // teardown waits for the job (the loops check 'cancel' once per row).
-    // =====================================================================
-    namespace r311c
-    {
-        struct in
-        {
-            const unsigned char *c0, *c1, *mv;
-            unsigned W, H, P, fmt, bpp, MP, mfmt, mv_tb; size_t mv_bpp;
-            unsigned mvec_w, mvec_h, width, height;
-            float sx, sy;          // MVecScale in force when the probe was taken (ui_set_mvec_value writes it live under s.cs)
-            bool own, r309_b;
-        };
-        struct out
-        {
-            std::vector<double> ca, cb, ra, rb;
-            double svx, svy; unsigned long long nv, zeros;   // R311e: zeros = samples that decode as no motion
-            unsigned char cfirst[8]; bool cconst, chave;
-            double err[13]; unsigned long long cnt[13];
-            double r309_eb; unsigned long long r309_nb;
-            double e0s, ebs; unsigned long long n0, nb;   // own probes
-        };
-        // R309's own probe: the bound reading and no motion only (the inline loop, verbatim).
-        inline void compute_own(const in &i, out &o, const std::atomic<bool> *cancel)
-        {
-            const double sxm = (double)i.W / (double)i.mvec_w, sym = (double)i.H / (double)i.mvec_h;
-            const double bsx = (double)i.sx * (double)i.W / (double)i.width, bsy = (double)i.sy * (double)i.H / (double)i.height;
-            o.e0s = 0.0; o.ebs = 0.0; o.n0 = 0; o.nb = 0; o.zeros = 0; o.nv = 0;
-            for (unsigned y = i.H / 4; y < 3 * i.H / 4; y += 4)
-            {
-                if (cancel != nullptr && cancel->load(std::memory_order_relaxed)) return;
-                const unsigned my = (unsigned)((double)y / sym); if (my >= i.mvec_h) continue;
-                const unsigned char *mrow = i.mv + (size_t)my * i.MP;
-                const unsigned char *r1 = i.c1 + (size_t)y * i.P, *r0 = i.c0 + (size_t)y * i.P;
-                for (unsigned x = i.W / 4; x < 3 * i.W / 4; x += 4)
-                {
-                    const unsigned mxx = (unsigned)((double)x / sxm); if (mxx >= i.mvec_w) continue;
-                    float vx, vy;
-                    const unsigned char *pv = mrow + (size_t)mxx * i.mv_bpp;
-                    if (!mv_read(i.mfmt, pv, vx, vy)) { const float *q = (const float *)pv; vx = q[0]; vy = q[1]; }
-                    const double l2 = lum_at(r1 + (size_t)x * i.bpp, i.fmt), l1 = lum_at(r0 + (size_t)x * i.bpp, i.fmt);
-                    o.e0s += (l1 > l2 ? l1 - l2 : l2 - l1); ++o.n0;
-                    const double px = (double)x + bsx * (double)vx + 0.5, py = (double)y + bsy * (double)vy + 0.5;   // nearest pixel
-                    if (px < 0 || py < 0 || px >= (double)i.W - 1 || py >= (double)i.H - 1) continue;
-                    const double lb = lum_at(i.c0 + (size_t)(unsigned)py * i.P + (size_t)(unsigned)px * i.bpp, i.fmt);
-                    o.ebs += (lb > l2 ? lb - l2 : l2 - lb); ++o.nb;
-                }
-            }
-        }
-        // R258's probe: the profile, the mean vector + R305 constant check, the 12-candidate warp
-        // test and R309's bound reading (the inline loops, verbatim; ax/ay are derived by the caller).
-        inline void compute_base(const in &i, out &o, const std::atomic<bool> *cancel)
-        {
-            const unsigned W = i.W, H = i.H, P = i.P, fmt = i.fmt, bpp = i.bpp, MP = i.MP, mfmt = i.mfmt, mv_tb = i.mv_tb;
-            const size_t mv_bpp = i.mv_bpp;
-            const unsigned x0 = W / 4, x1 = 3 * W / 4, y0 = H / 4, y1 = 3 * H / 4;
-            o.ca.assign(W, 0.0); o.cb.assign(W, 0.0); o.ra.assign(H, 0.0); o.rb.assign(H, 0.0);
-            for (unsigned y = y0; y < y1; y += 2)
-            {
-                if (cancel != nullptr && cancel->load(std::memory_order_relaxed)) return;
-                const unsigned char *r0 = i.c0 + (size_t)y * P, *r1 = i.c1 + (size_t)y * P;
-                for (unsigned x = x0; x < x1; x += 2)
-                {
-                    const double l0 = lum_at(r0 + (size_t)x * bpp, fmt), l1 = lum_at(r1 + (size_t)x * bpp, fmt);
-                    o.ca[x] += l0; o.cb[x] += l1; o.ra[y] += l0; o.rb[y] += l1;
-                }
-            }
-            o.svx = 0; o.svy = 0; o.nv = 0; o.zeros = 0;
-            auto read_mv = [mfmt](const unsigned char *px, float &vx, float &vy)
-            {
-                if (!mv_read(mfmt, px, vx, vy)) { const float *q = (const float *)px; vx = q[0]; vy = q[1]; }
-            };
-            memset(o.cfirst, 0, sizeof o.cfirst); o.cconst = true; o.chave = false;
-            const unsigned mx0 = i.mvec_w / 4, mx1 = 3 * i.mvec_w / 4, my0 = i.mvec_h / 4, my1 = 3 * i.mvec_h / 4;
-            for (unsigned y = my0; y < my1; y += 2)
-            {
-                if (cancel != nullptr && cancel->load(std::memory_order_relaxed)) return;
-                const unsigned char *row = i.mv + (size_t)y * MP;
-                for (unsigned x = mx0; x < mx1; x += 4)
-                {
-                    float vx, vy;
-                    read_mv(row + (size_t)x * mv_bpp, vx, vy);   // R280o
-                    o.svx += vx; o.svy += vy; ++o.nv;
-                    if (mv_tb != 0u && mv_is_zero_encoding(mfmt, row + (size_t)x * mv_bpp)) ++o.zeros;   // R311e
-                    if (mv_tb != 0u)   // R305
-                    {
-                        const unsigned char *t = row + (size_t)x * mv_bpp;
-                        if (!o.chave) { memcpy(o.cfirst, t, mv_tb); o.chave = true; }
-                        else if (o.cconst && memcmp(t, o.cfirst, mv_tb) != 0) o.cconst = false;
-                    }
-                }
-            }
-            for (int c = 0; c < 13; ++c) { o.err[c] = 0.0; o.cnt[c] = 0; }
-            const double KX[4] = { (double)W, -(double)W, (double)W * 0.5, -(double)W * 0.5 };
-            const double KY[4] = { (double)H, -(double)H, (double)H * 0.5, -(double)H * 0.5 };
-            const double sxm = (double)W / (double)i.mvec_w, sym = (double)H / (double)i.mvec_h;   // vector grid -> colour grid
-            const double sxv[12] = { KX[0], KX[0], KX[1], KX[1], KX[2], KX[2], KX[3], KX[3],  sxm,  sxm, -sxm, -sxm };
-            const double syv[12] = { KY[0], KY[1], KY[0], KY[1], KY[2], KY[3], KY[2], KY[3],  sym, -sym,  sym, -sym };
-            const bool r309_b = i.r309_b;
-            const double r309_bsx = (double)i.sx * (double)W / (double)i.width, r309_bsy = (double)i.sy * (double)H / (double)i.height;
-            o.r309_eb = 0.0; o.r309_nb = 0;
-            for (unsigned y = y0; y < y1; y += 4)
-            {
-                if (cancel != nullptr && cancel->load(std::memory_order_relaxed)) return;
-                const unsigned char *r1 = i.c1 + (size_t)y * P;
-                const unsigned my = (unsigned)((double)y / sym); if (my >= i.mvec_h) continue;
-                const unsigned char *mrow = i.mv + (size_t)my * MP;
-                for (unsigned x = x0; x < x1; x += 4)
-                {
-                    const unsigned mxx = (unsigned)((double)x / sxm); if (mxx >= i.mvec_w) continue;
-                    float vx, vy;
-                    read_mv(mrow + (size_t)mxx * mv_bpp, vx, vy);   // R280o
-                    const double l2 = lum_at(r1 + (size_t)x * bpp, fmt);
-                    // baseline
-                    { const double l1 = lum_at(i.c0 + (size_t)y * P + (size_t)x * bpp, fmt); o.err[0] += (l1 > l2 ? l1 - l2 : l2 - l1); ++o.cnt[0]; }
-                    for (int c = 0; c < 12; ++c)
-                    {
-                        const double px = (double)x + sxv[c] * (double)vx, py = (double)y + syv[c] * (double)vy;
-                        if (px < 0 || py < 0 || px >= (double)W - 1 || py >= (double)H - 1) continue;
-                        const double l1 = lum_at(i.c0 + (size_t)(unsigned)py * P + (size_t)(unsigned)px * bpp, fmt);
-                        o.err[1 + c] += (l1 > l2 ? l1 - l2 : l2 - l1); ++o.cnt[1 + c];
-                    }
-                    if (r309_b)   // R309
-                    {
-                        const double bx = (double)x + r309_bsx * (double)vx + 0.5, by = (double)y + r309_bsy * (double)vy + 0.5;   // nearest pixel
-                        if (bx >= 0 && by >= 0 && bx < (double)W - 1 && by < (double)H - 1)
-                        {
-                            const double lb = lum_at(i.c0 + (size_t)(unsigned)by * P + (size_t)(unsigned)bx * bpp, fmt);
-                            o.r309_eb += (lb > l2 ? lb - l2 : l2 - lb); ++o.r309_nb;
-                        }
-                    }
-                }
-            }
-        }
-
-        // The one job. state: 0 idle, 1 running, 2 done (result waiting for the bridge thread).
-        struct job
-        {
-            in i; out o;
-            bool ok0, ok1, okm; ID3D12Resource *ref[3];
-            unsigned long long f;      // the probe's seal, for the lines and the judge
-            LONGLONG t0;               // launch time; us = the thread's compute time
-            unsigned long long us;
-            bool own;
-        };
-        job g_job{};
-        std::atomic<int> g_state{0};
-        std::atomic<bool> g_cancel{false}, g_quit{false};
-        HANDLE g_ev = nullptr, g_th = nullptr;
-
-        DWORD WINAPI run(void *)
-        {
-            for (;;)
-            {
-                WaitForSingleObject(g_ev, 250);
-                if (g_quit.load(std::memory_order_relaxed)) return 0;
-                if (g_state.load(std::memory_order_acquire) != 1) continue;
-                const LONGLONG t0 = sfdiag::qpc();
-                if (g_job.own) compute_own(g_job.i, g_job.o, &g_cancel);
-                else           compute_base(g_job.i, g_job.o, &g_cancel);
-                g_job.us = us_since(t0);
-                g_state.store(2, std::memory_order_release);
-            }
-        }
-        inline bool idle() { return g_state.load(std::memory_order_acquire) == 0; }
-        inline bool done() { return g_state.load(std::memory_order_acquire) == 2; }
-        // Bridge thread, s.cs held: hand the mapped readbacks over. The refs are AddRef'd like off_begin.
-        bool launch(stream_state &s, const in &i, bool ok0, bool ok1, bool okm, unsigned long long f, bool own)
-        {
-            if (g_th == nullptr)
-            {
-                g_ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-                if (g_ev == nullptr) return false;
-                g_th = CreateThread(nullptr, 0, &run, nullptr, 0, nullptr);
-                if (g_th == nullptr) { CloseHandle(g_ev); g_ev = nullptr; return false; }
-            }
-            if (!idle()) return false;
-            g_job.i = i; g_job.ok0 = ok0; g_job.ok1 = ok1; g_job.okm = okm; g_job.f = f; g_job.own = own; g_job.us = 0;
-            g_job.ref[0] = s.cp_rb[0]; g_job.ref[1] = s.cp_rb[1]; g_job.ref[2] = s.vp_rb;
-            for (int k = 0; k < 3; ++k) if (g_job.ref[k] != nullptr) g_job.ref[k]->AddRef();
-            g_job.t0 = sfdiag::qpc();
-            g_cancel.store(false, std::memory_order_relaxed);
-            g_state.store(1, std::memory_order_release);
-            SetEvent(g_ev);
-            return true;
-        }
-        // Bridge thread: the result was taken; unmap through the held refs and release them.
-        void finish()
-        {
-            D3D12_RANGE none{ 0, 0 };
-            if (g_job.ok0 && g_job.ref[0] != nullptr) g_job.ref[0]->Unmap(0, &none);
-            if (g_job.ok1 && g_job.ref[1] != nullptr) g_job.ref[1]->Unmap(0, &none);
-            if (g_job.okm && g_job.ref[2] != nullptr) g_job.ref[2]->Unmap(0, &none);
-            for (int k = 0; k < 3; ++k) if (g_job.ref[k] != nullptr) { g_job.ref[k]->Release(); g_job.ref[k] = nullptr; }
-            g_state.store(0, std::memory_order_release);
-        }
-        // Teardown (stream_release): cancel a running job, wait for the thread to leave the loops, drop the result.
-        void drain(stream_state &s)
-        {
-            if (idle()) return;
-            g_cancel.store(true, std::memory_order_relaxed);
-            for (int w = 0; w < 200 && g_state.load(std::memory_order_acquire) == 1; ++w) Sleep(5);   // the loops check cancel per row
-            if (g_state.load(std::memory_order_acquire) == 1) return;   // still inside a row after 1 s: leave the refs held (a leak, not a free under a reader)
-            finish();
-            ++s.r310_dropped;
-            mgpu::diag::warn("[MGPU][R311c] the stream was released while a probe scored on the probe thread (ProbeOffLock=2): "
-                             "its result is dropped, the readbacks it held are unmapped and released.");
-        }
-        void stop_thread()
-        {
-            if (g_th == nullptr) return;
-            g_quit.store(true, std::memory_order_relaxed);
-            if (g_ev != nullptr) SetEvent(g_ev);
-            WaitForSingleObject(g_th, 2000);
-            CloseHandle(g_th); g_th = nullptr;
-            if (g_ev != nullptr) { CloseHandle(g_ev); g_ev = nullptr; }
-        }
-    }
-
-    // Once a poll, before the probe schedule: the gameplay gate and the window clock.
-    // True when R309 may start a probe on this seal.
-    bool window(stream_state &s, bool fresh, bool depth_ok, unsigned long long f)
-    {
-        const bool gp = fresh && depth_ok;
-        s.r309_gp_run = gp ? s.r309_gp_run + 1ull : 0ull;
-        const unsigned long long now = GetTickCount64();
-        char l[420];
-        if (s.r309_phase == 0u && s.r309_gp_run >= 300ull)
-        {
-            if (vectors_contract()) { s.r309_phase = 2u; s.r309_t_wake = ~0ull; return false; }   // a contract title: never (R311: unless MVecSource is set)
-            cost_line(s, "before this window (R258's own probes only)");
-            s.r309_phase = 1u; s.r309_t_end = now + 180000ull; ++s.r309_windows;
-            s.r309_wj = s.r309_ww = s.r309_wb = 0;
-            snprintf(l, sizeof l, "[MGPU][R309] WINDOW %u OPEN at f=%llu: gameplay seen (300 seals running with fresh vectors and valid depth). "
-                                  "Probes every 100 frames for 180 s, then none for 20 minutes. Bound field now: %s.",
-                     s.r309_windows, f, s.r309_aside ? "ZERO (stepped aside)" : "the vectors");
-            mgpu::diag::info(l);
-        }
-        else if (s.r309_phase == 1u && now >= s.r309_t_end)
-        {
-            s.r309_phase = 2u; s.r309_t_wake = now + 1200000ull;
-            char w[48]; snprintf(w, sizeof w, "window %u", s.r309_windows);
-            cost_line(s, w);
-            snprintf(l, sizeof l, "[MGPU][R309] WINDOW %u CLOSED at f=%llu: %u probes judged, %u worse than no motion, %u better. Bound field: %s. "
-                                  "Next window in 20 minutes, once gameplay is seen again. %u switch(es) this session.",
-                     s.r309_windows, f, s.r309_wj, s.r309_ww, s.r309_wb, s.r309_aside ? "ZERO (stepped aside)" : "the vectors", s.r309_switches);
-            mgpu::diag::info(l);
-        }
-        else if (s.r309_phase == 2u && now >= s.r309_t_wake) { s.r309_phase = 0u; s.r309_gp_run = 0ull; }
-        return s.r309_phase == 1u && gp;
-    }
-
-    // One judged probe: none = the no-motion error, bound = the error with the vectors
-    // followed at the scale in force. Bridge thread, s.cs held, no file I/O.
-    void judge(stream_state &s, double e0, double eb, unsigned long long n0, unsigned long long nb,
-               unsigned long long f, bool own)
-    {
-        if (n0 <= 1000ull || nb <= 1000ull) return;
-        if (e0 < 0.05) return;   // the two colour frames are the same frame: nothing to judge on
-        if (vectors_contract()) return;   // a contract title keeps its own vectors (R311: unless MVecSource is set)
-        if (s.r309_cand_seen != s.learn_cand)   // the tap moved to another candidate: fresh evidence
-        {
-            s.r309_cand_seen = s.learn_cand;
-            for (int i = 0; i < 6; ++i) s.r309_ring[i] = 0;
-            s.r309_ri = s.r309_rn = s.r309_brun = 0;
-        }
-        int o = 0;
-        if (eb > e0 * 1.10 + 0.25) o = -1;                    // worse than no motion - also with the camera still
-        else if (e0 >= 2.0 && eb < e0 * 0.90) o = +1;        // better, which needs motion
-        s.r309_ring[s.r309_ri] = o; s.r309_ri = (s.r309_ri + 1u) % 6u; if (s.r309_rn < 6u) ++s.r309_rn;
-        s.r309_brun = (o > 0) ? s.r309_brun + 1u : 0u;
-        unsigned w = 0, b = 0;
-        for (unsigned i = 0; i < s.r309_rn; ++i) { if (s.r309_ring[i] < 0) ++w; else if (s.r309_ring[i] > 0) ++b; }
-        ++s.r309_wj; if (o < 0) ++s.r309_ww; else if (o > 0) ++s.r309_wb;
-        char l[520];
-        if (!s.r309_aside && s.r309_rn >= 6u && w >= 5u && b == 0u)   // R311: 5 of 6 (was 4 of 6). Replayed on the FC6 runs 1-5, RE4 and Skyrim: FC6 still lands within one probe, RE4 keeps a margin of 2
-        {
-            s.r309_aside = true; ++s.r309_switches;
-            if (g_mvec_x_active.load(std::memory_order_relaxed))   // R311d: the bound vectors were R280's extract
-            {
-                g_mvec_x_stand_down.store(true, std::memory_order_relaxed);
-                s.r309_phase = 2u; s.r309_t_wake = ~0ull;   // the judge is final for this session: no more windows, no return
-                mgpu::diag::warn("[MGPU][R311d] the vectors the judge stepped aside from were R280's extract: R280 STANDS DOWN for this session "
-                                 "(no more extraction or staging copies on the game's queue), the zero field stays bound, and the judge closes. "
-                                 "The tap's learning continues on the game's own targets as before R280.");
-            }
-            snprintf(l, sizeof l, "[MGPU][R309] STEP ASIDE at f=%llu: %u of the last 6 probes lined up WORSE than no motion with the vectors as bound "
-                                  "(scale %.0f,%.0f), none better (last: none=%.3g bound=%.3g). The ZERO field is bound from the next evaluate; "
-                                  "the vectors keep being copied and judged, and 2 probes running that line up better bring them back.",
-                     f, w, s.mvec_scale_x, s.mvec_scale_y, e0, eb);
-            mgpu::diag::warn(l);
-            return;
-        }
-        if (s.r309_aside && s.r309_brun >= 2u)
-        {
-            s.r309_aside = false; ++s.r309_switches;
-            for (int i = 0; i < 6; ++i) s.r309_ring[i] = 0;
-            s.r309_ri = s.r309_rn = 0;
-            snprintf(l, sizeof l, "[MGPU][R309] BACK ON THE VECTORS at f=%llu: 2 probes running lined up better than no motion with the vectors as bound "
-                                  "(last: none=%.3g bound=%.3g, scale %.0f,%.0f).", f, e0, eb, s.mvec_scale_x, s.mvec_scale_y);
-            mgpu::diag::warn(l);
-            return;
-        }
-        if (!own || (++s.r309_own_judged % 30u) == 0u)
-        {
-            snprintf(l, sizeof l, "[MGPU][R309] probe at f=%llu (%s): none=%.3g bound=%.3g (scale %.0f,%.0f) -> %s | last %u: %u worse, %u better | bound field: %s",
-                     f, own ? "R309's, every 30th logged" : "R258's", e0, eb, s.mvec_scale_x, s.mvec_scale_y,
-                     o < 0 ? "WORSE than no motion" : (o > 0 ? "better" : "neither"), s.r309_rn, w, b, s.r309_aside ? "ZERO" : "the vectors");
-            mgpu::diag::info(l);
-        }
-    }
-}
-// R309: MVecStepAside for mvec_extract (R280 is not armed when it is 1). From the file, never the mirror.
-int mvec_step_aside_mode() { return r309::read_keys().step_aside; }
-// R311: MVecSource from the file (R280's arm asks before the hold has read the keys); stored for the hot paths.
-int mvec_source_mode()
-{
-    const int v = r309::read_keys().source;
-    g_r311_src.store(v, std::memory_order_relaxed);
-    return v;
-}
 bool stream_present_gate(unsigned long timeout_ms)
 {
+    if (g_present_read_fault.load(std::memory_order_relaxed))
+    {
+        Sleep(timeout_ms != 0 ? timeout_ms : 1u);
+        return false;
+    }
     stream_state &s = str();
     ID3D12Fence *f = nullptr;
     UINT64 want = 0;
     HANDLE ev = nullptr;
+    HANDLE source_ev = nullptr;
 
     // R167. Four timestamps, one bracket each. See the sfdiag block above for
     // why the partition is the whole point.
@@ -16126,6 +16088,7 @@ bool stream_present_gate(unsigned long timeout_ms)
     DWORD wr = 0;
     bool took_wait = false;
     bool ret = false;
+    unsigned fg_sleep_ms = 0;
 
     {
         std::lock_guard<std::mutex> lk(s.cs);
@@ -16147,25 +16110,48 @@ bool stream_present_gate(unsigned long timeout_ms)
         // Gating is about whether a new FRAME exists, not about whether we
         // intend to draw it: the cycling colour updating at the producer's
         // rate instead of the display's is still a live window.
-        if (!s.armed || s.summarised)
-        { ++s.gate_presents; ret = true; }
-        else if (s.consumed != s.presented)
+        if (!stream_secondary_fg_publish(s)) return false;
+        if (s.fg_requested && s.fg_queue_fault)
+            fg_sleep_ms = timeout_ms != 0 ? timeout_ms : 1u;
+        else if (s.fg_pair.pending())
         {
-            s.presented = s.consumed;
+            const auto now = secondary_fg_now_ns();
+            s.fg_show = s.fg_pair.next(now);
+            if (s.fg_show != mgpu::secondary_fg::picture::none)
+            {
+                s.presented = s.fg_pair.frame_id();
+                ++s.gate_presents;
+                ret = true;
+            }
+            else
+            {
+                const auto remaining = s.fg_pair.real_due_ns() - now;
+                const unsigned delay = static_cast<unsigned>((remaining + 999999ull) / 1000000ull);
+                const unsigned limit = timeout_ms != 0 ? timeout_ms : 1u;
+                fg_sleep_ms = delay < limit ? delay : limit;
+                if (fg_sleep_ms == 0) fg_sleep_ms = 1;
+            }
+        }
+        else if (!s.armed || s.summarised)
+        { ++s.gate_presents; ret = true; }
+        else if ((s.async_neural ? s.pipeline.display_seal() : s.consumed) != s.presented)
+        {
+            s.presented = s.async_neural ? s.pipeline.display_seal() : s.consumed;
             ++s.gate_presents;
             ret = true;
         }
         else
         {
-            f = s.nfence; want = (UINT64)(s.consumed + 1); ev = s.gate_ev;
-            // PerfPrefetch=1 (with Perf11=1) only. The consume loop then waits for the frame the
-            // copy queue ARMED (s.cq_issued), which can be ahead of consumed+1. consumed+1 has
-            // usually arrived already, so the wait below returned at once and the bridge thread
-            // spun: 7.6 M gate calls and ~2000 [R167] lines/min in a 22-min Starfield run. Wait
-            // for the armed frame instead - the same arrival the copy queue itself waits for.
-            // PerfPrefetch absent: unchanged.
-            if (mgpu::t119::prefetch_active() && s.cq_gated && s.cq_issued > s.consumed + 1ull)
-                want = (UINT64)s.cq_issued;
+            if (s.async_neural && s.pipeline.pending())
+            {
+                f = s.nf;
+                want = s.pipeline.current().fence;
+                ev = s.gate_ev;
+            }
+            else { f = s.nfence; want = (UINT64)(s.consumed + 1); ev = s.gate_ev; }
+            if (!g_consumer_active.load(std::memory_order_acquire) && mgpu::aligned::enabled() &&
+                s.produced < s.consumed + stream_state::RING)
+                source_ev = mgpu::aligned::dispatch_event();
             ++s.gate_idle;
         }
     }
@@ -16174,12 +16160,24 @@ bool stream_present_gate(unsigned long timeout_ms)
     // call. The two early returns above now fall through to here rather than
     // returning from inside the lock; nothing else about them changed, and the
     // value returned is the same value on the same condition.
-    if (!ret && f != nullptr && ev != nullptr)
+    if (!ret && fg_sleep_ms != 0)
+    {
+        t2 = sfdiag::qpc();
+        Sleep(fg_sleep_ms);
+        t3 = sfdiag::qpc();
+    }
+    else if (!ret && f != nullptr && ev != nullptr)
     {
         ++str().gate_waits;
         f->SetEventOnCompletion(want, ev);
         t2 = sfdiag::qpc();          // R167: the SETEVENT bucket
-        wr = WaitForSingleObject(ev, timeout_ms);
+        if (source_ev != nullptr)
+        {
+            const HANDLE events[]{ev, source_ev};
+            wr = WaitForMultipleObjects(2, events, FALSE, timeout_ms);
+            if (wr == WAIT_OBJECT_0 + 1) wr = WAIT_OBJECT_0;
+        }
+        else wr = WaitForSingleObject(ev, timeout_ms);
         t3 = sfdiag::qpc();          // R167: the WAIT bucket
         took_wait = true;
     }
@@ -16946,23 +16944,6 @@ bool dcomp_overlay_mode()
     const int seen = latched.load(std::memory_order_relaxed);
     if (seen >= 0) return seen != 0;
 
-    // R313 DcompSafeMode>=1: the decision runs on the BRIDGE thread only. A
-    // game-thread caller before the latch gets PENDING (the safe answer the
-    // R273b readers already handle: own window for now, R242 keeps a D3D11
-    // chain windowed), and dcomp_overlay_mode_settled() decides on BT within
-    // its bounded wait. Key absent: this block is one relaxed load.
-    if (mgpu::strace::safe_mode() >= 1 && !mgpu::strace::is_bridge_thread())
-    {
-        // R313a: the raw setting is still read here, once (the shipped path reads it
-        // on this thread too), so readers of g_dcomp_setting before the latch - R158's
-        // explicit-0 test - see the real value, not "not read yet".
-        if (g_dcomp_setting.load(std::memory_order_relaxed) == -3)
-            g_dcomp_setting.store(ini_read_dcomp_setting(), std::memory_order_relaxed);
-        g_dcomp_undecided.store(1, std::memory_order_relaxed);
-        return false;
-    }
-    const double r313_d0 = mgpu::strace::now_ms();   // R313: how long the decision takes, and where
-
     const int raw = ini_read_dcomp_setting();
     g_dcomp_setting.store(raw, std::memory_order_relaxed);
     const int want = dcomp_setting_effective(raw);   // R266: absent = 1
@@ -17141,15 +17122,6 @@ bool dcomp_overlay_mode()
     }
 
     latched.store(out, std::memory_order_relaxed);
-    // R313a: under DcompSafeMode a game thread may have set the undecided flag
-    // (the PENDING answer above); the V66 auto and explicit-0 branches never clear
-    // it, so clear it at the latch - a latched mode is decided by definition. Key
-    // absent: untouched, as shipped.
-    if (mgpu::strace::safe_mode() >= 1)
-        g_dcomp_undecided.store(0, std::memory_order_relaxed);
-    if (mgpu::strace::on())
-        mgpu::strace::note_decision(out, mgpu::strace::now_ms() - r313_d0,
-                                    mgpu::strace::is_bridge_thread() ? mgpu::strace::R_BT : mgpu::strace::R_GT_SWAP);
     return out != 0;
 }
 
@@ -17700,9 +17672,6 @@ unsigned long long own_route_copies()
 }
 int own_route_delivered()   // 0 none, 1 the evaluate route (R280o), 2 the game's own route on a contract title (R289)
 {
-    // R311: with MVecSource set, the game's own routes are dropped at stream_mvec_copy and the tap
-    // must not yield to them (the calibrator still counts its copies before the drop). Key absent: 0, as before.
-    if (g_r311_src.load(std::memory_order_relaxed) != 0) return 0;
     if (mgpu::calibrator::eval_copies() != 0ull) return 1;
     if (g_game_d3d12.load(std::memory_order_acquire) && own_route_copies() != 0ull && game_contract_seen()) return 2;
     return 0;
@@ -17798,6 +17767,16 @@ namespace reflex { void status(int &was_out, int &now_out, bool &applied_out); v
 // features go before the device they were created against.
 void stream_shutdown()
 {
+    g_consumer_shutdown.store(true, std::memory_order_release);
+    g_fg_source_gate.disable();
+    g_fg_game_queue.store(nullptr);
+    if (g_consumer_active.load(std::memory_order_acquire))
+    {
+        auto &stream = str();
+        std::lock_guard<std::mutex> lock(stream.cs);
+        stream.finished = true;
+        return;
+    }
     // Undo the driver mode we set on GPU 0, before anything else and outside
     // the lock. Runs even when the stream was never armed, and is itself
     // idempotent.
@@ -17838,6 +17817,7 @@ void stream_shutdown()
     mgpu::diag::info("[MGPU][T5] entering the ordered release - IF THIS IS THE LAST LINE, "
                      "IT DIED IN NGX ReleaseFeature OR IN A RESOURCE RELEASE UNDER IT");
     stream_release();
+    if (s.fg_release_blocked || s.present_release_blocked) return;
     mgpu::diag::info("[MGPU][T5] NGX features released.");
 
     // ---- V40: DESTROY THE PARAMETER BLOCKS. NEVER DONE BEFORE. ----
@@ -18035,14 +18015,6 @@ bool ui_ini_write_float(const char *key, float value)
 bool ui_ini_write_word(const char *key, const char *value)
 {
     return (key != nullptr && value != nullptr) ? ini_write_text(key, value) : false;
-}
-// R311: the word reader exported for mvec_extract (MVecPin=<fmt>,<w>,<h>,<mips>,<dec>,<chan>,<pxk>).
-// The file itself, never the 12-slot mirror. Empty when absent.
-void ui_ini_read_word(const char *key, char *out, size_t n)
-{
-    if (out == nullptr || n == 0) return;
-    if (key == nullptr) { out[0] = 0; return; }
-    ini_read_word(key, out, n);
 }
 
 // R219. The same parse as the arm's R216/R218 block, on the file as it is now.
@@ -18506,6 +18478,41 @@ void ui_read(ui_state &out)
     out.passes      = s.passes;
     out.max_passes  = stream_state::MAX_PASSES;
     out.profile     = s.profile;
+    out.fg_requested = s.fg_requested;
+    out.fg_ready = s.fg_ready;
+    out.fg_multiplier = s.fg_multiplier;
+    out.fg_runtime_max_multiplier = s.fg_attempted ? s.fg_stage.maximum_generated_frames() + 1u : 0u;
+    out.fg_capability_reported = s.fg_stage.capability_reported();
+    out.fg_evaluations = s.fg_evaluations;
+    out.fg_generated_presents = s.fg_generated_presents;
+    out.fg_real_presents = s.fg_real_presents;
+    if (mgpu::official_bridge::selected())
+    {
+        const auto official = mgpu::official_bridge::inspect();
+        out.fg_official_route = true;
+        const auto now = GetTickCount64();
+        const bool live_visible = official.visible && official.current_rates.visible &&
+            mgpu::official_fg::fresh_metrics(official.current_rates, now, 2500);
+        const auto &rates = live_visible ? official.current_rates : official.visible_rates;
+        out.fg_rates_last_visible = !live_visible;
+        out.fg_rates_valid = official.ready && !official.failed &&
+            mgpu::official_fg::fresh_metrics(rates, now, live_visible ? 2500 : 30000);
+        out.fg_rates_age_ms = rates.end_ms && now >= rates.end_ms ? now - rates.end_ms : 0;
+        if (out.fg_rates_valid)
+        {
+            out.fg_real_fps = rates.real_fps;
+            out.fg_sdk_fps = rates.sdk_fps;
+            out.fg_effective_multiplier = rates.multiplier;
+            out.fg_source_age_ms = rates.source_age_ms;
+        }
+        out.fg_ready = official.presenting;
+        out.fg_runtime_max_multiplier = official.maximum_multiplier;
+        out.fg_capability_reported = official.maximum_multiplier != 0;
+        out.fg_evaluations = official.real_presents;
+        out.fg_real_presents = official.real_presents;
+        out.fg_generated_presents = official.sdk_presents > official.real_presents
+            ? official.sdk_presents - official.real_presents : 0;
+    }
     out.present_mode = s.present_mode;
     out.mvec_mode    = s.mvec_mode;
     out.mvec_dx      = s.mvec_dx;
@@ -18921,27 +18928,18 @@ void ui_set_intensity(unsigned pass_1based, float v)
     // Silently keeping the preset label over hand-edited numbers is how a run
     // gets recorded as back-loaded when it is not.
     s.preset = 0;
-    // R300n: the T1.17 write moved to ui_persist_intensity, called once when the slider is
-    // let go. It used to rewrite mgpu.ini on every frame of a drag while holding s.cs - the
-    // lock the game's producer takes.
-}
-
-// R300n (PanelPersist=1 only). Called by the panel once, when a slider is released.
-// Same keys and values as T1.17 wrote; written with s.cs NOT held.
-void ui_persist_intensity(unsigned pass_1based, float v)
-{
-    if (!mgpu::t119::panel_persist()) return;
-    if (v < 0.0f) v = 0.0f;
-    if (v > 2.0f) v = 2.0f;
-    if (pass_1based == 0) {
-        ui_ini_write_float("Intensity", v);
-        ui_ini_write_float("Intensity1", v);
-        ui_ini_write_float("Intensity2", v);
-    } else {
-        char key[32]; snprintf(key, sizeof key, "Intensity%u", pass_1based);
-        ui_ini_write_float(key, v);
+    if (mgpu::t119::panel_persist())   // T1.17
+    {
+        if (pass_1based == 0) {
+            ui_ini_write_float("Intensity", v);
+            ui_ini_write_float("Intensity1", v);
+            ui_ini_write_float("Intensity2", v);
+        } else {
+            char key[32]; snprintf(key, sizeof key, "Intensity%u", pass_1based);
+            ui_ini_write_float(key, v);
+        }
+        ui_ini_write_word("Preset", "manual");
     }
-    ui_ini_write_word("Preset", "manual");
 }
 
 // P7.5. Move the split seam. `dir` is -1 (left) or +1 (right); `coarse` takes
@@ -18979,16 +18977,7 @@ void ui_set_split_pos(float v)
     stream_state &s = str();
     std::lock_guard<std::mutex> lk(s.cs);
     s.split_pos = v;
-    // R300n: the T1.17 write moved to ui_persist_split_pos (once, on release, s.cs not held).
-}
-
-// R300n (PanelPersist=1 only). Called by the panel once, when the seam slider is released.
-void ui_persist_split_pos(float v)
-{
-    if (!mgpu::t119::panel_persist()) return;
-    if (v < 0.0f) v = 0.0f;
-    if (v > 1.0f) v = 1.0f;
-    ui_ini_write_float("SplitPos", v);   // T1.17
+    if (mgpu::t119::panel_persist()) ui_ini_write_float("SplitPos", v);   // T1.17
 }
 
 // P7.4. The present mode, LIVE. 0 nr, 1 in, 2 split.
@@ -19007,6 +18996,7 @@ void ui_set_present_mode(int mode)
         was = s.present_mode;
         if (was == mode) return;
         s.present_mode = mode;
+        g_output_view_mode.store(static_cast<unsigned>(mode));
     }
     static const char *const nm[3] = { "nr (neural output)",
                                        "in (the frame handed TO the model)",
@@ -19160,11 +19150,39 @@ void stream_request()
     }
     if (s.requested) return;
     s.requested = true;
+    g_consumer_shutdown.store(false, std::memory_order_release);
     stream_read_fault(s.fault, sizeof s.fault);
     s.neural = stream_read_neural();
+    s.fg_requested = ini_read_flag("SecondaryFG");
+    g_fg_source_gate.reset();
+    s.fg_multiplier = (unsigned)ini_read_sr_int("FGMultiplier",
+                                                (int)mgpu::secondary_fg::min_multiplier,
+                                                (int)mgpu::secondary_fg::min_multiplier,
+                                                (int)mgpu::secondary_fg::max_multiplier);
+    mgpu::official_bridge::request(s.fg_requested, s.fg_multiplier);
+    g_fg_source_gate.disable();
+    g_secondary_fg_present_active.store(false, std::memory_order_relaxed);
+    s.fg_attempted = false;
+    s.fg_ready = false;
+    s.fg_pending = false;
+    s.fg_output_valid = false;
+    s.fg_queue_fault = false;
+    s.fg_release_blocked = false;
+    s.fg_pair.clear();
+    s.fg_show = mgpu::secondary_fg::picture::none;
+    s.fg_frame_id = 0;
+    if (s.fg_requested)
+    {
+        char fg_line[240];
+        snprintf(fg_line, sizeof fg_line,
+                 "[MGPU][M349-HOST] independent official FG requested, FGMultiplier=%u (%u generated frame%s requested; runtime success not yet established)",
+                 s.fg_multiplier, s.fg_multiplier - 1u, s.fg_multiplier == 2u ? "" : "s");
+        mgpu::diag::info(fg_line);
+    }
     s.max_frames = stream_read_frames();
     s.profile = stream_read_profile();
     s.present_mode = ini_read_present_mode();
+    g_output_view_mode.store(static_cast<unsigned>(s.present_mode));
     if (mgpu::t119::panel_persist()) s.split_pos = ini_read_named_float("SplitPos", s.split_pos);   // T1.17 (PanelPersist=1)
     // P8.0. Mode 2 has no estimator in this build; say so rather than behaving
     // like mode 0 in silence, which is the failure shape this project keeps
@@ -19261,10 +19279,19 @@ void stream_request()
             }
             s.signal_at    = (unsigned)ini_read_signal_at();
             s.present_vsync = (unsigned)ini_read_sr_int("PresentVsync", 1, 0, 1);
+            const unsigned bridge_poll_unthrottled =
+                (unsigned)ini_read_sr_int("BridgePollUnthrottled", 0, 0, 1);
             s.sr_snippet    = (unsigned)ini_read_sr_int("SRSnippet", 1, 0, 1);
             s.rw_on         = (unsigned)ini_read_sr_int("RingWindow", 0, 0, 1);
             s.sr_mv_mode    = (unsigned)ini_read_sr_int("SRMvLowRes", 0, 0, 2);
             g_present_vsync.store(s.present_vsync, std::memory_order_relaxed);
+            g_bridge_poll_unthrottled.store(bridge_poll_unthrottled, std::memory_order_relaxed);
+            if (bridge_poll_unthrottled != 0u)
+                mgpu::diag::warn(
+                    "[MGPU][L5] BridgePollUnthrottled=1 - the bridge uses Present(0,0) "
+                    "to decouple input polling from the bridge display refresh. Tearing "
+                    "is possible; this does not change game resolution, guide inputs or "
+                    "neural parameters.");
             if (s.present_vsync == 0u)
                 mgpu::diag::warn(
                     "[MGPU][L5] PresentVsync=0 - the bridge window presents IMMEDIATELY. "
@@ -19595,6 +19622,7 @@ void stream_request()
 // is why this is safe to try rather than safe to assume.
 void stream_on_present(void *cmd_queue_v)
 {
+    if (mgpu::aligned::enabled()) return;
     stream_state &s = str();   // str(), not st() - st() is the capture state
     std::lock_guard<std::mutex> lk(s.cs);
 
@@ -19605,6 +19633,37 @@ void stream_on_present(void *cmd_queue_v)
     if (gq == nullptr) return;
 
     if (SUCCEEDED(gq->Signal(s.gfence, s.produced))) s.gsignaled = s.produced;   // R275
+}
+
+void stream_finish_present(void *cmd_queue_v)
+{
+    if (cmd_queue_v == nullptr || cmd_queue_v != g_fg_game_queue.load(std::memory_order_acquire) ||
+        !g_fg_source_gate.enabled()) return;
+    if (g_present_read_fault.load(std::memory_order_acquire))
+    {
+        g_fg_source_gate.disable();
+        return;
+    }
+    const auto submitted = mgpu::aligned::submitted_color_frame();
+    const auto gpu_before = g_fg_source_gate.completed();
+    const auto before_ns = secondary_fg_now_ns();
+    const unsigned waited = g_fg_source_gate.wait(submitted);
+    const auto waits = g_fg_source_gate.waits();
+    if (waited != 0 && (waits <= 3 || waits % 120 == 0 || g_fg_source_gate.stalled()))
+    {
+        char line[700];
+        snprintf(line, sizeof line,
+            "[MGPU][M346-PACE] source_frame=%u progress_frame=%u waits=%llu wait_ms=%llu "
+            "timeouts=%llu stalled=%u max_lead=%u last_wait_ms=%u callback_tid=%lu "
+            "gpu_before=%u gpu_after=%u presented_frame=%u begin_ns=%llu end_ns=%llu; waits for GPU retirement, not presentation",
+            unsigned(submitted), unsigned(g_fg_source_gate.progress()),
+            static_cast<unsigned long long>(waits), static_cast<unsigned long long>(g_fg_source_gate.wait_ms()),
+            static_cast<unsigned long long>(g_fg_source_gate.timeouts()), unsigned(g_fg_source_gate.stalled()),
+            mgpu::secondary_fg::source_lead_limit, waited, GetCurrentThreadId(),
+            unsigned(gpu_before), unsigned(g_fg_source_gate.completed()), unsigned(g_fg_source_gate.presented()),
+            before_ns, secondary_fg_now_ns());
+        mgpu::diag::info(line);
+    }
 }
 
 // ================= REFLEX: FORCE LOW LATENCY ON GPU 0 =====================
@@ -20201,6 +20260,12 @@ unsigned long long game_effects_frames()
 // must not re-pick a different buffer on its own after this - the ring is laid out.
 bool stream_producing() { return str().produced_a.load(std::memory_order_acquire) != 0ull; }
 
+static void stream_produce_locked(stream_state &s, ID3D12GraphicsCommandList *gl,
+    ID3D12CommandQueue *gq, ID3D12Resource *src, unsigned long long rtv_handle,
+    unsigned long long depth_handle, unsigned long long mvec_handle,
+    unsigned long long source_depth_handle, unsigned long long source_motion_handle,
+    mgpu::aligned::lease &aligned_frame);
+
 void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
                               unsigned long long rtv_handle,
                               unsigned long long depth_handle,
@@ -20300,11 +20365,7 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
     }
 
     stream_state &s = str();
-    // R309 (MVecStepAside=1 only): how long THIS thread waited for s.cs - R168 below times the
-    // hold, never the wait. Key off: one relaxed load, nothing else.
-    const LONGLONG r309_w0 = r309::time_game.load(std::memory_order_relaxed) ? sfdiag::qpc() : 0;
     std::lock_guard<std::mutex> lk(s.cs);
-    if (r309_w0 != 0) r309::note_game_wait(r309_w0);
     // R168. THE MEASUREMENT THAT MATTERS FOR THE GATE'S LOCK BUCKET.
     //
     // This is the GAME'S RENDER THREAD holding s.cs, and it is the only other
@@ -20313,41 +20374,14 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
     // before lk releases the mutex.
     sfdiag::hold_timer r168_game(sfdiag::SITE_GAME);
 
-    // R169. The handle the probe published this frame, whatever the rest of
-    // this function does with it. One relaxed store; it is what lets the
-    // periodic report name the resource the lane was looking at when it went
-    // quiet, without this file ever including the probe's header.
-    s.mvec_pub_handle.store(mvec_handle, std::memory_order_relaxed);
-    // R324 (MVecBarrierSource=2): the re-judge, AT THE EVENT. The judge's verdict (TAIL / EVALUATE) was
-    // proven on one published buffer. When the game publishes another (a rebuild around a menu on
-    // Cyberpunk 2026-10-16, a pool member on Dragon Sword, a feature recreate on Starfield), the window
-    // re-opens right here, on the frame the handle changes, under s.cs: the DLSS-call copy delivers
-    // (correct, the costlier route) until a new verdict on the new buffer, then the cheap route again.
-    // The consumer's own compare stays as it was; this is the same re-open, issued where the change is
-    // seen. Key absent / 1: mvec2_off is 0, one compare.
-    if (s.mvec2_off != 0 && mvec_handle != 0ull && s.r315_judge_handle != 0ull &&
-        mvec_handle != s.r315_judge_handle && g_r315_phase.load(std::memory_order_relaxed) != R315_WINDOW)
-    {
-        const unsigned long long was = s.r315_judge_handle;
-        g_r315_phase.store(R315_WINDOW, std::memory_order_relaxed);
-        mgpu::calibrator::set_eval_copy(1);   // the reference copy at the DLSS call, from this frame
-        s.r315_judged = 0; s.r315_same = 0; s.r315_window_at = 0;
-        s.r315_prev_bits.clear(); s.r315_prev_diff = 0;
-        s.r315_flat = 0;   // R326
-        s.r315_judge_handle = mvec_handle;    // the verdict sets it again; no second re-open on the same change
-        char rl[300];
-        snprintf(rl, sizeof rl, "[MGPU][R324] JUDGE window re-opened at the producer: the published vector buffer changed "
-                                "0x%llx -> 0x%llx. The DLSS-call copy delivers until the verdict on the new buffer.",
-                 was, mvec_handle);
-        mgpu::diag::info(rl);
-    }
-
     if (!s.requested || s.finished) return;
 
     ID3D12GraphicsCommandList *gl = reinterpret_cast<ID3D12GraphicsCommandList *>(cmd_list_v);
     ID3D12Resource *src = reinterpret_cast<ID3D12Resource *>((void *)(uintptr_t)rtv_handle);
     ID3D12CommandQueue *gq = reinterpret_cast<ID3D12CommandQueue *>(cmd_queue_v);
     if (gl == nullptr || src == nullptr || gq == nullptr) return;
+    const unsigned long long source_depth_handle = depth_handle;
+    const unsigned long long source_motion_handle = mvec_handle;
 
     // FILTER FIRST, ALWAYS. The bridge's own effect runtime raises this event
     // too, and by LUID rather than by pointer: ReShade wraps D3D12 objects, so
@@ -20374,7 +20408,27 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
         }
     }
 
+    mgpu::aligned::lease aligned_frame;
+    const bool aligned_mode = mgpu::aligned::enabled();
+    if (aligned_mode)
+    {
+        if (s.depth_mode == 0 || s.mvec_mode != 3) return;
+        ID3D12Device *aligned_device = nullptr;
+        if (FAILED(gl->GetDevice(IID_PPV_ARGS(&aligned_device)))) return;
+        mgpu::aligned::set_game_device(aligned_device);
+        aligned_device->Release();
+        mgpu::aligned::observe_queue(gq);
+        if (s.armed) return;
+        mgpu::aligned::set_ready_dispatch(false);
+        if (s.produced >= s.consumed + stream_state::RING) return;
+        if (!mgpu::aligned::acquire(aligned_frame)) return;
+        depth_handle = reinterpret_cast<uintptr_t>(aligned_frame.planes[1].buffer);
+        mvec_handle = reinterpret_cast<uintptr_t>(aligned_frame.planes[2].buffer);
+    }
     char line[900];
+
+    // R169. Only the game's adapter may publish its vector source here.
+    s.mvec_pub_handle.store(mvec_handle, std::memory_order_relaxed);
 
     // ---- arm on the first game-adapter event, record nothing ----
     if (!s.armed)
@@ -20402,31 +20456,6 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
         // released first (R287), then this arm goes on WITHOUT depth once the
         // probe ran, or 10 s after the request. Without the evidence nothing
         // is started, as in 0.2.4 / 0.3.0, and one line asks for the log.
-        // R312 (DepthTransport >= 2): until the tap's resource is the pushed geometry, the arm
-        // treats depth as absent - the existing hold and its fallback decide what happens if it
-        // never arrives (one [R312] line says so). Key absent: g_r312_set is false, nothing here.
-        if (depth_handle != 0 && g_r312_set.load(std::memory_order_acquire))
-        {
-            ID3D12Resource *r312_res = reinterpret_cast<ID3D12Resource *>((void *)(uintptr_t)depth_handle);
-            const D3D12_RESOURCE_DESC r312_d = r312_res->GetDesc();
-            const unsigned ww = g_r312_w.load(std::memory_order_relaxed), hh = g_r312_h.load(std::memory_order_relaxed);
-            const unsigned ff = g_r312_fmt.load(std::memory_order_relaxed);
-            const bool ok = (ww == 0u || (unsigned)r312_d.Width == ww) && (hh == 0u || r312_d.Height == hh) &&
-                            (ff == 0u || (unsigned)r312_d.Format == ff);
-            if (!ok)
-            {
-                if (!s.r312_hold_said)
-                {
-                    s.r312_hold_said = true;
-                    char hl[300];
-                    snprintf(hl, sizeof hl, "[MGPU][R312] DEPTH LANE: holding the arm - the tap is still %ux%u fmt=%u, the pushed "
-                                            "geometry is %ux%u fmt=%u (the effect reloads once; DepthHoldMax decides if it never does).",
-                             (unsigned)r312_d.Width, r312_d.Height, (unsigned)r312_d.Format, ww, hh, ff);
-                    mgpu::diag::info(hl);
-                }
-                depth_handle = 0;
-            }
-        }
         if (depth_handle != 0) s.depth_hold_saw_depth = true;
         if (s.depth_mode != 0 && depth_handle == 0 && s.depth_hold_max_ms != 0ull && !s.depth_hold_saw_depth)
         {
@@ -20524,66 +20553,9 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
         if (!s.learn_decided)
         {
             s.learn_decided = true;
-            // R309/R310: their keys, read here once from the file (never through ui_ini_read's
-            // 12-slot mirror). Nothing of them is read again under the bridge's probes.
-            {
-                const r309::keys k = r309::read_keys();
-                s.r309_mode = k.step_aside; s.r309_on = (k.step_aside == 2);
-                s.r309_l99 = (k.learned == 99);   // R311e: 99 binds the zero field at the arm whatever MVecStepAside says (MVec unset strobes more - FC6 2.3)
-                s.r310_cost = k.cost; s.r310_offlock = k.offlock; s.r310_test_ms = k.offlock ? k.test_ms : 0u;
-                s.r311c_thread = k.thread;   // R311c
-                s.r311_src = k.source; g_r311_src.store(k.source, std::memory_order_relaxed);   // R311
-                r309::time_game.store(s.r310_cost, std::memory_order_relaxed);
-                if (s.r311_src != 0)
-                {
-                    static const char *const r311_what[4] = { "", "R280's extract (a four-channel target of the game, x,y into our own two-channel target)",
-                                                              "the velocity tap (the two-channel target the census picked, copied at finish_effects)",
-                                                              "the zero field (MVec=1, MVecDX/MVecDY - zero unless you set them)" };
-                    char sl[520];
-                    snprintf(sl, sizeof sl, "[MGPU][R311] MVecSource=%d: the vectors bound on this title are %s%s. The game's own vector routes "
-                                            "(NGX evaluate, barrier) do not land while this key is set; nothing is learned or written to mgpu.ini; "
-                                            "the judge (MVecStepAside=auto) runs on what is bound. Remove the key for the path as before.",
-                             s.r311_src, r311_what[s.r311_src],
-                             game_contract_seen() ? " - ON A TITLE WITH AN NGX CONTRACT, whose own vectors are therefore NOT used" : "");
-                    mgpu::diag::warn(sl);
-                }
-                if (s.r309_mode == 2)
-                    mgpu::diag::info("[MGPU][R309] MVecStepAside=auto: the vectors are judged as BOUND against no motion, in windows opened by "
-                                     "gameplay (180 s, then 20 minutes off); 5 of 6 probes worse and none better binds the zero field, live. "
-                                     "Contract titles are not touched.");
-                if (s.r310_cost)
-                    mgpu::diag::info("[MGPU][R310] ProbeCost=1: [R310] COST lines give each probe's bridge time with s.cs held and released, "
-                                     "and the game render thread's wait to take s.cs (two QPC reads around the lock it already takes).");
-                if (s.r310_offlock)
-                {
-                    char ol[300];
-                    if (s.r311c_thread)
-                        snprintf(ol, sizeof ol, "[MGPU][R311c] ProbeOffLock=2: R258's and R309's probes run their pixel loops on a PROBE THREAD of the add-on's own; "
-                                                "the bridge thread hands the mapped readbacks over and takes the result on a later poll (the decision code is unchanged). "
-                                                "No new probe is recorded while one is scoring.");
-                    else
-                        snprintf(ol, sizeof ol, "[MGPU][R310] ProbeOffLock=1: R258's and R309's probes run their pixel loops with s.cs RELEASED. "
-                                                "ProbeOffLockTestMs=%u (a deliberate sleep inside that window, 0 = none; for the teardown test only).",
-                                 s.r310_test_ms);
-                    mgpu::diag::info(ol);
-                }
-            }
-            const bool no_contract = !vectors_contract();   // R280k: Init seen OR the game's NGX table (DW-R1). R311: false when MVecSource is set
-            // R309 FORCED (MVecStepAside=1) - R311: now MVecSource=3, of which MVecStepAside=1 is the alias, and
-            // on ANY title (the zero field was already reachable on a contract title through MVec=1; this is
-            // the same thing under the one key). Set here, before auto_learn below, so the tap's learning
-            // never turns on; R280 is not armed either (mvec_extract reads the same key).
-            if (s.r311_src == 3 && s.mvec_mode == 3)
-            {
-                s.mvec_mode = 1;
-                mgpu::diag::warn("[MGPU][R309] MVecSource=3 / MVecStepAside=1 (forced): the synthetic field (MVec=1, MVecDX/MVecDY - zero "
-                                 "unless you set them) is bound from the arm. No tap learning, no R280, no probes.");
-            }
-            const bool auto_learn = !ini_has_key("MVecTap") && ui_ini_read("MVecLearned", -1) < 0 && s.mvec_mode == 3 && no_contract && s.r311_src == 0;
-            // R311: MVecSource=1 / 2 turn the tap on the way the learning does (R278b), without the learning:
-            // R280's target (1) or the census pick (2) is copied by the tap, nothing is written back.
-            const bool r311_tap = (s.r311_src == 1 || s.r311_src == 2) && s.mvec_mode == 3;
-            g_mvec_tap_live.store((auto_learn || r311_tap) ? 1 : 0, std::memory_order_relaxed);
+            const bool no_contract = !game_contract_seen();   // R280k: Init seen OR the game's NGX table (DW-R1)
+            const bool auto_learn = !ini_has_key("MVecTap") && ui_ini_read("MVecLearned", -1) < 0 && s.mvec_mode == 3 && no_contract;
+            g_mvec_tap_live.store(auto_learn ? 1 : 0, std::memory_order_relaxed);
             static bool s_first_said = false;   // R278e: once per process, not per arm
             if (auto_learn && !s_first_said && (s_first_said = true))
                 mgpu::diag::warn("[MGPU][R278] FIRST LAUNCH on a title without an NGX contract: the velocity tap is ON for this "
@@ -20593,15 +20565,6 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
         }
         const bool learnable = g_mvec_tap_live.load(std::memory_order_relaxed) != 0;
         const bool can_tap = (tap_k == 1 || tap_k == 2) || learnable;   // R277: 2 is the D3D12 tap with the common assumption
-        // R309: MVecLearned=99 on a no-contract title binds the ZERO field from the arm. Without the
-        // key, a probe that still publishes a candidate keeps MVec=3 armed with no copy route and
-        // every evaluate runs with MVec unset (Far Cry 6: more strobe than zeros).
-        if (s.mvec_mode == 3 && s.r309_l99 && !can_tap && !vectors_contract())
-        {
-            mgpu::diag::warn("[MGPU][R309] MVecLearned=99 on a title with no NGX contract: no buffer of this title passed. The synthetic "
-                             "field (MVec=1, MVecDX/MVecDY - zero unless you set them) is bound from the arm, never MVec unset.");
-            s.mvec_mode = 1;
-        }
         if (s.mvec_mode == 3 && mvec_handle == 0 && g_no_real_vectors.load(std::memory_order_acquire) &&
             (s.mvec_arm_waits >= s.mvec_hold || (!mgpu::calibrator::game_ngx_init_seen() && !can_tap)))
         {
@@ -20627,7 +20590,7 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
             mgpu::diag::warn(nv);
             s.mvec_mode = 1;
         }
-        if (s.mvec_mode == 3 && (mvec_handle == 0 || s.mvec_stable < STABLE_NEED))
+        if (!aligned_mode && s.mvec_mode == 3 && (mvec_handle == 0 || s.mvec_stable < STABLE_NEED))
         {
             // R280j: while the virtual-target module is deciding WITH EVIDENCE (a four-channel
             // candidate is being written, no source yet), the hold does not count: the decision
@@ -20671,7 +20634,6 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
         s.hold_lane = 0;
 
         s.tried = true;
-        mgpu::strace::note_arm_enter();   // R313: one relaxed load when off; first entry only
 
         ID3D12Device *gdev = nullptr;
         if (FAILED(src->GetDevice(IID_PPV_ARGS(&gdev))) || gdev == nullptr) return;
@@ -20742,7 +20704,7 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
 
         QueryPerformanceFrequency(&s.freq);
 
-        const D3D12_RESOURCE_DESC rd = src->GetDesc();
+        const D3D12_RESOURCE_DESC rd = aligned_mode ? aligned_frame.planes[0].description : src->GetDesc();
         s.width = (UINT)rd.Width; s.height = rd.Height; s.format = rd.Format;
         UINT rows = 0; UINT64 rowb = 0;
         gdev->GetCopyableFootprints(&rd, 0, 1, 0, &s.fp, &rows, &rowb, &s.payload_bytes);
@@ -20764,7 +20726,8 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
         {
             ID3D12Resource *dsrc =
                 reinterpret_cast<ID3D12Resource *>((void *)(uintptr_t)depth_handle);
-            const D3D12_RESOURCE_DESC dd = dsrc->GetDesc();
+            D3D12_RESOURCE_DESC dd = aligned_mode ? aligned_frame.planes[1].description : dsrc->GetDesc();
+            if (aligned_mode) dd.Format = mgpu::aligned::depth_format(dd.Format);
             s.depth_w = (unsigned)dd.Width;
             s.depth_h = (unsigned)dd.Height;
             s.depth_format = (unsigned)dd.Format;
@@ -20788,7 +20751,7 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
         {
             ID3D12Resource *msrc =
                 reinterpret_cast<ID3D12Resource *>((void *)(uintptr_t)mvec_handle);
-            const D3D12_RESOURCE_DESC md2 = msrc->GetDesc();
+            const D3D12_RESOURCE_DESC md2 = aligned_mode ? aligned_frame.planes[2].description : msrc->GetDesc();
             s.mvec_w = (unsigned)md2.Width;
             s.mvec_h = (unsigned)md2.Height;
             s.mvec_format = (unsigned)md2.Format;
@@ -20797,34 +20760,6 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
                                         &mrows2, &mrowb2, &s.mvec_bytes2);
             s.mvec_off = ((slot_end + SEAL_STRIDE - 1) / SEAL_STRIDE) * SEAL_STRIDE;
             slot_end = s.mvec_off + s.mvec_bytes2;
-            // R315b (MVecBarrierSource=2): a second region of the same size for the tail copy
-            // during the judge window. System memory on the cross-adapter heap, like the rest
-            // of the slot; nothing on the game's card. Key absent / 1: mvec2_off stays 0.
-            // R323 (HistoryGate=1): read at arm, like every key. Off: 0, and the stamp is never read.
-            g_hist_gate.store(ini_read_float("HistoryGate", 0.0f) != 0.0f ? 1 : 0, std::memory_order_relaxed);
-            s.gate_break = false; s.gate_stretches = 0; s.gate_since = 0;
-            for (unsigned q = 0; q < stream_state::RING; ++q) s.slot_dlss[q].store((signed char)-1, std::memory_order_relaxed);
-            if (g_hist_gate.load(std::memory_order_relaxed) != 0)
-                mgpu::diag::info("[MGPU][R323] HISTORY GATE ON (HistoryGate=1): a frame the game's own DLSS did not evaluate "
-                                 "(menu, video, loading screen) is evaluated with DLSSNR.Reset=1 on every pass, and the first "
-                                 "frame with DLSS again resets once more. No history is built without vectors, at any frame "
-                                 "rate. A title with no NGX table cannot tell and is left exactly as before.");
-            if (g_r315_on.load(std::memory_order_relaxed) == 2)
-            {
-                s.mvec2_off = ((slot_end + SEAL_STRIDE - 1) / SEAL_STRIDE) * SEAL_STRIDE;
-                slot_end = s.mvec2_off + s.mvec_bytes2;
-                g_r315_phase.store(R315_WINDOW, std::memory_order_relaxed);
-                s.r315_window_at = 0; s.r315_judged = 0; s.r315_same = 0; s.r315_judge_handle = 0;
-                s.r315_prev_bits.clear(); s.r315_prev_diff = 0;   // R315b fix 4
-                s.r315_flat = 0;   // R326
-                for (unsigned q = 0; q < stream_state::RING; ++q) s.r315_both[q].store(0u, std::memory_order_relaxed);
-                mgpu::calibrator::set_eval_copy(1);   // R315b fix 3: the reference copy, at the DLSS call, from the first frame
-                mgpu::diag::info("[MGPU][R315] MVecBarrierSource=2: judge window open - the copy at the DLSS call delivers (the bytes "
-                                 "DLSS consumed), the tail copy lands beside it, the bridge compares the two. Identical on this "
-                                 "title -> the tail carries (the DLSS-call copy and its barriers stop); different -> the DLSS-call "
-                                 "copy carries, as today. On a title with no DLSS table nothing is judged and the key is inert "
-                                 "(R315c: no periodic line until something moves).");
-            }
         }
 
         // One slot = seal (padded to the placement alignment) + payload, plus
@@ -20912,11 +20847,28 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
             }
             if (SUCCEEDED(h))
                 h = ndev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                                 IID_PPV_ARGS(&s.na));
+                                                 IID_PPV_ARGS(&s.primary_na));
+            s.na = s.primary_na;
             if (SUCCEEDED(h))
                 h = ndev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, s.na, nullptr,
-                                            IID_PPV_ARGS(&s.nl));
+                                            IID_PPV_ARGS(&s.primary_nl));
+            s.nl = s.primary_nl;
             if (SUCCEEDED(h)) h = s.nl->Close();
+            if (SUCCEEDED(h))
+            {
+                s.primary_na = s.na;
+                s.primary_nl = s.nl;
+                for (unsigned i = 0; i < stream_state::PIPELINE_SLOTS && SUCCEEDED(h); ++i)
+                {
+                    h = ndev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                      IID_PPV_ARGS(&s.async_na[i]));
+                    if (SUCCEEDED(h))
+                        h = ndev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                    s.async_na[i], nullptr,
+                                                    IID_PPV_ARGS(&s.async_nl[i]));
+                    if (SUCCEEDED(h)) h = s.async_nl[i]->Close();
+                }
+            }
             if (SUCCEEDED(h))
                 h = ndev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&s.nf));
             if (SUCCEEDED(h))
@@ -20995,7 +20947,7 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
                 D3D12_COMMAND_QUEUE_DESC cqd{};
                 cqd.Type = D3D12_COMMAND_LIST_TYPE_COPY;
                 HRESULT ch = ndev->CreateCommandQueue(&cqd, IID_PPV_ARGS(&s.cq));
-                for (unsigned i = 0; i < 2 && SUCCEEDED(ch); ++i)
+                for (unsigned i = 0; i < stream_state::PIPELINE_SLOTS && SUCCEEDED(ch); ++i)
                 {
                     ch = ndev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY,
                                                       IID_PPV_ARGS(&s.cqa[i]));
@@ -21033,7 +20985,7 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
                              (unsigned)ch);
                     mgpu::diag::error(cl2);
                     if (s.cqf != nullptr) { s.cqf->Release(); s.cqf = nullptr; }
-                    for (int i = 1; i >= 0; --i)
+                    for (int i = stream_state::PIPELINE_SLOTS - 1; i >= 0; --i)
                     {
                         if (s.cql[i] != nullptr) { s.cql[i]->Release(); s.cql[i] = nullptr; }
                         if (s.cqa[i] != nullptr) { s.cqa[i]->Release(); s.cqa[i] = nullptr; }
@@ -21043,12 +20995,82 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
                 }
                 else
                 {
+                    if (s.cq_gated && mgpu::aligned::enabled())
+                    {
+                        HRESULT color_result = gdev->CreateFence(0,
+                            D3D12_FENCE_FLAG_SHARED | D3D12_FENCE_FLAG_SHARED_CROSS_ADAPTER,
+                            IID_PPV_ARGS(&s.gcolor_ready));
+                        if (SUCCEEDED(color_result)) color_result = gdev->CreateSharedHandle(s.gcolor_ready,
+                            nullptr, GENERIC_ALL, nullptr, &s.color_ready_share);
+                        if (SUCCEEDED(color_result)) color_result = ndev->OpenSharedHandle(s.color_ready_share,
+                            IID_PPV_ARGS(&s.ncolor_ready));
+                        for (unsigned color_index = 0; color_index < stream_state::PIPELINE_SLOTS && SUCCEEDED(color_result); ++color_index)
+                        {
+                            color_result = ndev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY,
+                                IID_PPV_ARGS(&s.cq_color_allocators[color_index]));
+                            if (SUCCEEDED(color_result)) color_result = ndev->CreateCommandList(0,
+                                D3D12_COMMAND_LIST_TYPE_COPY, s.cq_color_allocators[color_index], nullptr,
+                                IID_PPV_ARGS(&s.cq_color_lists[color_index]));
+                            if (SUCCEEDED(color_result)) color_result = s.cq_color_lists[color_index]->Close();
+                        }
+                        s.color_copy_overlap = SUCCEEDED(color_result);
+                        if (!s.color_copy_overlap)
+                        {
+                            for (unsigned color_index = 0; color_index < stream_state::PIPELINE_SLOTS; ++color_index)
+                            {
+                                if (s.cq_color_lists[color_index]) { s.cq_color_lists[color_index]->Release(); s.cq_color_lists[color_index] = nullptr; }
+                                if (s.cq_color_allocators[color_index]) { s.cq_color_allocators[color_index]->Release(); s.cq_color_allocators[color_index] = nullptr; }
+                            }
+                            if (s.ncolor_ready) { s.ncolor_ready->Release(); s.ncolor_ready = nullptr; }
+                            if (s.gcolor_ready) { s.gcolor_ready->Release(); s.gcolor_ready = nullptr; }
+                            if (s.color_ready_share) { CloseHandle(s.color_ready_share); s.color_ready_share = nullptr; }
+                        }
+                        char color_report[320];
+                        std::snprintf(color_report, sizeof color_report,
+                            "[MGPU][M340-COPY] color_overlap=%u hr=0x%08x; exact color plane may arrive before guides; full tuple and input retirement gates retained",
+                            unsigned(s.color_copy_overlap), unsigned(color_result));
+                        mgpu::diag::info(color_report);
+                        if (s.color_copy_overlap)
+                        {
+                            HRESULT depth_result = gdev->CreateFence(0,
+                                D3D12_FENCE_FLAG_SHARED | D3D12_FENCE_FLAG_SHARED_CROSS_ADAPTER,
+                                IID_PPV_ARGS(&s.gdepth_ready));
+                            if (SUCCEEDED(depth_result)) depth_result = gdev->CreateSharedHandle(s.gdepth_ready,
+                                nullptr, GENERIC_ALL, nullptr, &s.depth_ready_share);
+                            if (SUCCEEDED(depth_result)) depth_result = ndev->OpenSharedHandle(s.depth_ready_share,
+                                IID_PPV_ARGS(&s.ndepth_ready));
+                            for (unsigned depth_index = 0; depth_index < stream_state::PIPELINE_SLOTS && SUCCEEDED(depth_result); ++depth_index)
+                            {
+                                depth_result = ndev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY,
+                                    IID_PPV_ARGS(&s.cq_depth_allocators[depth_index]));
+                                if (SUCCEEDED(depth_result)) depth_result = ndev->CreateCommandList(0,
+                                    D3D12_COMMAND_LIST_TYPE_COPY, s.cq_depth_allocators[depth_index], nullptr,
+                                    IID_PPV_ARGS(&s.cq_depth_lists[depth_index]));
+                                if (SUCCEEDED(depth_result)) depth_result = s.cq_depth_lists[depth_index]->Close();
+                            }
+                            s.guide_copy_overlap = SUCCEEDED(depth_result);
+                            if (!s.guide_copy_overlap)
+                            {
+                                for (unsigned depth_index = 0; depth_index < stream_state::PIPELINE_SLOTS; ++depth_index)
+                                {
+                                    if (s.cq_depth_lists[depth_index]) { s.cq_depth_lists[depth_index]->Release(); s.cq_depth_lists[depth_index] = nullptr; }
+                                    if (s.cq_depth_allocators[depth_index]) { s.cq_depth_allocators[depth_index]->Release(); s.cq_depth_allocators[depth_index] = nullptr; }
+                                }
+                                if (s.ndepth_ready) { s.ndepth_ready->Release(); s.ndepth_ready = nullptr; }
+                                if (s.gdepth_ready) { s.gdepth_ready->Release(); s.gdepth_ready = nullptr; }
+                                if (s.depth_ready_share) { CloseHandle(s.depth_ready_share); s.depth_ready_share = nullptr; }
+                            }
+                            char depth_report[320];
+                            std::snprintf(depth_report, sizeof depth_report,
+                                "[MGPU][M341-COPY] guide_overlap=%u hr=0x%08x; color then depth then motion; full tuple gates retained; disabled retains M340 color split",
+                                unsigned(s.guide_copy_overlap), unsigned(depth_result));
+                            mgpu::diag::info(depth_report);
+                        }
+                    }
                     // The timestamp trap, both halves of it. A COPY queue
                     // needs its own query heap TYPE and its own frequency, and
                     // the adapter has to support copy-queue timestamps at all.
-                    // Four queries: two marks, ping-ponged by parity, because
-                    // a prefetched copy can resolve into this buffer before
-                    // the previous frame's marks have been read.
+                    // Each owned input has six queries: one pair per plane.
                     D3D12_FEATURE_DATA_D3D12_OPTIONS3 o3{};
                     HRESULT th = ndev->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3,
                                                            &o3, sizeof o3);
@@ -21057,11 +21079,11 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
                     {
                         D3D12_QUERY_HEAP_DESC cqh{};
                         cqh.Type = D3D12_QUERY_HEAP_TYPE_COPY_QUEUE_TIMESTAMP;
-                        cqh.Count = 4;
+                        cqh.Count = stream_state::PIPELINE_SLOTS * 6u;
                         cqh.NodeMask = 0;
                         th = ndev->CreateQueryHeap(&cqh, IID_PPV_ARGS(&s.cq_tsheap));
                     }
-                    if (SUCCEEDED(th)) th = make_buf(ndev, 4ull * 8ull,
+                    if (SUCCEEDED(th)) th = make_buf(ndev, stream_state::PIPELINE_SLOTS * 6ull * 8ull,
                                                      D3D12_HEAP_TYPE_READBACK, &s.cq_tsread);
                     if (SUCCEEDED(th)) th = s.cq->GetTimestampFrequency(&s.cq_ts_freq);
                     s.cq_ts_ok = SUCCEEDED(th) && s.cq_ts_freq > 0;
@@ -21096,7 +21118,6 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
         else if (ndev == nullptr) h = E_FAIL;
 
         s.ll_due_arm = true;   // R267b: written off the lock on the bridge thread, next stream_poll
-        mgpu::strace::note_arm_exit((unsigned)h);   // R313
         snprintf(line, sizeof line,
                  "[MGPU][P4.0] stream arm hr=0x%08X source=%ux%u fmt=%d rowPitch=%u "
                  "payload=%llu slot=%llu ring=%u heap=%llu bytes. The heap is created on the "
@@ -21156,7 +21177,17 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
             stream_release();
             return;
         }
+        mgpu::queue_trace::observe_queue(s.nq);
+        mgpu::queue_trace::observe_queue(s.cq);
+        mgpu::queue_trace::observe_fence(s.nf);
+        mgpu::queue_trace::alias(s.gfence, s.nfence);
+        mgpu::queue_trace::alias(s.gcolor_ready, s.ncolor_ready);
+        mgpu::queue_trace::alias(s.gdepth_ready, s.ndepth_ready);
         s.armed = true;
+        g_fg_game_queue.store(gq, std::memory_order_release);
+        mgpu::aligned::set_ready_dispatch(aligned_mode);
+        if (aligned_mode)
+            mgpu::diag::info("[MGPU][R334-PIPELINE] owned tag-time snapshots; fence-gated normalization and transfer; no shared direct capture");
         // R270b. Off unless mgpu.ini says LaunchRecord=1 (the launcher writes it).
         QueryPerformanceCounter(&s.ll_t0); s.ll_p0 = s.produced; s.ll_c0 = s.consumed;
         s.rec_on = ini_read_flag("LaunchRecord");
@@ -21180,35 +21211,29 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
             // The warp test then keeps it (writes MVecTap=1 + MVecLearned) or turns
             // it off (depth only). A contract title never enters; a set key is honoured.
             const bool auto_learn = g_mvec_tap_live.load(std::memory_order_relaxed) != 0;
-            // R311: MVecSource set = a forced source, not a learning launch: no learning, no write-back
-            // (no MVecLearned / MVecTap / MVecCandidate / units). Key absent: exactly the two lines before R311.
-            const bool r311_forced = g_r311_src.load(std::memory_order_relaxed) != 0;
-            s.learn_on = (((tk == 1 || tk == 2) && lr < 0) || auto_learn) && !r311_forced;
-            s.learn_write = (s.learn_on || tk != 0) && !r311_forced;   // R278f-r: the key read above already answers presence-with-value
+            s.learn_on = ((tk == 1 || tk == 2) && lr < 0) || auto_learn;
+            s.learn_write = s.learn_on || tk != 0;   // R278f-r: the key read above already answers presence-with-value
             if ((tk == 1 || tk == 2) && lr >= 0) s.cp_written = true;   // learned: R258 stays closed
             // R278c: THE LEARNED UNIT, NOT THE LEARNED NUMBER. The warp test
             // writes MVecUnits (uv / uvhalf / px) and MVecSignX/Y; the scale is
             // derived here from THIS launch's source and vector sizes, so the
             // same ini is right on a 1080p display or at another render scale.
             // An explicit MVecScaleX/Y other than 1.0 still wins (the user's
-            // override, and the ini R258 wrote before this change).
+            // override, and the ini R258 wrote before this change). A declared
+            // MVecUnits key also enables this path for ordinary real-vector
+            // titles; it must not depend on the optional learning tap or the
+            // virtual-target extractor being active.
             // R278e: only on the tap path (MVecTap present - a learned title has it written).
             // R280c: on the virtual-target path the units are uv BY CONSTRUCTION (the target
             // is x,y as the engine wrote them, RE4-TP3), so the scale is derived with no key;
             // MVecSignX/Y in the ini still count as the user's override. X1 armed at 1.0 here.
             const bool x_on = g_mvec_x_active.load(std::memory_order_relaxed);
-            // R311a: the FIRST launch of a no-contract tap title (auto_learn, no MVecTap key, no MVecLearned) armed at
-            // scale 1,1 and stayed there for the whole session - the R258 verdict was written for the NEXT launch only
-            // (Skyrim SK-L1 2026-10-08 and S1 2026-10-15: every transport line scale=(1,1), the picture strobes). Now
-            // the first launch assumes UV from the arm, the unit every tap title so far has learned and the one R280's
-            // target has by construction, and the verdict corrects it LIVE below (R311a part 2). Learned titles (tk set),
-            // the R280 path (x_on) and contract titles do not enter here: their lines are unchanged.
-            const bool r311a_first = s.learn_on && tk == 0 && !x_on;
-            if (s.mvec_scale_x == 1.0f && s.mvec_scale_y == 1.0f && s.mvec_w != 0u && s.mvec_h != 0u && (tk != 0 || x_on || r311a_first))   // R278f-r: tk read above
+            char un[16];
+            ini_read_word("MVecUnits", un, sizeof un);
+            const bool units_declared = un[0] != 0;
+            if (s.mvec_scale_x == 1.0f && s.mvec_scale_y == 1.0f && s.mvec_w != 0u && s.mvec_h != 0u && (tk != 0 || x_on || units_declared))   // R278f-r: tk read above
             {
-                char un[16]; ini_read_word("MVecUnits", un, sizeof un);
-                const bool un_from_ini = (un[0] != 0);   // R311f
-                if (un[0] == 0 && (x_on || r311a_first)) { un[0] = 'u'; un[1] = 'v'; un[2] = 0; }
+                if (un[0] == 0 && x_on) { un[0] = 'u'; un[1] = 'v'; un[2] = 0; }
                 const int gx = ui_ini_read("MVecSignX", 1) < 0 ? -1 : 1, gy = ui_ini_read("MVecSignY", 1) < 0 ? -1 : 1;
                 float sx = 0.0f, sy = 0.0f;
                 if (_stricmp(un, "uv") == 0)          { sx = (float)s.width;        sy = (float)s.height; }
@@ -21218,35 +21243,7 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
                 {
                     s.mvec_scale_x = (float)gx * sx; s.mvec_scale_y = (float)gy * sy; s.mvec_dirty = true;
                     char ul[260];
-                    // R311f: on the R280 path, units / signs that came FROM THE INI are a carried verdict: seed the judge with
-                    // them so the vectors are bound at that scale from the first evaluate (no zero-field wait, R311e), and
-                    // the judge re-evaluates them in its windows this launch (a different verdict applies live and rewrites).
-                    bool r311f_carried = false;
-                    if (x_on && tk == 0 && un_from_ini)
-                    {
-                        const bool half = (_stricmp(un, "uvhalf") == 0);
-                        // the judge's kx/ky are in the probe footprint's pixels (W/H at the verdict site), set at ~20385
-                        const unsigned pw = s.fp.Footprint.Width ? s.fp.Footprint.Width : s.width;
-                        const unsigned ph = s.fp.Footprint.Height ? s.fp.Footprint.Height : s.height;
-                        s.x_kx = gx * (int)(half ? pw / 2u : pw);
-                        s.x_ky = gy * (int)(half ? ph / 2u : ph);
-                        s.x_verdicts = 1u;
-                        r311f_carried = true;
-                    }
-                    if (r311f_carried)
-                        snprintf(ul, sizeof ul, "[MGPU][R311f] R280 verdict carried from mgpu.ini (MVecUnits=%s, signs %+d/%+d): MVecScaleX=%.2f MVecScaleY=%.2f bound from the arm; "
-                                                "R280's judge re-evaluates it this launch and rewrites the keys if it differs.",
-                                 un, gx, gy, s.mvec_scale_x, s.mvec_scale_y);
-                    else if (r311a_first && !x_on && un_from_ini)   // R311j: the line says where the units came from
-                        snprintf(ul, sizeof ul, "[MGPU][R311a] FIRST LAUNCH: units %s and signs %+d/%+d taken from mgpu.ini (not assumed) - MVecScaleX=%.2f "
-                                                "MVecScaleY=%.2f from source %ux%u and vectors %ux%u. The warp test (R258) corrects them live in this session "
-                                                "and writes them for the next.",
-                                 un, gx, gy, s.mvec_scale_x, s.mvec_scale_y, s.width, s.height, s.mvec_w, s.mvec_h);
-                    else if (r311a_first && !x_on)
-                        snprintf(ul, sizeof ul, "[MGPU][R311a] FIRST LAUNCH: units uv assumed from the arm - MVecScaleX=%.2f MVecScaleY=%.2f from source %ux%u and "
-                                                "vectors %ux%u. The warp test (R258) corrects the unit and the signs live in this session and writes them for the next.",
-                                 s.mvec_scale_x, s.mvec_scale_y, s.width, s.height, s.mvec_w, s.mvec_h);
-                    else if (x_on && tk == 0)
+                    if (x_on && tk == 0)
                         snprintf(ul, sizeof ul, "[MGPU][R280] vectors from the virtual target: units uv by construction, MVecScaleX=%.2f MVecScaleY=%.2f "
                                                 "derived from source %ux%u and vectors %ux%u. The warp test settles the signs live; nothing is written to mgpu.ini on this path.",
                                  s.mvec_scale_x, s.mvec_scale_y, s.width, s.height, s.mvec_w, s.mvec_h);
@@ -21258,16 +21255,37 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
             }
         }
         s.n16_ini_ok = false;  // R219-2: same
-        // R88: gxfer exists and the mvec geometry is final from here.
-        // The flags are zeroed explicitly: std::atomic's default constructor
-        // does not value-initialise before C++20, and relying on the static
-        // storage being zero is the kind of assumption this file pays for.
+        s.mvec_packets.reset(s.produced + 1ull);
         for (unsigned q = 0; q < stream_state::RING; ++q)
-            s.mvec_slot_valid[q].store(0u, std::memory_order_relaxed);
+        {
+            s.mvec_audit_source[q].store(0ull, std::memory_order_relaxed);
+            s.mvec_audit_sealed[q] = {};
+        }
+        s.mvec_audit_last = 0;
+        s.mvec_audit_names = 0;
+        s.mvec_source_priority = {};
+        s.mvec_tag_switch_frame.store(0, std::memory_order_relaxed);
+        s.nr_tag_reset_frame = 0;
         s.mvec_live.store(s.mvec_mode == 3 && s.mvec_bytes2 != 0,
                           std::memory_order_release);
+        mgpu::diag::info("[MGPU][R312] adapter-filtered vector state; R311 handle-change ring/history invalidation removed. Visual stability remains unverified.");
         return;    // record nothing on the arming frame
     }
+
+    stream_produce_locked(s, gl, gq, src, rtv_handle, depth_handle, mvec_handle,
+                          source_depth_handle, source_motion_handle, aligned_frame);
+}
+
+static void stream_produce_locked(stream_state &s, ID3D12GraphicsCommandList *gl,
+    ID3D12CommandQueue *gq, ID3D12Resource *src, unsigned long long rtv_handle,
+    unsigned long long depth_handle, unsigned long long mvec_handle,
+    unsigned long long source_depth_handle, unsigned long long source_motion_handle,
+    mgpu::aligned::lease &aligned_frame)
+{
+    const bool aligned_mode = static_cast<bool>(aligned_frame);
+    if (!s.requested || !s.armed || s.finished || s.summarised) return;
+    if (aligned_mode && s.produced >= s.consumed + stream_state::RING) return;
+    if (!aligned_mode && (gl == nullptr || gq == nullptr || src == nullptr)) return;
 
     // ---- R170: SwapGuard. OFF BY DEFAULT, and it is a BEHAVIOUR change ----
     //
@@ -21395,7 +21413,7 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
     // previous frame's list has necessarily been submitted - it had to be, to
     // present - so a Signal here lands behind it. One fence, whose value is the
     // count of frames whose copies are known to have been submitted.
-    if (s.produced > 0)
+    if (!aligned_mode && s.produced > 0)
     {
         // L1: sample BEFORE the signal, so the reading is the backlog this
         // frame's copy is being queued behind rather than one that includes it.
@@ -21451,7 +21469,7 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
     // changes behaviour, and BEFORE anything touches the game's command list -
     // the whole point is that a strided frame costs the render card nothing.
     ++s.game_frames;
-    if (s.stride_max != 0)
+    if (!aligned_mode && s.stride_max != 0)
     {
         // Re-decided once per window, not once per frame. A per-frame decision
         // on a per-frame-noisy signal is how a controller starts oscillating,
@@ -21530,6 +21548,20 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
     }
 
     const unsigned long long fi = s.produced + 1;
+    if (aligned_mode)
+    {
+        if (!mgpu::aligned::matches(aligned_frame.planes[0], s.width, s.height, s.format, s.fp, s.payload_bytes) ||
+            !mgpu::aligned::matches(aligned_frame.planes[1], s.depth_w, s.depth_h,
+                                   static_cast<DXGI_FORMAT>(s.depth_format), s.depth_fp, s.depth_bytes) ||
+            !mgpu::aligned::matches(aligned_frame.planes[2], s.mvec_w, s.mvec_h,
+                                   static_cast<DXGI_FORMAT>(s.mvec_format), s.mvec_fp2, s.mvec_bytes2))
+        {
+            static bool logged = false;
+            if (!logged) mgpu::diag::warn("[MGPU][R323-ALIGN] layout changed or incompatible; holding output, no mixed-size transfer");
+            logged = true;
+            return;
+        }
+    }
 
     // FAULT "drop": burn frame index 40 without writing anything for it. The
     // fence still advances, so the consumer is told frame 40 landed and finds
@@ -21540,6 +21572,10 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
     // consumer falling behind, and is counted separately for that reason.
     if (s.fault_id == stream_state::FK_DROP && fi == 40)
     {
+        {
+            std::lock_guard<std::mutex> motion_lock(s.mvec_cs);
+            (void)s.mvec_packets.close(fi);
+        }
         s.produced = fi;
         s.produced_a.store(fi, std::memory_order_release);
         return;
@@ -21590,14 +21626,37 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
     seal.mvec_pitch  = s.mvec_fp2.Footprint.RowPitch;
     seal.mvec_mode   = (unsigned)s.mvec_mode;
     seal.mvec_valid  = 0u;
+    mgpu::motion_packet::packet sealed_motion{};
+    if (aligned_mode)
+        sealed_motion = {fi, mvec_handle, 0,
+            {aligned_frame.key.frame, aligned_frame.key.viewport, true, true}};
+    else
+    {
+        // Copy recording and closing a packet share this short CPU-only lock.
+        std::lock_guard<std::mutex> motion_lock(s.mvec_cs);
+        sealed_motion = s.mvec_packets.close(fi);
+    }
     if (s.mvec_mode == 3)
     {
-        if (s.mvec_bytes2 != 0 && s.mvec_slot_valid[slot].load(std::memory_order_acquire) != 0u) seal.mvec_valid = 1u;
+        if (s.mvec_bytes2 != 0 && sealed_motion.source != 0) seal.mvec_valid = 1u;
         else ++s.mvec_missing;
     }
-    // R323 (HistoryGate=1 only): stamp the slot with dllmain's fact for this game frame.
-    if (g_hist_gate.load(std::memory_order_relaxed) != 0)
-        s.slot_dlss[slot].store((signed char)g_game_dlss.load(std::memory_order_relaxed), std::memory_order_release);
+    s.mvec_audit_sealed[slot] = {fi, seal.mvec_valid != 0u
+        ? sealed_motion.source : 0ull};
+    if (!aligned_mode && fi % 300ull < 12ull)
+    {
+        char packet_line[640];
+        snprintf(packet_line, sizeof packet_line,
+                 "[MGPU][R322-PACKET] seal=%llu slot=%u motion=%u source=0x%llx "
+                 "engine_frame=%u frame_known=%u viewport=%u viewport_known=%u "
+                 "motion_cmd=0x%llx color_cmd=%p color=0x%llx queue=%p "
+                 "color_engine_frame=unknown; CPU handoff only, GPU ordering not proven",
+                 fi, slot, seal.mvec_valid, sealed_motion.source,
+                 sealed_motion.engine.frame, unsigned(sealed_motion.engine.frame_known),
+                 sealed_motion.engine.viewport, unsigned(sealed_motion.engine.viewport_known),
+                 static_cast<unsigned long long>(sealed_motion.command), gl, rtv_handle, gq);
+        mgpu::diag::info(packet_line);
+    }
     // D2.0 NR step one: record what this seal says about vectors. Read only. Off: one load.
     if (mgpu::fgmap::on()) mgpu::fgmap::on_seal(fi, slot, seal.mvec_valid, rtv_handle);
 
@@ -21616,7 +21675,8 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
         if (depth_handle != 0 && s.depth_bytes != 0)
         {
             dsrc = reinterpret_cast<ID3D12Resource *>((void *)(uintptr_t)depth_handle);
-            const D3D12_RESOURCE_DESC dd = dsrc->GetDesc();
+            D3D12_RESOURCE_DESC dd = aligned_mode ? aligned_frame.planes[1].description : dsrc->GetDesc();
+            if (aligned_mode) dd.Format = mgpu::aligned::depth_format(dd.Format);
 
             // THE SIZE GUARD. The slot was sized ONCE at arm time. If the
             // player changes resolution mid-stream the tap target is recreated
@@ -21652,7 +21712,68 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
     // makes `produced` stop counting them, the seal index is the wrong unit
     // and the metric would quietly under-report the true motion gap. This is
     // the right unit, recorded where the seal is written.
-    s.slot_game_frame[slot] = s.game_frames;
+    if (s.fg_requested)
+    {
+        s.fg_camera_seal[slot] = 0;
+        s.fg_input_seal[slot] = (seal.mvec_valid != 0u && depth_ok) ? fi : 0;
+        s.fg_input_capture_ns[slot] = 0;
+        mgpu::fgmap::camera_snapshot camera{};
+        if (aligned_mode && seal.mvec_valid != 0u && depth_ok)
+        {
+            if (mgpu::secondary_fg::aligned_camera(aligned_frame.constants, aligned_frame.key,
+                                                  s.mvec_w, s.mvec_h, camera))
+            {
+                s.fg_camera[slot] = camera;
+                s.fg_camera_seal[slot] = fi;
+                s.fg_input_capture_ns[slot] = camera.capture_ns;
+            }
+            else if (++s.fg_rejected <= 3ull)
+                mgpu::diag::warn("[MGPU][M344-FG] exact-frame Streamline camera incomplete; NR retained, no latest-camera substitution.");
+        }
+        else if (!aligned_mode && seal.mvec_valid != 0u && depth_ok && mgpu::fgmap::read_camera(camera))
+        {
+            mgpu::secondary_fg::captured_tuple tuple{};
+            tuple.scene_sequence = s.fg_motion_sequence[slot].load(std::memory_order_relaxed);
+            tuple.color = rtv_handle;
+            tuple.depth = aligned_mode ? source_depth_handle : depth_handle;
+            tuple.motion = s.fg_motion_source[slot].load(std::memory_order_relaxed);
+            if (tuple.motion == 0) tuple.motion = aligned_mode ? source_motion_handle : mvec_handle;
+            tuple.capture_ns = secondary_fg_now_ns();
+            tuple.guide_width = s.mvec_w;
+            tuple.guide_height = s.mvec_h;
+            tuple.aligned_inputs = aligned_mode;
+            s.fg_input_capture_ns[slot] = tuple.capture_ns;
+            const auto match = mgpu::secondary_fg::match_camera(camera, tuple);
+            if (match.matched())
+            {
+                s.fg_camera[slot] = camera;
+                s.fg_camera_seal[slot] = fi;
+            }
+            else
+            {
+                static unsigned long long rejected_match_logs = 0;
+                if (rejected_match_logs++ < 12)
+                {
+                    char match_line[700];
+                    snprintf(match_line, sizeof match_line,
+                             "[MGPU][FG2] tuple rejected f=%llu reason=%s scene=%llu camera_frame=%llu "
+                             "color=%p/%p depth=%p/%p motion=%p/%p capture_delta_ns=%lld guide=%ux%u",
+                             fi, mgpu::secondary_fg::camera_match_failure_name(match.failure),
+                             tuple.scene_sequence, camera.frame_id,
+                             (void *)(uintptr_t)tuple.color, (void *)(uintptr_t)camera.backbuffer,
+                             (void *)(uintptr_t)tuple.depth, (void *)(uintptr_t)camera.depth,
+                             (void *)(uintptr_t)tuple.motion, (void *)(uintptr_t)camera.motion,
+                             tuple.capture_ns >= camera.capture_ns
+                                 ? static_cast<long long>(tuple.capture_ns - camera.capture_ns)
+                                 : -static_cast<long long>(camera.capture_ns - tuple.capture_ns),
+                             tuple.guide_width, tuple.guide_height);
+                    mgpu::diag::warn(match_line);
+                }
+            }
+        }
+    }
+    s.slot_game_frame[slot] = aligned_mode ? aligned_frame.key.frame : s.game_frames;
+    s.slot_measurement_session[slot] = aligned_mode ? aligned_frame.measurement_session : 0;
     // R300 (T1.19): Dom's per-seal stamps, each only with its key.
     if (mgpu::t119::temporal_active())
         mgpu::tdiag::note_seal(slot, fi, s.game_frames, seal.mvec_valid != 0u, s.depth_slot_valid[slot] != 0u);   // R300a1
@@ -21680,6 +21801,36 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
     // R300g1/R300h (ProducerDiag=1 / Gpu0Timers=1 only): CPU recording cost and GPU 0 timestamps of this block.
     const bool t119_pd = mgpu::t119::producer_active();
     LARGE_INTEGER pq0{};
+
+    if (aligned_mode)
+    {
+        const HRESULT transfer = mgpu::aligned::submit_transfer(aligned_frame, s.gup, (UINT64)slot * SEAL_STRIDE,
+            s.gxfer, slot_off, sizeof(MgpuSeal),
+            {slot_off + SEAL_STRIDE, slot_off + s.depth_off, slot_off + s.mvec_off}, s.gfence, fi,
+            s.color_copy_overlap ? s.gcolor_ready : nullptr,
+            s.guide_copy_overlap ? s.gdepth_ready : nullptr);
+        if (FAILED(transfer))
+        {
+            if (transfer != DXGI_ERROR_WAS_STILL_DRAWING)
+            {
+                s.finished = true;
+                mgpu::diag::error("[MGPU][R328-TRANSFER] copy submission failed; retaining resources and last neural output");
+            }
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> motion_lock(s.mvec_cs);
+            s.mvec_packets.recorded(sealed_motion.source, sealed_motion.command, sealed_motion.engine);
+            (void)s.mvec_packets.close(fi);
+        }
+        s.aligned_constants[slot] = aligned_frame.constants;
+        mgpu::aligned::commit_transfer(aligned_frame);
+        ++s.mvec_copies;
+        s.produced = fi;
+        s.produced_a.store(fi, std::memory_order_release);
+        return;
+    }
+
     if (t119_pd) { QueryPerformanceCounter(&pq0); mgpu::p0t::mark(gl, fi, 0); }
     gl->CopyBufferRegion(s.gxfer, slot_off, s.gup, (UINT64)slot * SEAL_STRIDE, sizeof(MgpuSeal));
 
@@ -21743,21 +21894,6 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
     s.produced = fi;
     s.produced_a.store(fi, std::memory_order_release);   // R88: the lock-free mirror
 
-    // ---- R78: ARM THE NEXT SLOT'S MVec FLAG AT ZERO ----
-    //
-    // THE ONE LINE THAT MAKES mvec_valid MEAN ANYTHING. The next frame's
-    // vectors are written by stream_mvec_copy from the bind event, which may
-    // simply not fire - a menu, a load screen, a frame the engine skipped the
-    // pass on. Without this the flag left over from the last frame that DID
-    // fire would still be set, the seal would claim vectors, and the consumer
-    // would bind a slot region holding the previous frame's motion. The whole
-    // failure would be invisible: every counter would read healthy and the
-    // picture would just be subtly wrong when the camera stopped.
-    //
-    // Frame fi used slot (fi-1) % RING, so frame fi+1 uses fi % RING. Cleared
-    // here, under this mutex, BEFORE the next frame's scene can be drawn.
-    s.mvec_slot_valid[(unsigned)(fi % stream_state::RING)].store(0u, std::memory_order_release);
-    if (s.mvec2_off != 0) s.r315_both[(unsigned)(fi % stream_state::RING)].store(0u, std::memory_order_release);   // R315b
 }
 
 // ---- R78: THE MID-FRAME MOTION VECTOR COPY ----
@@ -21774,18 +21910,12 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
 // type and this file holds none - the same boundary rule the depth copy
 // follows, and the same one P10.3 spent a device learning.
 //
-// THE SLOT IS KNOWABLE HERE, and this is the only subtle part. All this
-// function does is record a copy into THE SLOT THIS FRAME IS ABOUT TO SEAL.
-// stream_on_finish_effects will use fi = produced + 1 and slot = (fi - 1) %
-// RING, which is produced % RING - read here under the same mutex, before the
-// frame is sealed, so the two cannot disagree.
-//
-// ORDERING IS FREE. This copy is recorded into the game's list mid-scene and
-// the seal is recorded at finish-effects; command lists execute in submission
-// order, so the vectors are in the slot before the seal that describes them,
-// and the single fence signal covers both.
+// The pending packet assigns a destination under mvec_cs. This only orders CPU
+// recording against packet close; it does not prove engine-frame or GPU-queue
+// correspondence between the tag command list and the later color command list.
 void stream_mvec_copy(void *cmd_list_v, unsigned long long mvec_handle)
 {
+    if (mgpu::aligned::enabled()) return;
     stream_state &s = str();
 
     // ---- try_lock, AND THIS IS A DELIBERATE TRADE ----
@@ -21822,22 +21952,7 @@ void stream_mvec_copy(void *cmd_list_v, unsigned long long mvec_handle)
     if (!s.mvec_live.load(std::memory_order_relaxed)) return;
     if (s.mvec_mode != 3) return;
     if (s.gxfer == nullptr || s.mvec_bytes2 == 0) return;
-    // R311: with MVecSource=1 or 2, only the TAP's copies land (R280's target under 1, the census pick
-    // under 2 - both copied by the tap at finish_effects, inside tap_copy_scope). The game's own routes
-    // - the calibrator's evaluate copy and the probe's barrier copy - are counted and dropped here, so a
-    // contract title whose buffer happens to match the slot's layout cannot mix its vectors in. Key
-    // absent: one relaxed load of 0, the branch is never taken.
-    if (g_r311_src.load(std::memory_order_relaxed) != 0 && !t_tap_copy_scope)
-    {
-        ++s.r311_dropped;
-        if (!s.r311_drop_said)
-        {
-            s.r311_drop_said = true;
-            mgpu::diag::info("[MGPU][R311] a copy from one of the game's own vector routes (NGX evaluate or barrier) was dropped: "
-                             "MVecSource is set, only the tap's copies land. Said once; the count is on the [R78] MVEC TRANSPORT line.");
-        }
-        return;
-    }
+    if (!s.mvec_source_priority.accepts(t_tag_capture_scope)) return;
 
     ID3D12GraphicsCommandList *gl =
         reinterpret_cast<ID3D12GraphicsCommandList *>(cmd_list_v);
@@ -21863,24 +21978,11 @@ void stream_mvec_copy(void *cmd_list_v, unsigned long long mvec_handle)
         return;
     }
 
-    // R88: from the atomic mirror. produced is written under cs, which this
-    // function no longer holds; a 64-bit read without one is a torn value
-    // waiting to happen, and a torn slot index is a copy into the wrong slot.
-    const unsigned slot =
-        (unsigned)(s.produced_a.load(std::memory_order_acquire) % stream_state::RING);
+    const auto pending_motion = s.mvec_packets.pending();
+    const unsigned long long t119_mfi = pending_motion.seal;
+    const unsigned slot = static_cast<unsigned>((t119_mfi - 1ull) % stream_state::RING);
     const UINT64 slot_off = (UINT64)slot * s.slot_bytes;
     // R300 (T1.19), each only with its key.
-    const unsigned long long t119_mfi = s.produced_a.load(std::memory_order_acquire) + 1ull;   // the seal this vector travels with
-    // R315b (MVecBarrierSource=2): the tail copy. In the WINDOW it is the compare copy - region 2,
-    // no counters, no valid flag; the slot is marked as holding both. In the TAIL phase it is the
-    // delivery (region 1, counted as the game's own route). In TRANSITION it is not called.
-    // Key absent / 1: t_r315_tail is never set, mvec2_off is 0.
-    const bool r315_tail = t_r315_tail && s.mvec2_off != 0;
-    const bool r315_compare = r315_tail && g_r315_phase.load(std::memory_order_relaxed) == R315_WINDOW;
-    if (r315_compare && s.mvec_slot_valid[slot].load(std::memory_order_acquire) == 0u)
-        return;   // nothing delivered this frame to compare against (no transition / evaluate copy yet)
-    if (r315_tail && !r315_compare && g_r315_phase.load(std::memory_order_relaxed) != R315_TAIL)
-        return;
     if (mgpu::t119::temporal_active())
     {
         mgpu::tdiag::note_mvec_copy(slot, t119_mfi);   // R300a1
@@ -21899,7 +22001,7 @@ void stream_mvec_copy(void *cmd_list_v, unsigned long long mvec_handle)
     mt.pResource = s.gxfer;
     mt.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     mt.PlacedFootprint = s.mvec_fp2;
-    mt.PlacedFootprint.Offset = slot_off + (r315_compare ? s.mvec2_off : s.mvec_off);
+    mt.PlacedFootprint.Offset = slot_off + s.mvec_off;
     if (t119_pd) mgpu::p0t::mark(gl, t119_mfi, 4);   // R300h: MVec begin
     D3D12_RESOURCE_BARRIER t119_b{};                  // R300d: only with SLTagsCapture, see t_t119_tag_barrier
     if (t_t119_tag_barrier)
@@ -21918,6 +22020,16 @@ void stream_mvec_copy(void *cmd_list_v, unsigned long long mvec_handle)
         t119_b.Transition.StateAfter = (D3D12_RESOURCE_STATES)t_t119_tag_state;
         gl->ResourceBarrier(1, &t119_b);
     }
+    if (s.mvec_source_priority.recorded(t_tag_capture_scope))
+    {
+        s.mvec_tag_switch_frame.store(t119_mfi, std::memory_order_release);
+        char tagged_line[360];
+        snprintf(tagged_line, sizeof tagged_line,
+                 "[MGPU][R317-TAGGED] first_copy seal=%llu source=0x%llx state=0x%X %ux%u fmt=%u; "
+                 "tag-time source is exclusive until rearm; later heuristic copies rejected; one history reset",
+                 t119_mfi, mvec_handle, t_t119_tag_state, s.mvec_w, s.mvec_h, s.mvec_format);
+        mgpu::diag::info(tagged_line);
+    }
     if (t119_pd)
     {
         mgpu::p0t::mark(gl, t119_mfi, 5);             // R300h: MVec end
@@ -21929,19 +22041,34 @@ void stream_mvec_copy(void *cmd_list_v, unsigned long long mvec_handle)
     // Counted ONCE per frame even if the engine binds the target twice, so
     // that copies + missing equals the number of frames sealed and a
     // disagreement between those two numbers is a real finding.
-    if (r315_compare)
-    {   // R315b: the compare copy - the seal and the counters never see it
-        s.r315_both[slot].store(1u, std::memory_order_release);
-        return;
-    }
-    if (r315_tail) ++s.r315_tail_delivered;   // R315b: the tail delivering (TAIL phase)
-    if (s.mvec_slot_valid[slot].load(std::memory_order_relaxed) == 0u)
+    if (pending_motion.source == 0)
     {
         ++s.mvec_copies;
         if (t_tap_copy_scope) ++s.mvec_copies_tap;   // R280o: same point, same condition, so tap <= copies
         else ++s.mvec_copies_own;                     // R289: counted directly - no subtraction, no fake delivery
     }
-    s.mvec_slot_valid[slot].store(1u, std::memory_order_release);
+    if (s.fg_requested)
+    {
+        s.fg_motion_source[slot].store(mvec_handle, std::memory_order_relaxed);
+        s.fg_motion_sequence[slot].store(mgpu::fgmap::scene_sequence(), std::memory_order_relaxed);
+    }
+    s.mvec_audit_source[slot].store(mvec_handle, std::memory_order_relaxed);
+    s.mvec_packets.recorded(mvec_handle, reinterpret_cast<std::uintptr_t>(cmd_list_v), t_tag_engine);
+    if (mvec_handle != s.mvec_audit_last && s.mvec_audit_names < 24u)
+    {
+        s.mvec_audit_last = mvec_handle;
+        ++s.mvec_audit_names;
+        char resource_name[192];
+        mgpu::motion_audit::read_name(msrc, resource_name, sizeof resource_name);
+        char source_line[480];
+        snprintf(source_line, sizeof source_line,
+                 "[MGPU][R316-MV-SOURCE] next_seal=%llu slot=%u source=0x%llx name=%s "
+                 "%ux%u fmt=%u route=%s; identity observation only",
+                 t119_mfi, slot, mvec_handle, resource_name, (unsigned)md.Width,
+                 (unsigned)md.Height, (unsigned)md.Format,
+                 t_tag_capture_scope ? "Streamline-tag" : t_tap_copy_scope ? "finish-effects-tap" : "barrier-or-evaluate");
+        mgpu::diag::info(source_line);
+    }
     // D2.0 NR step one: record that this slot got its copy. Off: one load.
     if (mgpu::fgmap::on()) mgpu::fgmap::on_mvec_copy(slot);
 }
@@ -21965,8 +22092,11 @@ void stream_mvec_copy(void *cmd_list_v, unsigned long long mvec_handle)
 //     (mvec_copies_own). They are the game's declared vectors, so that reading holds; recorded here
 //     because it changes what R289 sees when the key is on.
 void stream_mvec_copy_tagged(void *cmd_list_v, unsigned long long mvec_handle,
-                             unsigned declared_state, int lifecycle)
+                             unsigned declared_state, int lifecycle, unsigned top,
+                             unsigned left, unsigned width, unsigned height,
+                             mgpu::motion_packet::identity engine)
 {
+    if (mgpu::aligned::enabled()) return;
     const int mode = mgpu::t119::sltags_capture();
     if (mode == 0 || cmd_list_v == nullptr || mvec_handle == 0ull) return;
     static std::atomic<bool> said_unset{false}, said_life{false}, said{false};
@@ -21990,15 +22120,59 @@ void stream_mvec_copy_tagged(void *cmd_list_v, unsigned long long mvec_handle,
         }
         return;
     }
+    ID3D12Resource *resource = nullptr;
+    D3D12_RESOURCE_DESC description{};
+    if (!mgpu::tagged_motion::query_resource(reinterpret_cast<void *>(static_cast<uintptr_t>(mvec_handle)),
+                                            resource, description))
+    {
+        static std::atomic<bool> said_interface{false};
+        if (!said_interface.exchange(true))
+            mgpu::diag::warn("[MGPU][R319-TAG-REJECT] native resource does not expose a readable ID3D12Resource");
+        return;
+    }
+    if (description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        description.DepthOrArraySize != 1 || description.MipLevels != 1 || description.SampleDesc.Count != 1)
+    {
+        resource->Release();
+        static std::atomic<bool> said_shape{false};
+        if (!said_shape.exchange(true))
+            mgpu::diag::warn("[MGPU][R319-TAG-REJECT] native resource must be a 2D texture with one array slice, mip and sample");
+        return;
+    }
+    if (!mgpu::tagged_motion::whole_extent(top, left, width, height,
+                                          static_cast<unsigned>(description.Width), description.Height))
+    {
+        static std::atomic<bool> said_extent{false};
+        if (!said_extent.exchange(true))
+        {
+            char line[280];
+            snprintf(line, sizeof line,
+                     "[MGPU][R319-TAG-REJECT] cropped extent=(%u,%u,%u,%u) resource=%llux%u; whole-resource capture required",
+                     top, left, width, height, description.Width, description.Height);
+            mgpu::diag::warn(line);
+        }
+        resource->Release();
+        return;
+    }
+    const bool previous_scope = t_tag_capture_scope;
+    const bool previous_barrier = t_t119_tag_barrier;
+    const unsigned previous_state = t_t119_tag_state;
+    const auto previous_engine = t_tag_engine;
+    t_tag_engine = engine;
+    t_tag_capture_scope = true;
     t_t119_tag_state = declared_state;
     t_t119_tag_barrier = (declared_state != (unsigned)D3D12_RESOURCE_STATE_COPY_SOURCE);
-    stream_mvec_copy(cmd_list_v, mvec_handle);
-    t_t119_tag_barrier = false;
+    stream_mvec_copy(cmd_list_v, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(resource)));
+    t_t119_tag_barrier = previous_barrier;
+    t_t119_tag_state = previous_state;
+    t_tag_capture_scope = previous_scope;
+    t_tag_engine = previous_engine;
+    resource->Release();
     if (!said.exchange(true))
     {
         char l[520];
         snprintf(l, sizeof l,
-                 "[MGPU][R300d] TAG-TIME MVEC CAPTURE ACTIVE (SLTagsCapture=%d): resource=0x%llx state=0x%X "
+                 "[MGPU][R300d] TAG-TIME MVEC CAPTURE REQUESTED (SLTagsCapture=%d): resource=0x%llx state=0x%X "
                  "lifecycle=%d. The copy is recorded on the game's slSetTag command list through the same "
                  "stream_mvec_copy; the transition is recorded only when that copy is, and the declared state "
                  "is restored. No new queue, fence or transport.",
@@ -22034,17 +22208,22 @@ void stream_mvec_copy_tagged(void *cmd_list_v, unsigned long long mvec_handle,
 //    in COMMON in this mode, is read as NON_PIXEL_SHADER_RESOURCE on the
 //    direct queue, and is put back to COMMON at the end of that list, ready
 //    for the copy queue to take it again two frames later.
-static bool stream_cq_submit(stream_state &s, unsigned long long f)
+static bool stream_cq_submit(stream_state &s, unsigned long long f, unsigned ii)
 {
-    const unsigned ii = (unsigned)(f & 1ull);
+    if (ii >= stream_state::PIPELINE_SLOTS || s.pipeline.owns_input(ii)) return false;
     if (s.cq == nullptr || s.cqf == nullptr || s.cqa[ii] == nullptr ||
         s.cql[ii] == nullptr || s.tex_in[ii] == nullptr || s.nxfer == nullptr)
+        return false;
+    if (s.color_copy_overlap && (!s.ncolor_ready || !s.cq_color_allocators[ii] || !s.cq_color_lists[ii]))
+        return false;
+    if (s.guide_copy_overlap && (!s.color_copy_overlap || !s.ndepth_ready || !s.cq_depth_allocators[ii] || !s.cq_depth_lists[ii]))
         return false;
 
     // Is this allocator's last submission finished? Non-blocking; see
     // cqa_value in stream_state for why the answer is a fallback and not a
     // wait. In the paced case this is always already true.
-    if (s.cqf->GetCompletedValue() < s.cqa_value[ii]) return false;
+    const auto copy_completed = s.cqf->GetCompletedValue();
+    if (copy_completed == UINT64_MAX || copy_completed < s.cqa_value[ii]) return false;
 
     const unsigned slot = (unsigned)((f - 1) % stream_state::RING);
     const UINT64 slot_off = (UINT64)slot * s.slot_bytes;
@@ -22052,12 +22231,18 @@ static bool stream_cq_submit(stream_state &s, unsigned long long f)
     HRESULT h = s.cqa[ii]->Reset();
     if (SUCCEEDED(h)) h = s.cql[ii]->Reset(s.cqa[ii], nullptr);
     if (FAILED(h)) return false;
+    if (s.color_copy_overlap)
+    {
+        h = s.cq_color_allocators[ii]->Reset();
+        if (SUCCEEDED(h)) h = s.cq_color_lists[ii]->Reset(s.cq_color_allocators[ii], nullptr);
+        if (FAILED(h)) { (void)s.cql[ii]->Close(); return false; }
+    }
+    auto *color_list = s.color_copy_overlap ? s.cq_color_lists[ii] : s.cql[ii];
+    auto *depth_list = s.guide_copy_overlap ? s.cq_depth_lists[ii] : s.cql[ii];
 
-    // Two marks per copy, ping-ponged by parity: a prefetched copy can resolve
-    // into this buffer before the previous frame's marks have been read, and a
-    // single pair of slots would hand frame N+1's numbers back labelled N.
+    // Separate query pairs preserve each input's three stage boundaries.
     if (s.cq_ts_ok)
-        s.cql[ii]->EndQuery(s.cq_tsheap, D3D12_QUERY_TYPE_TIMESTAMP, ii * 2u);
+        color_list->EndQuery(s.cq_tsheap, D3D12_QUERY_TYPE_TIMESTAMP, ii * 6u);
 
     D3D12_TEXTURE_COPY_LOCATION us{}, ud{};
     us.pResource = s.nxfer;
@@ -22067,21 +22252,36 @@ static bool stream_cq_submit(stream_state &s, unsigned long long f)
     ud.pResource = s.tex_in[ii];
     ud.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     ud.SubresourceIndex = 0;
-    s.cql[ii]->CopyTextureRegion(&ud, 0, 0, 0, &us, nullptr);
+    color_list->CopyTextureRegion(&ud, 0, 0, 0, &us, nullptr);
+    if (s.color_copy_overlap)
+    {
+        if (s.cq_ts_ok)
+        {
+            color_list->EndQuery(s.cq_tsheap, D3D12_QUERY_TYPE_TIMESTAMP, ii * 6u + 1u);
+            color_list->ResolveQueryData(s.cq_tsheap, D3D12_QUERY_TYPE_TIMESTAMP, ii * 6u, 2,
+                s.cq_tsread, UINT64(ii) * 48ull);
+        }
+        if (FAILED(color_list->Close())) { (void)s.cql[ii]->Close(); return false; }
+        if (s.guide_copy_overlap)
+        {
+            h = s.cq_depth_allocators[ii]->Reset();
+            if (SUCCEEDED(h)) h = depth_list->Reset(s.cq_depth_allocators[ii], nullptr);
+            if (FAILED(h)) { (void)s.cql[ii]->Close(); return false; }
+        }
+        if (s.cq_ts_ok) depth_list->EndQuery(s.cq_tsheap, D3D12_QUERY_TYPE_TIMESTAMP, ii * 6u + 2u);
+    }
 
     // ---- WHERE THE ACQUISITION PAYLOAD LANDS (R26a step 2) ----
     //
-    // T1b: depth is that second CopyTextureRegion, in THIS batch, covered by
-    // the same Signal below - one batch, one fence, no extra round trip,
-    // exactly as R26a specified before any of it existed. MVec is still
-    // synthetic and uploaded on GPU 1, so it never appears here.
+    // Depth may arrive before motion; final cqf still retires all three planes.
     //
     // No barrier: identical to the colour copy above. The copy queue's own
     // submission decays the destination to COMMON, and the direct queue
     // transitions from there - which is what the before-state comment in
     // stream_poll is about.
-    if (s.depth_mode != 0 && s.tex_depth[ii] != nullptr &&
-        s.depth_bytes != 0 && s.depth_slot_valid[slot] != 0u)
+    // Prefetch may be recorded before this frame is produced. Copy allocated
+    // guide regions behind the arrival fence; validate them only at consumption.
+    if (s.depth_mode != 0 && s.tex_depth[ii] != nullptr && s.depth_bytes != 0)
     {
         D3D12_TEXTURE_COPY_LOCATION dsu{}, ddu{};
         dsu.pResource = s.nxfer;
@@ -22091,16 +22291,23 @@ static bool stream_cq_submit(stream_state &s, unsigned long long f)
         ddu.pResource = s.tex_depth[ii];
         ddu.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         ddu.SubresourceIndex = 0;
-        s.cql[ii]->CopyTextureRegion(&ddu, 0, 0, 0, &dsu, nullptr);
+        depth_list->CopyTextureRegion(&ddu, 0, 0, 0, &dsu, nullptr);
         ++s.depth_unpacks;
     }
+    if (s.guide_copy_overlap)
+    {
+        if (s.cq_ts_ok)
+        {
+            depth_list->EndQuery(s.cq_tsheap, D3D12_QUERY_TYPE_TIMESTAMP, ii * 6u + 3u);
+            depth_list->ResolveQueryData(s.cq_tsheap, D3D12_QUERY_TYPE_TIMESTAMP, ii * 6u + 2u, 2,
+                s.cq_tsread, (UINT64(ii) * 6ull + 2ull) * 8ull);
+            s.cql[ii]->EndQuery(s.cq_tsheap, D3D12_QUERY_TYPE_TIMESTAMP, ii * 6u + 4u);
+        }
+        if (FAILED(depth_list->Close())) { (void)s.cql[ii]->Close(); return false; }
+    }
 
-    // R78: and MVec, in the SAME batch, under the SAME Signal. Third region,
-    // same slot, same argument as depth's - one batch, one fence, no extra
-    // round trip. The synthetic modes still never appear here: they are
-    // uploaded on GPU 1 and never touch the bus.
-    if (s.mvec_mode == 3 && s.tex_mvec_r[ii] != nullptr &&
-        s.mvec_bytes2 != 0 && s.mvec_slot_valid[slot].load(std::memory_order_acquire) != 0u)
+    // Motion remains behind full arrival; synthetic modes never use this bus.
+    if (s.mvec_mode == 3 && s.tex_mvec_r[ii] != nullptr && s.mvec_bytes2 != 0)
     {
         D3D12_TEXTURE_COPY_LOCATION msu{}, mdu{};
         msu.pResource = s.nxfer;
@@ -22116,9 +22323,10 @@ static bool stream_cq_submit(stream_state &s, unsigned long long f)
 
     if (s.cq_ts_ok)
     {
-        s.cql[ii]->EndQuery(s.cq_tsheap, D3D12_QUERY_TYPE_TIMESTAMP, ii * 2u + 1u);
+        const UINT first_query = ii * 6u + (s.guide_copy_overlap ? 4u : s.color_copy_overlap ? 2u : 0u);
+        s.cql[ii]->EndQuery(s.cq_tsheap, D3D12_QUERY_TYPE_TIMESTAMP, first_query + 1u);
         s.cql[ii]->ResolveQueryData(s.cq_tsheap, D3D12_QUERY_TYPE_TIMESTAMP,
-                                    ii * 2u, 2, s.cq_tsread, (UINT64)ii * 16ull);
+                                    first_query, 2, s.cq_tsread, UINT64(first_query) * 8ull);
     }
     if (FAILED(s.cql[ii]->Close())) return false;
 
@@ -22140,16 +22348,58 @@ static bool stream_cq_submit(stream_state &s, unsigned long long f)
     // queue is behind it too, which is what makes the ordering free and is
     // also why a wait that never satisfies is a hazard. stream_release
     // releases it deliberately; see the note there.
+    if (s.color_copy_overlap)
+    {
+        if (FAILED(s.cq->Wait(s.ncolor_ready, UINT64(f)))) return false;
+        s.cqa_value[ii] = UINT64_MAX;
+        s.cq_issued = (std::max)(s.cq_issued, f);
+        ID3D12CommandList *color_commands[] = {s.cq_color_lists[ii]};
+        s.cq->ExecuteCommandLists(1, color_commands);
+    }
+    if (s.guide_copy_overlap)
+    {
+        if (FAILED(s.cq->Wait(s.ndepth_ready, UINT64(f))))
+        {
+            s.finished = true;
+            g_present_read_fault.store(true);
+            return false;
+        }
+        ID3D12CommandList *depth_commands[] = {s.cq_depth_lists[ii]};
+        s.cq->ExecuteCommandLists(1, depth_commands);
+    }
     if (s.cq_gated && s.nfence != nullptr)
     {
-        if (FAILED(s.cq->Wait(s.nfence, (UINT64)f))) return false;
+        if (FAILED(s.cq->Wait(s.nfence, (UINT64)f)))
+        {
+            if (s.color_copy_overlap) { s.finished = true; g_present_read_fault.store(true); }
+            return false;
+        }
     }
 
     ID3D12CommandList *const cls[1] = { s.cql[ii] };
     s.cq->ExecuteCommandLists(1, cls);
-    if (FAILED(s.cq->Signal(s.cqf, (UINT64)f))) return false;
-    s.cqf_value = (UINT64)f;
-    s.cqa_value[ii] = (UINT64)f;
+    const UINT64 copy_fence = ++s.cqf_value;
+    if (FAILED(s.cq->Signal(s.cqf, copy_fence)))
+    {
+        s.finished = true;
+        g_present_read_fault.store(true);
+        return false;
+    }
+    s.cqa_value[ii] = copy_fence;
+    s.cq_frame[ii] = f;
+    if (s.cq_ts_ok) s.copy_clocks[ii] = s.copy_clock_cache.sample(s.cq, mgpu::timing::cpu_ticks());
+    static std::atomic<bool> prefetch_policy_logged{false};
+    if (!prefetch_policy_logged.exchange(true))
+    {
+        char line[320];
+        snprintf(line, sizeof line,
+                 "[MGPU][R320-CQ] frame=%llu gated=%u depth=%u motion=%u; "
+                 "allocated guides copied behind the arrival fence; per-frame validity checked at consumption",
+                 f, s.cq_gated ? 1u : 0u,
+                 (s.depth_mode != 0 && s.tex_depth[ii] != nullptr && s.depth_bytes != 0) ? 1u : 0u,
+                 (s.mvec_mode == 3 && s.tex_mvec_r[ii] != nullptr && s.mvec_bytes2 != 0) ? 1u : 0u);
+        mgpu::diag::info(line);
+    }
     return true;
 }
 
@@ -22337,6 +22587,16 @@ static void costcurve_solve(stream_state &s)
 static void seal_consume(stream_state &s, unsigned long long f, unsigned slot,
                          bool run_nr, bool use_cq, unsigned ii)
 {
+    const bool asynchronous = s.async_neural && run_nr;
+    const auto *readback = asynchronous ? &s.pipeline_readbacks[s.pipeline.current().snapshot] : nullptr;
+    ID3D12Resource *const timestamp_readback = readback ? readback->timestamps.Get() : s.tsread;
+    ID3D12Resource *const evaluate_readback = readback ? readback->evaluations.Get() : s.evread;
+    ID3D12Resource *const sample_readback = readback ? readback->sample.Get() : s.nr_read;
+    const auto evaluation_count = readback ? readback->evaluation_count : s.ev_count;
+    mgpu::timing::span neural_span{}, copy_span{}, local_copy_span{}, output_span{};
+    mgpu::timing::span color_copy_span{}, guide_copy_span{};
+    mgpu::timing::span depth_copy_span{}, motion_copy_span{};
+    mgpu::timing::calibration neural_clock{};
     char line[1400];
         MgpuSeal got{};
         const unsigned char *m = nullptr;
@@ -22379,13 +22639,19 @@ static void seal_consume(stream_state &s, unsigned long long f, unsigned slot,
         {
             const UINT64 *tv = nullptr;
             D3D12_RANGE tr{0, (SIZE_T)(stream_state::TS_MARKS * 8)};
-            if (SUCCEEDED(s.tsread->Map(0, &tr, (void **)&tv)) && tv != nullptr)
+            if (SUCCEEDED(timestamp_readback->Map(0, &tr, (void **)&tv)) && tv != nullptr)
             {
                 bool sane = true;
                 for (UINT i = 1; i < stream_state::TS_MARKS; ++i)
                     if (tv[i] < tv[i - 1]) sane = false;   // a wrapped or unwritten mark
                 if (sane)
                 {
+                    neural_clock = asynchronous
+                        ? s.pipeline.current().neural_clock
+                        : s.neural_clock_cache.sample(s.nq, mgpu::timing::cpu_ticks());
+                    local_copy_span = mgpu::timing::decode(tv[0], tv[2], neural_clock);
+                    neural_span = mgpu::timing::decode(tv[2], tv[3], neural_clock);
+                    output_span = mgpu::timing::decode(tv[3], tv[4], neural_clock);
                     if (mgpu::t119::perf_active())
                     {   // R300e1: this job's own GPU1 timestamps, ms - pre-NGX (seal copy + unpack), NGX evaluate, output
                         const double kms = 1000.0 / (double)s.ts_freq;
@@ -22525,23 +22791,23 @@ static void seal_consume(stream_state &s, unsigned long long f, unsigned slot,
                     if (s.cc_state != 1u && s.cc_state != 2u) ++s.ts_n;
                 }
                 D3D12_RANGE tn{0, 0};
-                s.tsread->Unmap(0, &tn);
+                timestamp_readback->Unmap(0, &tn);
             }
         }
 
         // R214: this frame's per-evaluate GPU times (EvalTimes=1).
-        if (s.ev_ok && run_nr && s.ev_count > 0u && s.cc_state != 1u && s.cc_state != 2u)
+        if (s.ev_ok && run_nr && evaluation_count > 0u && s.cc_state != 1u && s.cc_state != 2u)
         {
             const UINT64 *ev = nullptr;
-            const unsigned kn = s.ev_count;
+            const unsigned kn = evaluation_count;
             D3D12_RANGE er{0, (SIZE_T)((kn + 1u) * 8u)};
-            if (SUCCEEDED(s.evread->Map(0, &er, (void **)&ev)) && ev != nullptr)
+            if (SUCCEEDED(evaluate_readback->Map(0, &er, (void **)&ev)) && ev != nullptr)
             {
                 for (unsigned i = 0; i < kn; ++i)
                 {
                     if (ev[i + 1] < ev[i]) break;   // a wrapped or unwritten mark
                     const double ms = (double)(ev[i + 1] - ev[i]) * 1000.0 / (double)s.ts_freq;
-                    const unsigned ro = s.ev_role[i];
+                    const unsigned ro = readback ? readback->evaluation_roles[i] : s.ev_role[i];
                     if (ro >= stream_state::EV_ROLES) continue;
                     s.ev_sum[ro] += ms;
                     if (ms < s.ev_min[ro]) s.ev_min[ro] = ms;
@@ -22549,7 +22815,7 @@ static void seal_consume(stream_state &s, unsigned long long f, unsigned slot,
                     ++s.ev_n[ro];
                 }
                 D3D12_RANGE en{0, 0};
-                s.evread->Unmap(0, &en);
+                evaluate_readback->Unmap(0, &en);
             }
         }
 
@@ -22562,13 +22828,32 @@ static void seal_consume(stream_state &s, unsigned long long f, unsigned slot,
         if (use_cq && s.cq_ts_ok && run_nr)
         {
             const UINT64 *cv = nullptr;
-            D3D12_RANGE cr{ (SIZE_T)(ii * 16u), (SIZE_T)(ii * 16u + 16u) };
+            D3D12_RANGE cr{ (SIZE_T)(ii * 48u), (SIZE_T)(ii * 48u + 48u) };
             if (SUCCEEDED(s.cq_tsread->Map(0, &cr, (void **)&cv)) && cv != nullptr)
             {
-                const UINT64 *const mk = cv + (size_t)ii * 2u;
-                if (mk[1] >= mk[0])
+                const UINT64 *const mk = cv + (size_t)ii * 6u;
+                const unsigned last_mark = s.guide_copy_overlap ? 5u : s.color_copy_overlap ? 3u : 1u;
+                bool ordered = true;
+                for (unsigned point = 1; point <= last_mark; ++point)
+                    ordered = ordered && mk[point] >= mk[point - 1];
+                if (ordered)
                 {
-                    const double cms = (double)(mk[1] - mk[0]) * 1000.0
+                    const auto &copy_clock = asynchronous ? s.pipeline.current().copy_clock : s.copy_clocks[ii];
+                    copy_span = mgpu::timing::decode(mk[0], mk[last_mark], copy_clock);
+                    if (s.color_copy_overlap)
+                    {
+                        color_copy_span = mgpu::timing::decode(mk[0], mk[1], copy_clock);
+                        guide_copy_span = mgpu::timing::decode(mk[2], mk[last_mark], copy_clock);
+                    }
+                    if (s.guide_copy_overlap)
+                    {
+                        depth_copy_span = mgpu::timing::decode(mk[2], mk[3], copy_clock);
+                        motion_copy_span = mgpu::timing::decode(mk[4], mk[5], copy_clock);
+                    }
+                    UINT64 copy_ticks = 0;
+                    for (unsigned point = 0; point < last_mark; point += 2)
+                        copy_ticks += mk[point + 1] - mk[point];
+                    const double cms = (double)copy_ticks * 1000.0
                                      / (double)s.cq_ts_freq;
                     s.cq_ts_sum += cms;
                     if (cms < s.cq_ts_min) s.cq_ts_min = cms;
@@ -22581,6 +22866,104 @@ static void seal_consume(stream_state &s, unsigned long long f, unsigned slot,
             }
         }
 
+        // M336: publish one frame-matched consumer record. The direct-queue
+        // marks cover the bridge-side seal copy/unpack, NR and output copy;
+        // when the dedicated COPY queue is active, copy_start/copy_end are
+        // replaced by its own calibrated timestamps and local_copy_* retains
+        // the direct-list bracket. No stage is filled with zero on failure.
+        const std::uint64_t measurement_session = s.slot_measurement_session[slot] != 0
+            ? s.slot_measurement_session[slot]
+            : (asynchronous ? s.pipeline.current().measurement_session : 0);
+        if (measurement_session != 0 && run_nr)
+        {
+            if (s.measurement_queue_session != measurement_session)
+            {
+                s.measurement_queue_session = measurement_session;
+                s.measurement_queue_mask = 0;
+            }
+            if (s.nq != nullptr && (s.measurement_queue_mask & 1u) == 0)
+            {
+                mgpu::measurement::queue(measurement_session, "consumer_neural", s.nq);
+                s.measurement_queue_mask |= 1u;
+            }
+            if (s.cq != nullptr && (s.measurement_queue_mask & 2u) == 0)
+            {
+                mgpu::measurement::queue(measurement_session, "consumer_copy", s.cq);
+                s.measurement_queue_mask |= 2u;
+            }
+            const auto &job = asynchronous ? s.pipeline.current() : mgpu::neural_pipeline::job{};
+            const double submit_ms = asynchronous ? job.measurement_submitted_ms : -1.0;
+            const auto &copy = (copy_span.start_ms >= 0 && copy_span.end_ms >= copy_span.start_ms)
+                ? copy_span : local_copy_span;
+            const double observed_ms = mgpu::timing::cpu_ms(mgpu::timing::cpu_ticks());
+            char report[1500];
+            std::snprintf(report, sizeof report,
+                "[MGPU][M336] kind=consumer session=%llu seal=%llu engine_frame=%llu slot=%u "
+                "async=%u copy_queue=%u submit_ms=%.6f copy_start=%.6f copy_end=%.6f "
+                "local_copy_start=%.6f local_copy_end=%.6f neural_start=%.6f neural_end=%.6f "
+                "output_start=%.6f output_end=%.6f observed_ms=%.6f "
+                "neural_fence=%llu copy_fence=%llu input_index=%u",
+                static_cast<unsigned long long>(measurement_session), f,
+                static_cast<unsigned long long>(s.slot_game_frame[slot]), slot,
+                asynchronous ? 1u : 0u, use_cq ? 1u : 0u, submit_ms,
+                copy.start_ms, copy.end_ms, local_copy_span.start_ms, local_copy_span.end_ms,
+                neural_span.start_ms, neural_span.end_ms, output_span.start_ms, output_span.end_ms,
+                observed_ms, asynchronous ? s.pipeline.current().fence : s.nf_value,
+                use_cq ? s.cqa_value[ii] : 0ull, ii);
+            mgpu::measurement::emit(report);
+            if (s.color_copy_overlap && !s.guide_copy_overlap)
+            {
+                std::snprintf(report, sizeof report,
+                    "[MGPU][M340-COPY] kind=consumer session=%llu seal=%llu input_index=%u "
+                    "color_start=%.6f color_end=%.6f guides_start=%.6f guides_end=%.6f "
+                    "color_gate=%p full_gate=%p; stages retain exact input bytes; combined span includes between-stage wait",
+                    static_cast<unsigned long long>(measurement_session), f, ii,
+                    color_copy_span.start_ms, color_copy_span.end_ms, guide_copy_span.start_ms, guide_copy_span.end_ms,
+                    s.ncolor_ready, s.nfence);
+                mgpu::measurement::emit(report);
+            }
+            if (s.guide_copy_overlap)
+            {
+                std::snprintf(report, sizeof report,
+                    "[MGPU][M341-COPY] kind=consumer session=%llu seal=%llu engine_frame=%llu input_index=%u "
+                    "color_start=%.6f color_end=%.6f depth_start=%.6f depth_end=%.6f "
+                    "motion_start=%.6f motion_end=%.6f depth_gate=%p full_gate=%p; all stages retire before NR",
+                    static_cast<unsigned long long>(measurement_session), f,
+                    static_cast<unsigned long long>(s.slot_game_frame[slot]), ii,
+                    color_copy_span.start_ms, color_copy_span.end_ms, depth_copy_span.start_ms, depth_copy_span.end_ms,
+                    motion_copy_span.start_ms, motion_copy_span.end_ms, s.ndepth_ready, s.nfence);
+                mgpu::measurement::emit(report);
+            }
+        }
+
+        if (asynchronous)
+        {
+            const bool contiguous = s.timeline_previous_seal != 0 && f == s.timeline_previous_seal + 1;
+            const double overlap_ms = contiguous
+                ? mgpu::timing::overlap(copy_span, s.timeline_previous_neural) : -1;
+            const double cadence_ms = contiguous
+                ? mgpu::timing::interval(s.timeline_previous_neural.end_ms, neural_span.end_ms) : -1;
+            s.timeline_overlap.add(overlap_ms);
+            s.timeline_cadence.add(cadence_ms);
+            if (f <= 3ull || f % 120ull == 0ull)
+            {
+                std::snprintf(line, sizeof line,
+                    "[MGPU][R334-TIMELINE] seal=%llu previous=%llu "
+                    "copy_qpc_ms=(%.6f,%.6f) neural_qpc_ms=(%.6f,%.6f) previous_neural_qpc_ms=(%.6f,%.6f) "
+                    "copy_with_previous_neural_ms=%.6f overlap_n=%llu overlap_invalid=%llu overlap_mean_ms=%.6f "
+                    "neural_end_interval_n=%llu neural_end_interval_mean_ms=%.6f; "
+                    "calibrated GPU intervals, not submission counters; -1 means unavailable",
+                    f, s.timeline_previous_seal, copy_span.start_ms, copy_span.end_ms,
+                    neural_span.start_ms, neural_span.end_ms,
+                    s.timeline_previous_neural.start_ms, s.timeline_previous_neural.end_ms,
+                    overlap_ms, s.timeline_overlap.count, s.timeline_overlap.invalid, s.timeline_overlap.mean(),
+                    s.timeline_cadence.count, s.timeline_cadence.mean());
+                mgpu::diag::info(line);
+            }
+            s.timeline_previous_neural = neural_span;
+            s.timeline_previous_seal = f;
+        }
+
         // The liveness sample. Compared against the PREVIOUS frame's, not
         // against a value we chose - section 00a's rule. What a high
         // identical-rate means is ambiguous by construction and the summary
@@ -22590,14 +22973,14 @@ static void seal_consume(stream_state &s, unsigned long long f, unsigned slot,
         {
             unsigned char *sm = nullptr;
             D3D12_RANGE sr{0, 1024};
-            if (SUCCEEDED(s.nr_read->Map(0, &sr, (void **)&sm)) && sm != nullptr)
+            if (SUCCEEDED(sample_readback->Map(0, &sr, (void **)&sm)) && sm != nullptr)
             {
                 ++s.nr_frames;
                 if (s.nr_have_prev && memcmp(sm, s.nr_prev, 1024) == 0) ++s.nr_same;
                 memcpy(s.nr_prev, sm, 1024);
                 s.nr_have_prev = true;
                 D3D12_RANGE nn{0, 0};
-                s.nr_read->Unmap(0, &nn);
+                sample_readback->Unmap(0, &nn);
             }
         }
 
@@ -22690,20 +23073,6 @@ static void seal_consume(stream_state &s, unsigned long long f, unsigned slot,
                 // Periodic, because Frames=0 runs print no summary and a
                 // transport nobody can see the state of is a transport nobody
                 // can trust.
-                if (f >= s.r312_report_at)   // R312: the lane's own line, every 600 frames (prints at any key value)
-                {
-                    s.r312_report_at = f + 600ull;
-                    char r312l[420];
-                    snprintf(r312l, sizeof r312l,
-                             "[MGPU][R312] DEPTH LANE f=%llu DepthTransport=%d: %ux%u fmt=%u pitch=%u bytes/frame=%llu (colour %ux%u, "
-                             "%.1f%% of its bytes) | seals valid=%llu invalid=%llu size-rejected=%llu | GPU0 depth copy ms: the R300g1 "
-                             "DEPTH split (Gpu0Timers=1).",
-                             f, ini_read_depth_transport(), s.depth_w, s.depth_h, s.depth_format,
-                             (unsigned)s.depth_fp.Footprint.RowPitch, (unsigned long long)s.depth_bytes, s.width, s.height,
-                             s.payload_bytes ? 100.0 * (double)s.depth_bytes / (double)s.payload_bytes : 0.0,
-                             s.depth_seen_valid, s.depth_seen_invalid, (unsigned long long)s.depth_size_rejects);
-                    mgpu::diag::info(r312l);
-                }
                 if (f >= s.depth_report_at)
                 {
                     s.depth_report_at = f + 300ull;
@@ -22776,38 +23145,14 @@ static void seal_consume(stream_state &s, unsigned long long f, unsigned slot,
                 if (got.mvec_valid != 0u) ++s.mvec_seen_valid;
                 else                      ++s.mvec_seen_invalid;
 
-                // The seal crossed the adapter; mvec_slot_valid did not. Same
+                // The seal crossed the adapter; the closed packet did not. Same
                 // fact by two routes, so a disagreement is a finding.
-                if ((got.mvec_valid != 0u) != (s.mvec_slot_valid[slot].load(std::memory_order_acquire) != 0u))
+                if ((got.mvec_valid != 0u) != s.mvec_packets.valid(slot, f))
                     ++s.mvec_flag_disagree;
 
                 if (f >= s.mvec_report_at)
                 {
                     s.mvec_report_at = f + 300ull;
-                    if (s.r310_cost) r309::cost_line(s, "last 300 frames");   // R317 instrument: the game thread's wait on s.cs, every report (ProbeCost=1 only)
-                    // R315c: the line only while there is something to report. On a title with no NGX table
-                    // (RE4, FC6, Skyrim) nothing fires, nothing is copied on our route and the judge never
-                    // starts, and the line repeated "fired 0 ... WINDOW" every 300 frames all session. A late
-                    // table (KCD2) brings it back as soon as any of these moves.
-                    const bool r315_live = g_r315_fires.load(std::memory_order_relaxed) != 0ull ||
-                                           s.mvec_copies_own.load(std::memory_order_relaxed) != 0ull ||
-                                           s.r315_tail_delivered != 0ull || s.r315_judged != 0u ||
-                                           (s.mvec2_off != 0 && g_r315_phase.load(std::memory_order_relaxed) != R315_WINDOW);
-                    if (g_r315_on.load(std::memory_order_relaxed) != 0 && r315_live)   // R315 (MVecBarrierSource=1 only)
-                    {
-                        char r315l[520];
-                        snprintf(r315l, sizeof r315l,
-                                 "[MGPU][R315] f=%llu barrier route on the PUBLISHED source: fired %llu time(s) | copies own=%llu tap=%llu | "
-                                 "evaluate route %s | value 2: phase=%s tail delivered=%llu judged=%u same=%u. Fired > 0 with eval-copies "
-                                 "flat = the game's own transition carries the vectors; fired = 0 = this engine's transition is not seen.",
-                                 f, g_r315_fires.load(std::memory_order_relaxed),
-                                 s.mvec_copies_own.load(std::memory_order_relaxed), s.mvec_copies_tap.load(std::memory_order_relaxed),
-                                 s.mvec_auto_armed ? "ARMED (R118)" : "not armed",
-                                 s.mvec2_off == 0 ? "n/a" : (g_r315_phase.load(std::memory_order_relaxed) == R315_TAIL ? "TAIL" :
-                                                             g_r315_phase.load(std::memory_order_relaxed) == R315_EVALUATE ? "EVALUATE" : "WINDOW"),
-                                 s.r315_tail_delivered, s.r315_judged, s.r315_same);
-                        mgpu::diag::info(r315l);
-                    }
 
                     // ---- R118: THE AUTO-FALLBACK ----
                     //
@@ -22873,11 +23218,9 @@ static void seal_consume(stream_state &s, unsigned long long f, unsigned slot,
                     // Its own buffer: `line` is 1400 and the depth report
                     // above already fills most of it.
                     char ml[1600];
-                    char r311s[96]; r311s[0] = 0;   // R311: present only with MVecSource set - the line is byte-identical otherwise
-                    if (s.r311_src != 0) snprintf(r311s, sizeof r311s, "own-route copies dropped (MVecSource=%d)=%llu ", s.r311_src, s.r311_dropped);
                     snprintf(ml, sizeof ml,
                         "[MGPU][R78] MVEC TRANSPORT f=%llu mode=3 REAL | producer: copies=%llu "
-                        "missing=%llu size-rejected=%llu lock-skipped=%llu, %sarm held %llu "
+                        "missing=%llu size-rejected=%llu lock-skipped=%llu, arm held %llu "
                         "frame(s) | consumer: "
                         "seals seen valid=%llu invalid=%llu contract mismatches=%llu flag "
                         "disagreements=%llu | region %ux%u fmt=%u pitch=%u bytes=%llu at slot "
@@ -22893,7 +23236,6 @@ static void seal_consume(stream_state &s, unsigned long long f, unsigned slot,
                         s.mvec_missing.load(std::memory_order_relaxed),
                         s.mvec_size_rejects.load(std::memory_order_relaxed),
                         s.mvec_lock_skips.load(std::memory_order_relaxed),
-                        r311s,
                         s.mvec_arm_waits,
                         s.mvec_seen_valid, s.mvec_seen_invalid, s.mvec_contract,
                         s.mvec_flag_disagree,
@@ -23276,9 +23618,241 @@ static void seal_consume(stream_state &s, unsigned long long f, unsigned slot,
         }
 }
 
+static void stream_produce_locked(stream_state &s, ID3D12GraphicsCommandList *gl,
+    ID3D12CommandQueue *gq, ID3D12Resource *src, unsigned long long rtv_handle,
+    unsigned long long depth_handle, unsigned long long mvec_handle,
+    mgpu::aligned::lease &aligned_frame)
+{
+    stream_produce_locked(s, gl, gq, src, rtv_handle, depth_handle, mvec_handle,
+                          0, 0, aligned_frame);
+}
+
+static bool stream_secondary_fg_complete(stream_state &s, unsigned long long seal)
+{
+    const unsigned output_slot = s.async_neural ? s.pipeline.current().snapshot : 0u;
+    mgpu::secondary_fg::completed_output output{};
+    output.seal = seal;
+    output.camera_frame = s.async_neural ? s.pipeline.current().engine_frame : s.fg_frame_id;
+    const auto ring_slot = static_cast<unsigned>((seal - 1ull) % stream_state::RING);
+    output.capture_ns = s.fg_input_capture_ns[ring_slot];
+    output.completed_ns = secondary_fg_now_ns();
+    output.generation = s.fg_decision;
+    if (s.fg_pending)
+    {
+        if (s.fg_seal_frame != seal || !s.fg_stage.complete(s.fg_frame_id, s.fg_eval_ok))
+        {
+            s.fg_queue_fault = true;
+            s.finished = true;
+            mgpu::diag::error("[MGPU][M344-FG] completed job identity/fence mismatch; retaining owned buffers.");
+            return false;
+        }
+        s.fg_pending = false;
+        unsigned disabled = 1u;
+        void *mapped = nullptr;
+        const D3D12_RANGE read{0, sizeof disabled};
+        if (s.fg_hint_readback != nullptr &&
+            SUCCEEDED(s.fg_hint_readback->Map(0, &read, &mapped)) && mapped != nullptr)
+        {
+            memcpy(&disabled, mapped, sizeof disabled);
+            const D3D12_RANGE empty{0, 0};
+            s.fg_hint_readback->Unmap(0, &empty);
+        }
+        output.generated_valid = s.fg_eval_ok && s.fg_decision.allow_generated && disabled == 0u;
+    }
+    s.fg_completed[output_slot] = output;
+    if (!s.async_neural && !s.fg_pair.enqueue(seal, output.completed_ns, output.generation,
+                          true, !output.generated_valid, s.fg_multiplier))
+    {
+        s.fg_queue_fault = true;
+        s.finished = true;
+        return false;
+    }
+    if (!s.async_neural) s.fg_output_valid = output.generated_valid;
+    if (seal <= 3ull || seal % 120ull == 0ull)
+    {
+        char report[600];
+        snprintf(report, sizeof report,
+            "[MGPU][M344-FG] seal=%llu camera_frame=%llu async=%u generated_valid=%u "
+            "evaluations=%llu generated_presents=%llu real_presents=%llu "
+            "dropped_late_generated=%llu late_present_ns=%llu runtime_max=%ux; presents are submissions, not scanout FPS",
+            seal, s.fg_frame_id, unsigned(s.async_neural), unsigned(output.generated_valid),
+            s.fg_evaluations, s.fg_generated_presents, s.fg_real_presents,
+            static_cast<unsigned long long>(s.fg_pair.dropped_generated()),
+            static_cast<unsigned long long>(s.fg_pair.late_ns()), s.fg_stage.maximum_generated_frames() + 1u);
+        mgpu::diag::info(report);
+    }
+    return true;
+}
+
+static void stream_pump_aligned_locked(stream_state &s)
+{
+    if (!mgpu::aligned::enabled() || !s.requested || !s.armed || s.finished || s.summarised ||
+        s.depth_mode == 0 || s.mvec_mode != 3) return;
+    if (s.produced >= s.max_frames)
+    {
+        s.finished = true;
+        s.mvec_live.store(false, std::memory_order_release);
+        return;
+    }
+    // A single poll can observe several tuples after the game COPY queue has
+    // caught up. Drain only the three owned neural slots here: this removes
+    // avoidable input starvation without creating an unbounded producer queue.
+    constexpr unsigned max_per_poll = 3;
+    unsigned dispatched = 0;
+    const unsigned input_budget = s.fg_ready ? mgpu::secondary_fg::source_lead_limit : stream_state::RING;
+    while (dispatched < max_per_poll && s.produced < s.consumed + input_budget)
+    {
+        mgpu::aligned::lease frame;
+        if (!mgpu::aligned::acquire(frame)) break;
+        const auto before = s.produced;
+        const auto engine_frame = frame.key.frame;
+        stream_produce_locked(s, nullptr, nullptr, nullptr,
+            reinterpret_cast<uintptr_t>(frame.planes[0].buffer),
+            reinterpret_cast<uintptr_t>(frame.planes[1].buffer),
+            reinterpret_cast<uintptr_t>(frame.planes[2].buffer), frame);
+        if (s.produced == before) break;
+        ++dispatched;
+        if (s.produced <= 6 || s.produced % 120 == 0)
+        {
+            char report[320];
+            std::snprintf(report, sizeof report,
+                "[MGPU][R330-DISPATCH] seal=%llu engine_frame=%u pending_neural=%u outstanding=%llu "
+                "worker_owned=1 max_per_poll=%u dispatched_this_poll=%u; same-frame acquire and transfer, no game-callback wait",
+                s.produced, engine_frame, unsigned(s.pipeline.pending()), s.produced - s.consumed,
+                max_per_poll, dispatched);
+            mgpu::diag::info(report);
+        }
+    }
+}
+
+static bool stream_parallel_compatible(const stream_state &s)
+{
+    return mgpu::aligned::enabled() && s.neural && s.nr_ok &&
+        !mgpu::fgmap::fg_presented_active() && !s.profile && s.passes == 1u &&
+        !s.sr_ready && s.sr_rebuild_req == 0u && s.vr_mode == 0u && !s.p2r_on &&
+        s.p1f_mode == 0u && s.p2f_mode == 0u && !s.nrs_on &&
+        s.cv_nr == 0u && s.cv_sr == 0u && s.subrect_pct == 100u && s.cc_state == 0u;
+}
+
+static void stream_prefetch_aligned_locked(stream_state &s)
+{
+    if (!s.async_neural || !stream_parallel_compatible(s) || s.finished ||
+        !s.copy_queue || !s.cq_gated || s.nfence == nullptr || s.cq == nullptr) return;
+    const auto next_seal = (std::max)(s.consumed, s.pipeline.scheduled_seal()) + 1ull;
+    if (next_seal == 0 || next_seal > s.produced || next_seal > s.max_frames) return;
+    const unsigned input_slot = s.pipeline.write_slot();
+    if (input_slot >= stream_state::PIPELINE_SLOTS || s.cq_frame[input_slot] == next_seal ||
+        !s.pipeline.reserve(input_slot, next_seal)) return;
+    const auto arrived = s.nfence->GetCompletedValue();
+    if (arrived == UINT64_MAX)
+    {
+        s.pipeline.cancel_reservation();
+        s.finished = true;
+        g_present_read_fault.store(true);
+        return;
+    }
+    if (!stream_cq_submit(s, next_seal, input_slot))
+    {
+        s.pipeline.cancel_reservation();
+        return;
+    }
+    s.cq_issued = (std::max)(s.cq_issued, next_seal);
+    ++s.cq_ahead;
+    if (next_seal > arrived) ++s.cq_spec;
+    if (s.cq_ahead <= 3ull || s.cq_ahead % 120ull == 0)
+    {
+        char report[400];
+        std::snprintf(report, sizeof report,
+            "[MGPU][R331-PREFETCH] seal=%llu input_slot=%u produced=%llu arrived=%llu "
+            "armed=%llu before_arrival=%llu pending_neural=%u; submitted payloads only, no speculative future frame",
+            next_seal, input_slot, s.produced, arrived, s.cq_ahead, s.cq_spec,
+            unsigned(s.pipeline.pending()));
+        mgpu::diag::info(report);
+    }
+}
+
+static unsigned long long stream_schedule_target(const stream_state &s, unsigned long long arrived)
+{
+    if (arrived == UINT64_MAX) return s.consumed;
+    if (s.async_neural && stream_parallel_compatible(s) && !s.finished &&
+        s.copy_queue && s.cq_gated && s.cq != nullptr && s.nfence != nullptr)
+        return (std::min)(s.produced, s.max_frames);
+    return arrived;
+}
+
+static HRESULT stream_pipeline_readbacks(stream_state &s)
+{
+    if (s.ndev_b == nullptr) return E_FAIL;
+    for (auto &entry : s.pipeline_readbacks)
+    {
+        HRESULT result = S_OK;
+        if (s.ts_ok && entry.timestamps == nullptr)
+            result = make_buf(s.ndev_b, stream_state::TS_MARKS * 8ull,
+                D3D12_HEAP_TYPE_READBACK, entry.timestamps.GetAddressOf());
+        if (SUCCEEDED(result) && s.ev_ok && entry.evaluations == nullptr)
+            result = make_buf(s.ndev_b, (stream_state::EV_MAX + 1u) * 8ull,
+                D3D12_HEAP_TYPE_READBACK, entry.evaluations.GetAddressOf());
+        if (SUCCEEDED(result) && entry.sample == nullptr)
+            result = make_buf(s.ndev_b, 1024, D3D12_HEAP_TYPE_READBACK, entry.sample.GetAddressOf());
+        if (FAILED(result)) return result;
+    }
+    return S_OK;
+}
+
+bool stream_consumer_ready()
+{
+    if (g_consumer_shutdown.load(std::memory_order_acquire) || g_present_read_fault.load()) return false;
+    auto &stream = str();
+    std::lock_guard<std::mutex> lock(stream.cs);
+    return stream.armed && (stream.fg_ready || mgpu::official_bridge::selected()) && stream.async_neural && !stream.finished &&
+        !stream.summarised && stream_parallel_compatible(stream);
+}
+
+void stream_consumer_active(bool active)
+{
+    g_consumer_active.store(active, std::memory_order_release);
+}
+
+void stream_consumer_poll()
+{
+    t_consumer_poll = true;
+    struct restore_poll_mode { ~restore_poll_mode() { t_consumer_poll = false; } } restore;
+    stream_poll();
+}
+
+void stream_consumer_wait(void *stop, void *timer)
+{
+    if (WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) return;
+    LARGE_INTEGER due{};
+    due.QuadPart = stream_consumer_ready() ? -10000ll : -40000ll;
+    if (!SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE))
+    {
+        WaitForSingleObject(stop, 4);
+        return;
+    }
+    const HANDLE events[]{stop, timer};
+    WaitForMultipleObjects(2, events, FALSE, 20);
+}
+
 void stream_poll()
 {
+    if (t_consumer_poll && g_consumer_shutdown.load(std::memory_order_acquire)) return;
+    mgpu::measurement::poll();
+    if (g_present_read_fault.load(std::memory_order_relaxed)) return;
     stream_state &s = str();
+    bool read_failed = false;
+    if (!s.async_neural && !wait_present_reads(4, read_failed))
+    {
+        if (read_failed)
+        {
+            std::lock_guard<std::mutex> lock(s.cs);
+            s.finished = true;
+            s.mvec_live.store(false, std::memory_order_release);
+            if (!g_present_read_fault.exchange(true))
+                mgpu::diag::error("[MGPU][R321-READ] presentation fence failed or device removed; stopping writes without raw-frame fallback.");
+        }
+        return;
+    }
     // DEFECT E, found on the rig 2026-09-05 by running Passes=2 and watching the
     // GAME slow down from ~60 to ~49.8 fps.
     //
@@ -23336,6 +23910,193 @@ void stream_poll()
     // question: is the bridge holding s.cs long enough to stall the GAME.
     sfdiag::hold_timer r168_poll(sfdiag::SITE_POLL);
     if (!s.armed || s.summarised) return;
+    if (t_consumer_poll && (!s.async_neural || (!s.fg_ready && !mgpu::official_bridge::selected()) || s.finished ||
+        !stream_parallel_compatible(s))) return;
+    mgpu::aligned::set_ready_dispatch(mgpu::aligned::enabled());
+
+    // A low-rate scheduler snapshot makes the five-frame offline view
+    // distinguish a full queue from a CPU/present stall without adding any
+    // queue operation or fence wait to the hot path.
+    const auto measurement_session = mgpu::measurement::session();
+    const double scheduler_ms = mgpu::timing::cpu_ms(mgpu::timing::cpu_ticks());
+    if (measurement_session != 0 &&
+        (s.measurement_last_scheduler_ms < 0 ||
+         scheduler_ms - s.measurement_last_scheduler_ms >= 100.0))
+    {
+        s.measurement_last_scheduler_ms = scheduler_ms;
+        const auto neural_completed = s.nf != nullptr ? s.nf->GetCompletedValue() : 0ull;
+        const auto copy_completed = s.cqf != nullptr ? s.cqf->GetCompletedValue() : 0ull;
+        char report[1000];
+        std::snprintf(report, sizeof report,
+            "[MGPU][M336] kind=scheduler session=%llu qpc_ms=%.6f produced=%llu consumed=%llu "
+            "scheduled=%llu inflight=%u write_slot=%u display_seal=%llu neural_completed=%llu "
+            "copy_issued=%llu copy_completed=%llu async=%u compatible=%u copy_queue=%u "
+            "cq_gated=%u finished=%u",
+            static_cast<unsigned long long>(measurement_session), scheduler_ms, s.produced,
+            s.consumed, s.pipeline.scheduled_seal(), s.pipeline.inflight(),
+            s.pipeline.write_slot(), s.pipeline.display_seal(),
+            static_cast<unsigned long long>(neural_completed), s.cq_issued,
+            static_cast<unsigned long long>(copy_completed), s.async_neural ? 1u : 0u,
+            stream_parallel_compatible(s) ? 1u : 0u, s.copy_queue ? 1u : 0u,
+            s.cq_gated ? 1u : 0u, s.finished ? 1u : 0u);
+        mgpu::measurement::emit(report);
+    }
+
+    stream_pump_aligned_locked(s);
+
+    while (s.pipeline.pending())
+    {
+        const auto completed_fence = s.nf != nullptr ? s.nf->GetCompletedValue() : 0ull;
+        const auto status = s.pipeline.check(completed_fence);
+        const auto pending = s.pipeline.current();
+        if (status == mgpu::neural_pipeline::completion::waiting)
+        {
+            if (GetTickCount64() - pending.submitted_ms > 5000ull)
+            {
+                s.finished = true;
+                s.aligned_history_valid = false;
+                if (!g_present_read_fault.exchange(true))
+                    mgpu::diag::error("[MGPU][R330-PIPE] oldest neural job timed out; retaining in-flight resources");
+                return;
+            }
+            // Leave retirement, not the poll: another owned slot can accept work.
+            break;
+        }
+        if (status != mgpu::neural_pipeline::completion::ready)
+        {
+            s.finished = true;
+            s.aligned_history_valid = false;
+            if (!g_present_read_fault.exchange(true))
+                mgpu::diag::error("[MGPU][R330-PIPE] neural fence failed; retaining in-flight resources");
+            return;
+        }
+        if (s.fg_ready && !stream_secondary_fg_complete(s, pending.seal)) return;
+        s.aligned_history_valid = true;
+        s.aligned_history_frame = pending.engine_frame;
+        s.nr_last_eval_fi = pending.engine_frame;
+        s.neural_settings_history.complete(pending.settings);
+        if (pending.settings_change != 0u || (s.async_finished + 1ull) % 120ull == 0ull)
+        {
+            char report[780];
+            std::snprintf(report, sizeof report,
+                "[MGPU][R327-HISTORY] seal=%llu engine_frame=%u revision=%llu settings_change=0x%x "
+                "passes=%u requested_intensity=(%.4f,%.4f) bound_intensity=(%.4f,%.4f) bound_mask=0x%x "
+                "reset_pass_mask=0x%x tuning=%u tone=%.4f structure=%.4f skin=%.4f style=%.4f auto_mask=%u "
+                "motion_scale=(%.6f,%.6f) motion_subrect=%ux%u motion_binding_valid=%u; "
+                "settings bits initial=1 passes=2 intensity=4 tuning=8; GPU-completed job values",
+                pending.seal, pending.engine_frame, s.neural_settings_history.revision(), pending.settings_change,
+                pending.settings.active_passes, pending.settings.strengths[0], pending.settings.strengths[1],
+                pending.bound_strengths[0], pending.bound_strengths[1], pending.bound_strength_mask,
+                pending.reset_pass_mask, unsigned(pending.settings.tuning_enabled),
+                pending.settings.tone, pending.settings.structure, pending.settings.skin,
+                pending.settings.style, unsigned(pending.settings.auto_mask),
+                pending.bound_motion_scale[0], pending.bound_motion_scale[1],
+                pending.motion_width, pending.motion_height, unsigned(pending.motion_binding_valid));
+            mgpu::diag::info(report);
+        }
+        seal_consume(s, pending.seal, pending.ring_slot, true, pending.copy_queue, pending.input_index);
+        s.consumed = pending.seal;
+        const bool retired = (s.fg_ready || mgpu::official_bridge::selected())
+            ? s.pipeline.retire(completed_fence) : s.pipeline.publish(completed_fence);
+        if (!retired) break;
+        if (s.fg_ready)
+        {
+            g_fg_source_gate.complete(pending.engine_frame);
+            if (!s.finished) g_fg_source_gate.enable();
+        }
+        std::array<mgpu::neural_pipeline::difference_audit::difference, 3> differences{};
+        if (s.pipeline_readbacks[pending.snapshot].difference.collect(differences))
+        {
+            char report[480];
+            std::snprintf(report, sizeof report,
+                "[MGPU][R326-DIFF] seal=%llu engine_frame=%u same_frame_rgb_mae_255=(%.4f,%.4f,%.4f) "
+                "changed_percent=(%.2f,%.2f,%.2f); upper/center/lower center patches; alpha excluded; not a quality score",
+                pending.seal, pending.engine_frame,
+                differences[0].mean * 255.0, differences[1].mean * 255.0, differences[2].mean * 255.0,
+                differences[0].changed_fraction * 100.0, differences[1].changed_fraction * 100.0,
+                differences[2].changed_fraction * 100.0);
+            mgpu::diag::info(report);
+        }
+        s.async_wall_sum += double(GetTickCount64() - pending.submitted_ms);
+        ++s.async_finished;
+        if (mgpu::t119::perf_active())
+        {
+            mgpu::perf::job_done();
+            mgpu::perf::job_end(s.produced);
+            mgpu::perf::periodic(s.consumed);
+        }
+        if (s.async_finished % 120ull == 0)
+        {
+            const auto present_us = g_present_wait_us.load();
+            const auto present_count = g_present_wait_count.load();
+            const auto present_samples = present_count - s.async_present_count;
+            char report[700];
+            std::snprintf(report, sizeof report,
+                "[MGPU][R330-PIPE] seal=%llu engine_frame=%u snapshots=%u ordered=1 inflight=%u "
+                "gpu_ms=(seal=%.3f unpack=%.3f neural=%.3f output=%.3f) "
+                "completion_wall_ms=%.3f present_cpu_ms=%.3f gap_resets=%llu engine_resets=%llu "
+                "pending_input=%llu; GPU timestamps exclude producer wait; completion wall includes polling",
+                pending.seal, pending.engine_frame, stream_state::PIPELINE_SLOTS, s.pipeline.inflight(),
+                (s.ts_sum[0] - s.async_gpu_previous[0]) / 120.0,
+                (s.ts_sum[1] - s.async_gpu_previous[1]) / 120.0,
+                (s.ts_sum[2] - s.async_gpu_previous[2]) / 120.0,
+                (s.ts_sum[3] - s.async_gpu_previous[3]) / 120.0,
+                s.async_wall_sum / 120.0,
+                present_samples != 0 ? double(present_us - s.async_present_us) / double(present_samples) / 1000.0 : 0.0,
+                s.async_gap_resets, s.async_engine_resets, s.produced - s.consumed);
+            mgpu::diag::info(report);
+            for (unsigned index = 0; index != 4; ++index) s.async_gpu_previous[index] = s.ts_sum[index];
+            s.async_wall_sum = 0;
+            s.async_present_us = present_us;
+            s.async_present_count = present_count;
+        }
+    }
+
+    if (!stream_secondary_fg_publish(s)) return;
+    if (s.async_neural && !stream_parallel_compatible(s))
+    {
+        g_fg_source_gate.disable();
+        if (s.pipeline.pending() || s.pipeline.ready() || s.fg_pair.pending() || !s.snapshots.reads_complete()) return;
+        if (s.cqf != nullptr)
+        {
+            const auto copied = s.cqf->GetCompletedValue();
+            if (copied == UINT64_MAX)
+            {
+                s.finished = true;
+                g_present_read_fault.store(true);
+                return;
+            }
+            for (const auto pending_copy : s.cqa_value)
+                if (copied < pending_copy) return;
+        }
+        bool failed = false;
+        if (!wait_present_reads(0, failed)) return;
+        s.async_neural = false;
+        s.pipeline = {};
+        s.na = s.primary_na;
+        s.nl = s.primary_nl;
+        s.tex_out = s.tex_out_ring[0];
+        s.tex_pong = s.tex_pong_ring[0];
+        mgpu::diag::info("[MGPU][PIPE3] mode changed; drained parallel work before serial processing");
+    }
+
+    if (s.fg_requested)
+    {
+        if (s.fg_queue_fault) return;
+        if (!s.async_neural && s.fg_pair.pending()) return;
+        if (!s.async_neural && s.fg_present_fence != nullptr && s.nq != nullptr)
+        {
+            if (FAILED(s.nq->Wait(s.fg_present_fence, s.fg_present_value)))
+            {
+                s.fg_queue_fault = true;
+                s.finished = true;
+                s.mvec_live.store(false, std::memory_order_release);
+                return;
+            }
+            s.fg_present_fence->Release();
+            s.fg_present_fence = nullptr;
+        }
+    }
 
     if (mgpu::t119::producer_active() && s.gfence != nullptr)
     {   // R300g1/R300g4/R300h (ProducerDiag / Gpu0Timers only): non-blocking. GetCompletedValue() never waits.
@@ -23542,6 +24303,9 @@ void stream_poll()
         s.faults_muted = 0;
     }
 
+    stream_prefetch_aligned_locked(s);
+    if (g_present_read_fault.load()) return;
+
     const unsigned long long completed =
         (s.nfence != nullptr) ? (unsigned long long)s.nfence->GetCompletedValue() : 0;
 
@@ -23576,7 +24340,6 @@ void stream_poll()
             ndev = st().device;
         }
         s.nr_ok = (ndev != nullptr) && stream_nr_create(s, ndev);
-        if (mgpu::strace::on()) mgpu::strace::ev(mgpu::strace::R_BT, "stream-nr-create", s.nr_ok ? "ok" : "FAILED");   // R313
 
         // V31. No retry, no stale-session special case. If CreateFeature
         // fails it fails the way it always has, and if it kills the process
@@ -23665,6 +24428,22 @@ void stream_poll()
             (void)present_resize(s.width, s.height, s.window_mode, nr_linear_format(s.format));
     }
 
+    if (s.fg_requested && s.nr_ok && !s.fg_attempted && s.consumed < completed && !s.pipeline.pending())
+    {
+        const unsigned latest = static_cast<unsigned>((completed - 1ull) % stream_state::RING);
+        if (s.fg_camera_seal[latest] == completed && !mgpu::fgmap::fg_presented_active())
+        {
+            ID3D12Device *device = nullptr;
+            { std::lock_guard<std::mutex> guard(st().cs); device = st().device; }
+            s.na = s.primary_na;
+            s.nl = s.primary_nl;
+            (void)stream_secondary_fg_create(s, device);
+            if (s.fg_queue_fault) return;
+        }
+        else if (++s.fg_rejected <= 3ull)
+            mgpu::diag::warn("[MGPU][M344-FG] waiting for an exact-frame camera/color/depth/MV tuple; NR continues unchanged.");
+    }
+
     // ---- RING WINDOW: hold no more depth than this run has earned ----
     //
     // Runs AHEAD of the overrun walk below, so the walk only ever sees what
@@ -23677,7 +24456,11 @@ void stream_poll()
     // T1.12 (PerfPrefetch=1 with Perf11=1 only): the frame the loop below works up to - the frame the copy
     // queue already armed instead of the newest. Key absent: sched_to == completed, the live loop exactly.
     // Overrun detection keeps `completed`.
-    const unsigned long long sched_to = mgpu::t119::prefetch_active()
+    const unsigned long long sched_to = s.async_neural
+        ? stream_schedule_target(s, completed)
+        : mgpu::aligned::enabled()
+        ? (std::min)(completed, s.consumed + 1ull)
+        : mgpu::t119::prefetch_active()
         ? mgpu::perf::sched_target(completed, s.consumed, s.cq_issued,
                                    s.copy_queue && s.cq_gated && s.cq != nullptr, s.finished)
         : completed;
@@ -23686,7 +24469,7 @@ void stream_poll()
         s.rw_at = s.consumed;
         s.rw_over_at = s.overrun;
     }
-    if (s.rw_on != 0u && sched_to > s.consumed + (unsigned long long)s.rw)
+    if (!s.async_neural && !s.pipeline.pending() && s.rw_on != 0u && sched_to > s.consumed + (unsigned long long)s.rw)
     {
         const unsigned long long target = sched_to - (unsigned long long)s.rw;
         s.rw_skipped += target - s.consumed;
@@ -23731,7 +24514,7 @@ void stream_poll()
     // its own overrun branch as unreachable defence rather than deleting it:
     // if this walk is ever wrong, the old path still names the condition
     // instead of silently reading a rewritten slot.
-    while (s.consumed < completed && completed >= s.consumed + 1 + stream_state::RING)
+    while (!s.pipeline.pending() && s.consumed < completed && completed >= s.consumed + 1 + stream_state::RING)
     {
         const unsigned long long of = s.consumed + 1;
         ++s.overrun;
@@ -23767,7 +24550,7 @@ void stream_poll()
     //
     // WHAT THIS DOES NOT CHANGE: which frame is evaluated, and which frame
     // reaches the screen. Both were already the newest and both still are.
-    if (s.consumed + 1 < sched_to)
+    if (!s.async_neural && s.consumed + 1 < sched_to)
     {
         const unsigned long long bulk_last = sched_to - 1;
         unsigned long long bfi[stream_state::RING] = {};
@@ -23809,24 +24592,7 @@ void stream_poll()
                 lk.unlock();
                 const DWORD bwr = WaitForSingleObject(s.nev, 5000);
                 lk.lock();
-                if (bwr != WAIT_OBJECT_0)
-                {
-                    bh = E_FAIL;
-                    // R311b: this wait was silent on timeout (frames marked consumed, no line). F0 2026-10-15: a 15275 ms
-                    // poll scope = 3 x 5000 + 275 fits three of these in a row; whether it was that cannot be read from
-                    // the log because nothing said so. Now it does. Said at most once per 10 s.
-                    const unsigned long long r311b_now = GetTickCount64();
-                    if (r311b_now - s.r311b_last_ms >= 10000ull)
-                    {
-                        s.r311b_last_ms = r311b_now;
-                        char tl[300];
-                        snprintf(tl, sizeof tl, "[MGPU][R311b] GPU 1 FENCE TIMEOUT (copy-queue batch): waited 5000 ms for fence %llu, completed %llu, "
-                                                "f=%llu - the batch is counted consumed and the poll goes on. If this repeats, GPU 1 (or the copy "
-                                                "queue's wait on the game's fence) is not finishing work; the bridge picture freezes meanwhile.",
-                                 (unsigned long long)s.nf_value, (unsigned long long)s.nf->GetCompletedValue(), (unsigned long long)s.consumed);
-                        mgpu::diag::warn(tl);
-                    }
-                }
+                if (bwr != WAIT_OBJECT_0) bh = E_FAIL;
             }
         }
         if (SUCCEEDED(bh))
@@ -23849,9 +24615,17 @@ void stream_poll()
         }
     }
 
-    while (s.consumed < sched_to)
+    while (s.consumed < sched_to || s.pipeline.scheduled_seal() < sched_to)
     {
-        const unsigned long long f = s.consumed + 1;
+        if (s.probe_read_fence != 0)
+        {
+            const UINT64 probe_done = s.nf->GetCompletedValue();
+            if (probe_done == UINT64_MAX) return;
+            if (probe_done < s.probe_read_fence) break;
+            s.probe_read_fence = 0;
+        }
+        const unsigned long long f = (std::max)(s.consumed, s.pipeline.scheduled_seal()) + 1ull;
+        if (f > sched_to) break;
 
         // The slot for frame f has been recycled if the producer is more than
         // RING frames ahead. That is a real, nameable condition - THE CONSUMER
@@ -23859,6 +24633,7 @@ void stream_poll()
         // the two would report our own slowness as the game's fault.
         if (completed >= f + stream_state::RING)
         {
+            if (s.pipeline.pending()) return;
             ++s.overrun;
             s.consumed = f;
             if (!s.said_overrun)
@@ -23911,69 +24686,83 @@ void stream_poll()
         const bool newest = (f >= sched_to);   // T1.12: == completed unless PerfPrefetch=1
         // ---- D2.0 NR2 / NR3: is this seal a generated frame? ----
         //
-        // The N1 map (2026-10-05): frame generation reads the same vector
-        // resource as the scene feature, a generated frame cannot be told by
-        // resource identity, and the one per-seal fact that tells it apart is
-        // that no fresh vector copy arrived for it. So: frame generation
-        // active (fg_map: an fg evaluate within the last two rendered frames
-        // of presents) and no fresh vector in this slot = a generated frame.
-        // Off fg, or with the mode off, every line below is the old path.
+        // R313: API-call activity and missing vectors do not identify a
+        // generated capture. Use evidence stored for this exact seal.
         const bool mvec_fresh =
             (s.mvec_mode == 3 && s.mvec_bytes2 != 0 &&
-             s.mvec_slot_valid[slot].load(std::memory_order_acquire) != 0u);
-        const bool fg_act  = mgpu::fgmap::act() && mgpu::fgmap::fg_active();
-        // NR3b: the generated frame is the FIRST seal after an fg evaluate
-        // (fg_map records it per slot at seal time), not the seal without a
-        // fresh vector - that one was title-dependent. mvec_fresh still
-        // decides fresh-vs-kept below; the data is the same either way.
-        const bool fg_gen  = fg_act && mgpu::fgmap::seal_generated(slot, f);
-        const float fg_frac = fg_act ? mgpu::fgmap::step_fraction() : 1.0f;
+             s.mvec_packets.valid(slot, f));
+        const auto fg_policy = mgpu::fgmap::policy_for_seal(slot, f);
+        const bool fg_act = fg_policy.verified;
+        const bool fg_gen = fg_policy.generated;
+        const float fg_frac = fg_policy.motion_fraction;
         // NR3: evaluate only 1 generated frame in N; the rest keep the last
         // output on screen (the same path as a superseded frame below).
         const bool fg_thin = fg_gen && mgpu::fgmap::thin_this();
-        const bool run_nr = s.nr_ok && newest && s.neural && !fg_thin;
-        if (!newest) ++s.nr_skipped;
+        const bool run_nr = s.nr_ok && s.neural && (s.async_neural || newest) && !fg_thin;
+        if (f > completed && !run_nr) break;
+        bool aligned_evaluation_recorded = false;
+        mgpu::neural_history::configuration neural_settings;
+        unsigned neural_settings_change = 0, neural_reset_pass_mask = 0, neural_bound_strength_mask = 0;
+        std::array<float, mgpu::neural_history::max_passes> neural_bound_strengths{};
+        std::array<float, 2> neural_bound_motion_scale{};
+        unsigned neural_motion_width = 0, neural_motion_height = 0;
+        bool neural_motion_binding_valid = false;
+        if (!run_nr && !newest) ++s.nr_skipped;
         if (mgpu::t119::perf_active())
             mgpu::perf::job_begin(f, slot, completed, run_nr, newest, s.game_frames, s.slot_game_frame[slot]);   // R300e1
         if (run_nr && mgpu::t119::producer_active()) mgpu::pdiag::note_evaluated(f);   // R300g3
 
-        // ---- R26: the unpack goes to the COPY queue, one frame ahead when
-        // there is a frame to go ahead to ----
-        //
-        // WHAT THE PREFETCH CAN AND CANNOT BUY. READ THIS BEFORE READING A
-        // FLAT RESULT AS A FAILURE.
-        //
-        // This loop blocks on the direct fence for frame f before it records
-        // frame f+1. A copy submitted inside frame f's own iteration therefore
-        // runs strictly BEFORE that frame's evaluate and overlaps nothing: the
-        // queue split alone moves the copy to another engine and changes no
-        // wall-clock total. The only overlap available here is a frame that
-        // HAS ALREADY ARRIVED while we are still working on its predecessor -
-        // its copy is submitted first and runs on the DMA engine while the 3D
-        // engine is inside EvaluateFeature.
-        //
-        // In a perfectly paced run - completed == consumed+1 at every poll,
-        // which is what the 1.06x control run was - that condition never holds
-        // and the overlap is ZERO BY CONSTRUCTION, not by fault. Getting it in
-        // the steady state means deferring the per-frame CPU wait, which means
-        // double-buffering the model's OUTPUT as well, which changes which
-        // frame is on screen. That is a different decision on a different
-        // property and it is deliberately not taken here.
-        //
-        // cq_ahead counts the frames that actually got the overlap, so the run
-        // states which case it was instead of leaving it to be assumed.
-        //
-        // ONE FRAME OF PREFETCH, NEVER TWO: tex_in has two halves, so frame
-        // f+2 would land in the one frame f is reading. The bound and the pair
-        // are the same fact.
+        // Async tuples own three input/output slots; only the legacy path uses parity.
+        // cq_ahead measures submission, while R334-TIMELINE measures GPU overlap.
         unsigned ii = 0;
         bool use_cq = false;
+        if (run_nr && !s.async_neural && stream_parallel_compatible(s))
+        {
+            HRESULT snapshot_result = s.snapshots.initialize(s.tex_out);
+            if (SUCCEEDED(snapshot_result)) snapshot_result = stream_pipeline_readbacks(s);
+            if (FAILED(snapshot_result))
+            {
+                s.finished = true;
+                g_present_read_fault.store(true);
+                mgpu::diag::error("[MGPU][PIPE3] snapshot/readback allocation failed; parallel path not started");
+                return;
+            }
+            s.async_neural = true;
+            s.async_present_us = g_present_wait_us.load();
+            s.async_present_count = g_present_wait_count.load();
+            mgpu::diag::info("[MGPU][PIPE3] three owned slots enabled; fill_while_pending=1; ordered NR queue, overlapped copy/compute/presentation; unchanged quality");
+        }
+        const bool submit_async = s.async_neural && run_nr;
+        if (s.fg_ready && (s.fg_pending || s.pipeline.pending())) break;
+        const unsigned pipeline_slot = submit_async ? s.pipeline.write_slot() : 0u;
+        if (submit_async && (pipeline_slot >= stream_state::PIPELINE_SLOTS ||
+                             !s.pipeline.has_capacity())) break;
+        if (!submit_async && s.pipeline.pending()) break;
+        ii = submit_async ? pipeline_slot : (s.copy_queue ? (unsigned)(f & 1ull) : 0u);
+        auto *job_readback = submit_async ? &s.pipeline_readbacks[pipeline_slot] : nullptr;
+        bool probe_recorded = false;
+        if (submit_async)
+        {
+            const UINT64 done = s.nf != nullptr ? s.nf->GetCompletedValue() : 0ull;
+            if (done == UINT64_MAX) return;
+            if (done < s.async_na_value[pipeline_slot]) break;
+            s.na = s.async_na[pipeline_slot];
+            s.nl = s.async_nl[pipeline_slot];
+            s.tex_out = s.tex_out_ring[pipeline_slot];
+            s.tex_pong = s.tex_pong_ring[pipeline_slot];
+        }
+        else
+        {
+            s.na = s.primary_na;
+            s.nl = s.primary_nl;
+            s.tex_out = s.tex_out_ring[0];
+            s.tex_pong = s.tex_pong_ring[0];
+        }
         if (s.copy_queue && run_nr && s.cq != nullptr)
         {
-            ii = (unsigned)(f & 1ull);
             // Never re-issue for a frame the overrun check already walked past.
             if (mgpu::t119::perf_active()) mgpu::perf::note_cq_state(s.cq_issued >= f);   // R300e1/R300e5
-            if (s.cq_issued + 1 < f) s.cq_issued = f - 1;
+            if (s.cq_frame[ii] != f || s.cq_issued + 1 < f) s.cq_issued = f - 1;
             // MODE 1: only ever arm a frame the CPU already knows has landed,
             // so the overlap needs a backlog and a paced run gets none.
             // MODE 2: arm f+1 WHETHER OR NOT IT HAS ARRIVED. The queue wait in
@@ -23985,10 +24774,10 @@ void stream_poll()
             // STILL EXACTLY ONE AHEAD IN BOTH MODES. tex_in has two halves;
             // f+2 would land in the one frame f is reading. The bound and the
             // pair are the same fact and neither mode may exceed it.
-            unsigned long long want = (s.cq_gated || completed > f) ? (f + 1) : f;
+            unsigned long long want = submit_async ? f : (s.cq_gated || completed > f) ? (f + 1) : f;
             // T1.12 (PerfPrefetch=1 only): arm the first frame that will ARRIVE after now, on the parity the
             // running evaluate is not reading, and spend no DMA on frames in between that will not be evaluated.
-            const bool pf_on = mgpu::t119::prefetch_active();
+            const bool pf_on = !submit_async && mgpu::t119::prefetch_active();
             const unsigned long long arm_n = pf_on ? mgpu::perf::arm_target(completed, f) : 0ull;
             if (pf_on && arm_n > want) want = arm_n;
             bool ok = true;
@@ -23996,7 +24785,8 @@ void stream_poll()
             {
                 unsigned long long n = s.cq_issued + 1;
                 if (pf_on && n > f && n < arm_n) n = arm_n;   // T1.12: jump over frames that will not be evaluated
-                ok = stream_cq_submit(s, n);
+                const unsigned copy_index = submit_async ? pipeline_slot : (unsigned)(n & 1ull);
+                ok = stream_cq_submit(s, n, copy_index);
                 if (ok)
                 {
                     s.cq_issued = n;
@@ -24005,10 +24795,25 @@ void stream_poll()
                     if (n > completed) ++s.cq_spec;   // armed before arrival - mode 2 only
                 }
             }
-            use_cq = (s.cq_issued >= f);
+            if (g_present_read_fault.load()) return;
+            use_cq = (s.cq_frame[ii] == f);
             if (!use_cq) ++s.cq_fails;
+            if (submit_async && !use_cq) break;
         }
+        if (f > completed && (!use_cq || !s.cq_gated || s.nfence == nullptr)) break;
+        if (run_nr && mgpu::official_bridge::backpressured()) break;
 
+        bool fg_recorded = false;
+        bool fg_submitted = false;
+        bool official_recorded = false;
+        bool official_submitted = false;
+        if (s.fg_requested && run_nr)
+        {
+            s.fg_decision = {};
+            s.fg_eval_ok = false;
+            s.fg_frame_id = 0;
+            s.fg_seal_frame = f;
+        }
         HRESULT h = s.na->Reset();
         if (SUCCEEDED(h)) h = s.nl->Reset(s.na, nullptr);
         if (SUCCEEDED(h))
@@ -24028,6 +24833,39 @@ void stream_poll()
             // stage attached is directly comparable to its pace without it.
             if (run_nr)
             {
+                const auto tagged_switch = s.mvec_tag_switch_frame.load(std::memory_order_acquire);
+                if (tagged_switch != 0 && f >= tagged_switch && s.nr_tag_reset_frame != tagged_switch)
+                {
+                    s.nr_first = true;
+                    s.nr_tag_reset_frame = tagged_switch;
+                }
+                if ((s.nr_control_tick++ % 60u) == 0u)
+                {
+                    if (mgpu::official_bridge::selected())
+                    {
+                        s.fg_multiplier = static_cast<unsigned>(ini_read_sr_int("FGMultiplier", s.fg_multiplier, 2, 6));
+                        mgpu::official_bridge::request(true, s.fg_multiplier);
+                    }
+                    const float requested_mask = ini_read_float("NRGuideMask", (float)s.nr_guide_mask);
+                    const float requested_reset = ini_read_float("NRResetEachFrame", s.nr_reset_each_frame ? 1.0f : 0.0f);
+                    const unsigned mask = (requested_mask == 0.0f || requested_mask == 1.0f ||
+                                           requested_mask == 2.0f || requested_mask == 3.0f)
+                        ? (unsigned)requested_mask : s.nr_guide_mask;
+                    const bool reset_each = requested_reset == 0.0f ? false :
+                                            requested_reset == 1.0f ? true : s.nr_reset_each_frame;
+                    if (mask != s.nr_guide_mask || reset_each != s.nr_reset_each_frame || s.nr_control_tick == 1u)
+                    {
+                        s.nr_guide_mask = mask;
+                        s.nr_reset_each_frame = reset_each;
+                        s.nr_first = true;
+                        char guide_line[320];
+                        snprintf(guide_line, sizeof guide_line,
+                                 "[MGPU][R315] seal=%llu NRGuideMask=%u motion=%u depth=%u reset_each=%u; "
+                                 "history reset on transition, neural processing stays ON, no raw fallback; transport unchanged",
+                                 f, mask, mask & 1u, (mask >> 1u) & 1u, reset_each ? 1u : 0u);
+                        mgpu::diag::info(guide_line);
+                    }
+                }
                 // R26: on the copy-queue path this copy has already been
                 // submitted on the DMA engine and the direct queue only Waits
                 // for it (below, before ExecuteCommandLists). The inline copy
@@ -24104,24 +24942,25 @@ void stream_poll()
                         if (cmp[0] == 'D') mgpu::diag::warn(dl); else mgpu::diag::info(dl);
                     }
                 }
-                // R258: the calibration. Stage machine over three consecutive
-                // frames: record colour (f), record colour + vectors (f+1),
-                // read all three (f+2). Up to 12 probes, every 150 frames.
-                // R311c (ProbeOffLock=2): a probe whose loops ran on the probe thread comes back here on a later
-                // poll (replay) - same block, same decision code, the arithmetic taken from the job instead of computed.
-                const bool r311c_replay = s.r311c_thread && r309::r311c::done();
-                const unsigned long long f_seal = f;
-                if ((s.cp_stage == 2u && s.cp_rb[0] && s.cp_rb[1] && s.vp_rb && !s.vp_pending) || r311c_replay)
+                const bool authoritative_guides = mgpu::calibration::authoritative_guides_available(
+                    mgpu::aligned::enabled(), depth_here && mvec_fresh,
+                    s.mvec_packets.at(slot, f), f, s.slot_game_frame[slot], s.aligned_constants[slot]);
+                if (authoritative_guides)
                 {
-                    const unsigned long long f = r311c_replay ? r309::r311c::g_job.f : f_seal;   // R311c: the probe's own seal for its lines and the judge
-                    if (!r311c_replay) { s.cp_stage = 0; ++s.cp_n; ++s.cp_win_n; }   // R278f: per-candidate window (counted at launch, not at replay)
-                    const LONGLONG r309_q0 = s.r310_cost ? sfdiag::qpc() : 0;   // R310 (ProbeCost=1): this probe's bridge time
-                    unsigned votes_x = 0u; bool win_end = false;   // R311c: assigned below (no initialised declaration may sit between the launch goto and its label)
-                    bool r309_own;
-                    if (r311c_replay) r309_own = r309::r311c::g_job.own;
-                    else { r309_own = s.r309_probe_own; s.r309_probe_own = false; }
-                    ID3D12Resource *r310_ref[3] = { nullptr, nullptr, nullptr };   // R310 (ProbeOffLock=1): held across the unlock
-                    unsigned long long r310_off = 0;                               // R310: microseconds with s.cs released
+                    s.cp_stage = 0u;
+                    if (!s.cp_authoritative_seen)
+                    {
+                        s.cp_authoritative_seen = true;
+                        char report[320];
+                        std::snprintf(report, sizeof report,
+                            "[MGPU][M357-CAL] authoritative aligned guides: seal=%llu source=%llu viewport=%u; legacy R258 readback/matching bypassed; guide bindings and fences retained.",
+                            f, s.slot_game_frame[slot], s.aligned_constants[slot].key.viewport);
+                        mgpu::diag::info(report);
+                    }
+                }
+                if (!authoritative_guides && s.cp_stage == 2u && s.cp_rb[0] && s.cp_rb[1] && s.vp_rb && !s.vp_pending)
+                {
+                    s.cp_stage = 0; ++s.cp_n; ++s.cp_win_n;
                     // R280o (Fable's ladder; SF-R1 vs SF-R2): the first-launch learning is the
                     // LAST rung. Once the evaluate route has delivered - the calibrator copying the
                     // vectors the game hands DLSS, at the DLSS pass (R118) - a lower rung carries
@@ -24147,158 +24986,115 @@ void stream_poll()
                     }
                     unsigned char *c0 = nullptr, *c1 = nullptr, *mv = nullptr;
                     D3D12_RANGE rc{ 0, (SIZE_T)s.payload_bytes }, rm{ 0, (SIZE_T)s.mvec_bytes2 }, none{ 0, 0 };
-                    bool ok0, ok1, okm;
-                    if (r311c_replay)   // R311c: the job holds the maps
+                    const bool ok0 = SUCCEEDED(s.cp_rb[0]->Map(0, &rc, (void **)&c0)) && c0;
+                    const bool ok1 = SUCCEEDED(s.cp_rb[1]->Map(0, &rc, (void **)&c1)) && c1;
+                    const bool okm = SUCCEEDED(s.vp_rb->Map(0, &rm, (void **)&mv)) && mv;
+                    if (ok0 && ok1 && okm)
                     {
-                        c0 = (unsigned char *)r309::r311c::g_job.i.c0; c1 = (unsigned char *)r309::r311c::g_job.i.c1; mv = (unsigned char *)r309::r311c::g_job.i.mv;
-                        ok0 = r309::r311c::g_job.ok0; ok1 = r309::r311c::g_job.ok1; okm = r309::r311c::g_job.okm;
-                    }
-                    else
-                    {
-                        ok0 = SUCCEEDED(s.cp_rb[0]->Map(0, &rc, (void **)&c0)) && c0;
-                        ok1 = SUCCEEDED(s.cp_rb[1]->Map(0, &rc, (void **)&c1)) && c1;
-                        okm = SUCCEEDED(s.vp_rb->Map(0, &rm, (void **)&mv)) && mv;
-                    }
-                    if (ok0 && ok1 && okm && r309_own)
-                    {
-                        // R309: a probe R309 started on its own - the bound reading and no motion only,
-                        // the same sampling as R258's warp test. No votes, no R280 judge, no R278, no line
-                        // per probe: nothing R258 decides moves because of R309's probes.
-                        // R311c: at replay the geometry is the job's (a re-arm between launch and replay must not re-read s.fp)
-                        const r309::r311c::in &rj = r309::r311c::g_job.i;
-                        const unsigned W = r311c_replay ? rj.W : s.fp.Footprint.Width, H = r311c_replay ? rj.H : s.fp.Footprint.Height, P = r311c_replay ? rj.P : s.fp.Footprint.RowPitch;
-                        const unsigned fmt = r311c_replay ? rj.fmt : (unsigned)s.fp.Footprint.Format, bpp = bpp_of(fmt);
-                        const unsigned MP = r311c_replay ? rj.MP : s.mvec_fp2.Footprint.RowPitch, mfmt = r311c_replay ? rj.mfmt : s.mvec_format;
-                        const unsigned mv_tb = mv_texel_bytes(mfmt);
-                        const size_t mv_bpp = mv_tb ? mv_tb : 8u;
-                        const double sxm = (double)W / (double)s.mvec_w, sym = (double)H / (double)s.mvec_h;
-                        const double bsx = (double)s.mvec_scale_x * (double)W / (double)s.width, bsy = (double)s.mvec_scale_y * (double)H / (double)s.height;
-                        (void)bsx; (void)bsy; (void)sxm; (void)sym; (void)mv_tb;
-                        double e0s = 0.0, ebs = 0.0; unsigned long long n0 = 0, nb = 0;
-                        // R311c: the loop is r311c::compute_own (moved verbatim). Thread: launch now, decide at replay.
-                        r309::r311c::in pin{ c0, c1, mv, W, H, P, fmt, bpp, MP, mfmt, mv_tb, mv_bpp, s.mvec_w, s.mvec_h, s.width, s.height,
-                                             s.mvec_scale_x, s.mvec_scale_y, true, false };   // launch / inline only; at replay the job's values are used above
-                        if (r311c_replay)
-                        {
-                            e0s = r309::r311c::g_job.o.e0s; ebs = r309::r311c::g_job.o.ebs; n0 = r309::r311c::g_job.o.n0; nb = r309::r311c::g_job.o.nb;
-                            r310_off = r309::r311c::g_job.us;
-                        }
-                        else if (s.r311c_thread && r309::r311c::launch(s, pin, ok0, ok1, okm, f, true))
-                        {
-                            goto r311c_launched;   // the maps stay open for the thread; the result comes back on a later poll
-                        }
-                        else
-                        {
-                            r309::r311c::out pout;
-                            const LONGLONG r310_t0 = s.r310_offlock ? r309::off_begin(s, lk, r310_ref) : 0;   // R310
-                            r309::r311c::compute_own(pin, pout, nullptr);
-                            if (r310_t0 != 0 && !r309::off_end(s, lk, r310_t0, r310_off)) { r309::off_drop(s, r310_ref, ok0, ok1, okm); return; }   // R310
-                            e0s = pout.e0s; ebs = pout.ebs; n0 = pout.n0; nb = pout.nb;
-                        }
-                        r309::judge(s, n0 ? e0s / (double)n0 : 0.0, nb ? ebs / (double)nb : 0.0, n0, nb, f, true);
-                    }
-                    if (ok0 && ok1 && okm && !r309_own)
-                    {
-                        // R311c: at replay the geometry is the job's (a re-arm between launch and replay must not re-read s.fp)
-                        const r309::r311c::in &rj = r309::r311c::g_job.i;
-                        const unsigned W = r311c_replay ? rj.W : s.fp.Footprint.Width, H = r311c_replay ? rj.H : s.fp.Footprint.Height, P = r311c_replay ? rj.P : s.fp.Footprint.RowPitch;
-                        const unsigned fmt = r311c_replay ? rj.fmt : (unsigned)s.fp.Footprint.Format, bpp = bpp_of(fmt);
+                        const unsigned W = s.fp.Footprint.Width, H = s.fp.Footprint.Height, P = s.fp.Footprint.RowPitch;
+                        const unsigned fmt = (unsigned)s.fp.Footprint.Format, bpp = bpp_of(fmt);
                         const unsigned x0 = W / 4, x1 = 3 * W / 4, y0 = H / 4, y1 = 3 * H / 4;
-                        // R311c: the profile, mean-vector / R305 and warp loops are r311c::compute_base (moved verbatim).
-                        // ProbeOffLock=2: launched on the probe thread now, decided here at replay; 0 / 1: computed inline
-                        // as before (1: with s.cs released between off_begin and off_end).
-                        // The panel can change the MVecScale live (ui_set_mvec_value, under s.cs): taken here, under the lock.
-                        const float r310_sx = r311c_replay ? r309::r311c::g_job.i.sx : s.mvec_scale_x;
-                        const float r310_sy = r311c_replay ? r309::r311c::g_job.i.sy : s.mvec_scale_y;
-                        const unsigned MP = r311c_replay ? rj.MP : s.mvec_fp2.Footprint.RowPitch;
-                        const unsigned mfmt = r311c_replay ? rj.mfmt : s.mvec_format;
-                        const unsigned mv_tb = mv_texel_bytes(mfmt);
-                        const size_t mv_bpp = mv_tb ? mv_tb : 8u;
-                        const unsigned mvw = r311c_replay ? rj.mvec_w : s.mvec_w, mvh = r311c_replay ? rj.mvec_h : s.mvec_h;
-                        const double sxm = (double)W / (double)mvw, sym = (double)H / (double)mvh;   // vector grid -> colour grid
-                        const bool r309_b = r311c_replay ? rj.r309_b : s.r309_on;
-                        r309::r311c::in pin{ c0, c1, mv, W, H, P, fmt, bpp, MP, mfmt, mv_tb, mv_bpp, mvw, mvh,
-                                             r311c_replay ? rj.width : s.width, r311c_replay ? rj.height : s.height,
-                                             r310_sx, r310_sy, false, r309_b };
-                        r309::r311c::out pout;
-                        if (r311c_replay)
+                        std::vector<double> ca(W, 0.0), cb(W, 0.0), ra(H, 0.0), rb(H, 0.0);
+                        for (unsigned y = y0; y < y1; y += 2)
                         {
-                            pout = r309::r311c::g_job.o;   // one copy of four profile vectors and the counters
-                            r310_off = r309::r311c::g_job.us;
+                            const unsigned char *r0 = c0 + (size_t)y * P, *r1 = c1 + (size_t)y * P;
+                            for (unsigned x = x0; x < x1; x += 2)
+                            {
+                                const double l0 = lum_at(r0 + (size_t)x * bpp, fmt), l1 = lum_at(r1 + (size_t)x * bpp, fmt);
+                                ca[x] += l0; cb[x] += l1; ra[y] += l0; rb[y] += l1;
+                            }
                         }
-                        else if (s.r311c_thread && r309::r311c::launch(s, pin, ok0, ok1, okm, f, false))
+                        // mean vector over the same region, in buffer units
+                        double svx = 0, svy = 0; unsigned long long nv = 0;
+                        const unsigned MP = s.mvec_fp2.Footprint.RowPitch;
+                        // R280o: the vector pair is read in the slot's own format, the way DLSS reads
+                        // it. SF-R1/SF-R2: R16G16_TYPELESS (4 bytes) was read as two 32-bit floats at
+                        // an 8-byte stride, and every warp candidate then scored the same error. The
+                        // decision rules below are unchanged - this is the reading, not the judgement.
+                        // 4-byte: FLOAT and TYPELESS as halves (what DLSS reads), UNORM / SNORM
+                        // normalised, SINT as integers. 8-byte: R32G32 FLOAT / TYPELESS as floats.
+                        const unsigned mfmt = s.mvec_format;
+                        const bool mv4 = (mfmt == (unsigned)DXGI_FORMAT_R16G16_FLOAT || mfmt == (unsigned)DXGI_FORMAT_R16G16_TYPELESS ||
+                                          mfmt == (unsigned)DXGI_FORMAT_R16G16_UNORM || mfmt == (unsigned)DXGI_FORMAT_R16G16_SNORM ||
+                                          mfmt == (unsigned)DXGI_FORMAT_R16G16_SINT);
+                        const size_t mv_bpp = mv4 ? 4u : 8u;
+                        auto read_mv = [mfmt, mv4](const unsigned char *px, float &vx, float &vy)
                         {
-                            goto r311c_launched;   // the maps stay open for the thread; the result comes back on a later poll
-                        }
-                        else
+                            if (!mv4) { const float *q = (const float *)px; vx = q[0]; vy = q[1]; return; }
+                            if (mfmt == (unsigned)DXGI_FORMAT_R16G16_UNORM)
+                            { const unsigned short *q = (const unsigned short *)px; vx = (float)q[0] / 65535.0f; vy = (float)q[1] / 65535.0f; return; }
+                            if (mfmt == (unsigned)DXGI_FORMAT_R16G16_SNORM)
+                            {
+                                const short *q = (const short *)px;
+                                vx = (q[0] <= -32767) ? -1.0f : (float)q[0] / 32767.0f;
+                                vy = (q[1] <= -32767) ? -1.0f : (float)q[1] / 32767.0f;
+                                return;
+                            }
+                            if (mfmt == (unsigned)DXGI_FORMAT_R16G16_SINT)
+                            { const short *q = (const short *)px; vx = (float)q[0]; vy = (float)q[1]; return; }
+                            const unsigned short *q = (const unsigned short *)px; vx = half_to_float(q[0]); vy = half_to_float(q[1]);
+                        };
+                        const unsigned mx0 = s.mvec_w / 4, mx1 = 3 * s.mvec_w / 4, my0 = s.mvec_h / 4, my1 = 3 * s.mvec_h / 4;
+                        for (unsigned y = my0; y < my1; y += 2)
                         {
-                            const LONGLONG r310_t0 = s.r310_offlock ? r309::off_begin(s, lk, r310_ref) : 0;
-                            r309::r311c::compute_base(pin, pout, nullptr);
-                            if (r310_t0 != 0 && !r309::off_end(s, lk, r310_t0, r310_off)) { r309::off_drop(s, r310_ref, ok0, ok1, okm); return; }   // R310
+                            const unsigned char *row = mv + (size_t)y * MP;
+                            for (unsigned x = mx0; x < mx1; x += 4)
+                            {
+                                float vx, vy;
+                                read_mv(row + (size_t)x * mv_bpp, vx, vy);   // R280o
+                                svx += vx; svy += vy; ++nv;
+                            }
                         }
-                        (void)x0; (void)x1; (void)y0; (void)y1;
-                        const std::vector<double> &ca = pout.ca, &cb = pout.cb, &ra = pout.ra, &rb = pout.rb;
-                        const double mvx = pout.nv ? pout.svx / (double)pout.nv : 0.0, mvy = pout.nv ? pout.svy / (double)pout.nv : 0.0;
+                        const double mvx = nv ? svx / (double)nv : 0.0, mvy = nv ? svy / (double)nv : 0.0;
                         const cal_axis ax = cal_axis_eval(ca.data(), cb.data(), W, mvx, (double)W);
                         const cal_axis ay = cal_axis_eval(ra.data(), rb.data(), H, mvy, (double)H);
-                        unsigned char cfirst[8]; memcpy(cfirst, pout.cfirst, sizeof cfirst);
-                        const bool cconst = pout.cconst, chave = pout.chave;
-                        double err[13]; unsigned long long cnt[13];
-                        for (int c = 0; c < 13; ++c) { err[c] = pout.err[c]; cnt[c] = pout.cnt[c]; }
+                        // R258d: THE WARP TEST - the vote that needs no eyes. For each
+                        // candidate scale (sign x unit, both axes) every sampled pixel of
+                        // frame 2 follows its vector back by that scale and reads frame 1
+                        // there (NGX: the vector points to the previous frame). The right
+                        // candidate makes frame 1 line up and the error falls well under
+                        // the no-motion baseline; a wrong sign makes it worse than baseline.
+                        // Winner must beat the baseline by 10% and the runner-up by 5%.
+                        double err[13] = {0}; unsigned long long cnt[13] = {0};
                         const double KX[4] = { (double)W, -(double)W, (double)W * 0.5, -(double)W * 0.5 };
                         const double KY[4] = { (double)H, -(double)H, (double)H * 0.5, -(double)H * 0.5 };
+                        // candidates: index = 1 + ux*4 + ... keep it explicit: [0]=baseline,
+                        // [1..4] = (sx,sy) in {++,+-,-+,--} at full units, [5..8] the same at half.
+                        const double sxm = (double)W / (double)s.mvec_w, sym = (double)H / (double)s.mvec_h;   // vector grid -> colour grid
+                        // R278b: [9..12] PIXEL units on the vector grid (RE4-4: |x| mean 0.37 max 3.1 on
+                        // 1280x720 reads as pixels, which the eight UV candidates can only reject).
                         const double sxv[12] = { KX[0], KX[0], KX[1], KX[1], KX[2], KX[2], KX[3], KX[3],  sxm,  sxm, -sxm, -sxm };
                         const double syv[12] = { KY[0], KY[1], KY[0], KY[1], KY[2], KY[3], KY[2], KY[3],  sym, -sym,  sym, -sym };
-                        const double r309_eb = pout.r309_eb; const unsigned long long r309_nb = pout.r309_nb;
+                        for (unsigned y = y0; y < y1; y += 4)
+                        {
+                            const unsigned char *r1 = c1 + (size_t)y * P;
+                            const unsigned my = (unsigned)((double)y / sym); if (my >= s.mvec_h) continue;
+                            const unsigned char *mrow = mv + (size_t)my * MP;
+                            for (unsigned x = x0; x < x1; x += 4)
+                            {
+                                const unsigned mxx = (unsigned)((double)x / sxm); if (mxx >= s.mvec_w) continue;
+                                float vx, vy;
+                                read_mv(mrow + (size_t)mxx * mv_bpp, vx, vy);   // R280o
+                                const double l2 = lum_at(r1 + (size_t)x * bpp, fmt);
+                                // baseline
+                                { const double l1 = lum_at(c0 + (size_t)y * P + (size_t)x * bpp, fmt); err[0] += (l1 > l2 ? l1 - l2 : l2 - l1); ++cnt[0]; }
+                                for (int c = 0; c < 12; ++c)
+                                {
+                                    const double px = (double)x + sxv[c] * (double)vx, py = (double)y + syv[c] * (double)vy;
+                                    if (px < 0 || py < 0 || px >= (double)W - 1 || py >= (double)H - 1) continue;
+                                    const double l1 = lum_at(c0 + (size_t)(unsigned)py * P + (size_t)(unsigned)px * bpp, fmt);
+                                    err[1 + c] += (l1 > l2 ? l1 - l2 : l2 - l1); ++cnt[1 + c];
+                                }
+                            }
+                        }
                         double e[13]; for (int c = 0; c < 13; ++c) e[c] = cnt[c] ? err[c] / (double)cnt[c] : 1e300;
                         int bestc = 1; for (int c = 2; c <= 12; ++c) if (e[c] < e[bestc]) bestc = c;
                         double second = 1e300; for (int c = 1; c <= 12; ++c) if (c != bestc && e[c] < second) second = e[c];
                         const bool decisive = (e[bestc] < e[0] * 0.90) && (e[bestc] < second * 0.95) && cnt[bestc] > 1000ull;
-                        if (r309_b) r309::judge(s, e[0], r309_nb ? r309_eb / (double)r309_nb : 0.0, cnt[0], r309_nb, f, false);   // R309
                         // R278: the other half of the judge. Every vector reading
                         // making the picture line up WORSE than no motion at all
                         // (RE4-4: 8 of 8) is a buffer that is not this frame's motion.
                         if (s.learn_on && e[bestc] > e[0] * 1.10 && cnt[0] > 1000ull) ++s.cp_worse;
-                        // R305: the case the line above cannot see. Far Cry 6: every probe of two
-                        // runs read the same bytes (00 00 80 3F) over the whole sampled region, so
-                        // every warp landed on the pixel it started from, scored exactly the
-                        // no-motion error, and the candidate was never "worse" - never rejected,
-                        // never decided, nothing written. A field of ONE non-zero value, the SAME
-                        // value probe after probe, while the picture itself changes (the no-motion
-                        // error spans at least 4x across those probes) is not this game's motion.
-                        // Six such probes in a row count as six "worse" probes, which the R278
-                        // reject below already acts on. A no-motion encoding (zero, or UNORM 0.5)
-                        // never counts: a real velocity buffer looks like that whenever nothing
-                        // moves. Learning only - a contract title and the virtual target are untouched.
-                        if (s.learn_on && chave && cconst && cnt[0] > 1000ull && !mv_is_zero_encoding(mfmt, cfirst))
-                        {
-                            if (s.cp_const_run != 0u && memcmp(cfirst, s.cp_const_raw, mv_tb) == 0)
-                            {
-                                ++s.cp_const_run;
-                                if (e[0] < s.cp_const_e0_min) s.cp_const_e0_min = e[0];
-                                if (e[0] > s.cp_const_e0_max) s.cp_const_e0_max = e[0];
-                            }
-                            else
-                            {
-                                s.cp_const_run = 1u; memcpy(s.cp_const_raw, cfirst, mv_tb);
-                                s.cp_const_e0_min = e[0]; s.cp_const_e0_max = e[0];
-                            }
-                            if (s.cp_const_run >= 6u && !s.cp_const_counted &&
-                                s.cp_const_e0_max >= 4.0 * (s.cp_const_e0_min > 1e-6 ? s.cp_const_e0_min : 1e-6))
-                            {
-                                s.cp_const_counted = true;
-                                if (s.cp_worse < 6u) s.cp_worse = 6u;
-                                char hx[24]; mv_hex(cfirst, mv_tb, hx, sizeof hx);
-                                char kl[420];
-                                snprintf(kl, sizeof kl,
-                                         "[MGPU][R305] CONSTANT VECTORS: candidate %d read the same bytes (%s, fmt=%u) over the whole sampled "
-                                         "region in %u probes running, while the picture's no-motion error ranged %.3g..%.3g. Not this "
-                                         "game's motion: counted as 6 probes worse than none, so the R278 reject below applies.",
-                                         s.learn_cand, hx, mfmt, s.cp_const_run, s.cp_const_e0_min, s.cp_const_e0_max);
-                                mgpu::diag::warn(kl);
-                            }
-                        }
-                        else s.cp_const_run = 0u;
                         const char *cname[13] = { "none", "+W,+H", "+W,-H", "-W,+H", "-W,-H", "+W/2,+H/2", "+W/2,-H/2", "-W/2,+H/2", "-W/2,-H/2",
                                                   "+px,+px", "+px,-px", "-px,+px", "-px,-px" };
                         if (decisive)
@@ -24312,17 +25108,15 @@ void stream_poll()
                         }
                         char cl[760];
                         snprintf(cl, sizeof cl,
-                                 "[MGPU][R258] calibration %u/%u at f=%llu: WARP TEST error none=%.3g best=%.3g (%s) second=%.3g -> %s | "
+                                 "[MGPU][R258] calibration %u/24 at f=%llu: WARP TEST error none=%.3g best=%.3g (%s) second=%.3g -> %s | "
                                  "profile cross-check: shift x=%+.0f y=%+.0f, mean vector x=%+.5f y=%+.5f, K_x=%+.1f K_y=%+.1f | "
                                  "votes x: +W %d, -W %d, half %d, px %d | y: +H %d, -H %d, half %d, px %d",
-                                 s.cp_n, s.learn_on ? 40u : 24u, f, e[0], e[bestc], cname[bestc], second,   // R305: the limit in force (40 while learning)
+                                 s.cp_n, f, e[0], e[bestc], cname[bestc], second,
                                  decisive ? "DECISIVE" : "not decisive (too little motion or no clear winner)",
                                  ax.shift, ay.shift, mvx, mvy, ax.k, ay.k,
                                  s.cp_kx_votes[0], s.cp_kx_votes[1], s.cp_kx_votes[2], s.cp_kx_votes[3],
                                  s.cp_ky_votes[0], s.cp_ky_votes[1], s.cp_ky_votes[2], s.cp_ky_votes[3]);
                         mgpu::diag::info(cl);
-                        const bool sw_on = g_sweep_on.load(std::memory_order_relaxed);   // R307
-                        if (sw_on) sweep_note(s.sw_rec_id, e[0], e[bestc], decisive, bestc, cnt[0], fmt);
                         // Three agreeing votes on an axis -> the key. Written once per axis pair,
                         // next launch is the heal (the R244 shape). Y falls back to X's unit and
                         // sign when it never saw enough vertical motion.
@@ -24346,30 +25140,8 @@ void stream_poll()
                         // once per frame, until one edge wins; a chosen edge that goes worse three
                         // windows running reopens the choice. No key, no eye: the picture decides.
                         const bool x_live = g_mvec_x_active.load(std::memory_order_relaxed);
-                        // R311e: the reject the virtual-target path never had. The picture moved (none >= 2) and the field
-                        // R280 extracted was >= 90% no-motion samples: that source is not this game's motion. Six such
-                        // probes running: R280 stands down (R311d's path), the zero field stays bound (r309_aside), and
-                        // the ini gets MVecTap=0 + MVecLearned=99 so the next launch binds zero from the arm and never
-                        // arms R280 - what 0.3.1's first launch ended with on a title like Far Cry 6, minus the strobe.
-                        // RE4's field is motion (edge means 0.63 at its window 16) and never reaches four.
-                        if (x_live && !sw_on && s.x_verdicts == 0u && cnt[0] > 1000ull && e[0] >= 5.0 && pout.nv != 0ull && s.x_edges_rec != 0u)   // none >= 5: the camera moved, not one character; x_edges_rec: the source was WRITTEN this frame (a video or a menu that does not write it is not scored - R280g's guard)
-                        {
-                            if (pout.zeros * 10ull >= pout.nv * 9ull) ++s.x_still_motion; else s.x_still_motion = 0u;   // >= 90% no-motion samples (FC6: 95.8-99.4%; RE4 in gameplay: 0.0%)
-                            if (s.x_still_motion >= 6u && !g_mvec_x_stand_down.load(std::memory_order_relaxed))   // six running (R278's reject count)
-                            {
-                                g_mvec_x_stand_down.store(true, std::memory_order_relaxed);
-                                s.r309_aside = true;   // the zero field stays whatever the census picks next
-                                const bool w1 = ui_ini_write("MVecTap", 0), w2 = ui_ini_write("MVecLearned", 99);
-                                char xl[460];
-                                snprintf(xl, sizeof xl, "[MGPU][R311e] R280's extract is NOT this game's motion: %u probes running read >= 90%% no-motion samples "
-                                                        "while the picture moved (none=%.3g this probe). R280 stands down for this session, the ZERO field stays bound, "
-                                                        "and mgpu.ini %s MVecTap=0 MVecLearned=99: the next launch binds the zero field from the arm and does not arm R280.",
-                                         s.x_still_motion, e[0], (w1 && w2) ? "is written with" : "could NOT be written with (writer failed)");
-                                mgpu::diag::warn(xl);
-                            }
-                        }
-                        const bool may_write = s.learn_write && !x_live && !sw_on;   // R278f-r: decided at arm (R258 runs under s.cs on the bridge thread: no file read here); R307: never in the sweep
-                        if (x_live && !sw_on)   // R307: the sweep changes no scale and no edge
+                        const bool may_write = s.learn_write && !x_live;   // R278f-r: decided at arm (R258 runs under s.cs on the bridge thread: no file read here)
+                        if (x_live)
                         {
                             const bool motion = s.x_edges_rec != 0u && cnt[0] > 1000ull && e[0] > 0.0 && (decisive || e[bestc] > e[0] * 1.10);   // R280g: a window with no source write is not scored
                             const unsigned eu = s.x_edge_used & 1u;
@@ -24409,22 +25181,9 @@ void stream_poll()
                                 s.mvec_scale_x = (nkx != 0) ? (float)nkx * ((float)s.width / (float)W) : (float)s.width;
                                 s.mvec_scale_y = (nky != 0) ? (float)nky * ((float)s.height / (float)H) : (float)s.height;
                                 s.mvec_dirty = true;
-                                // R311f: the verdict is CARRIED to the next launch - the three keys the tap writes (R278c), which the
-                                // arm's R280 derivation already reads. The next launch binds at this scale from the first evaluate
-                                // (no zero-field wait) and the judge re-evaluates it in its windows as always; a different live
-                                // verdict rewrites them. Not in the sweep, not under a forced MVecSource.
-                                bool r311f_w = false;
-                                if (!sw_on && g_r311_src.load(std::memory_order_relaxed) == 0)
-                                {
-                                    const int akx = nkx < 0 ? -nkx : nkx;
-                                    const bool half = (akx != 0 && akx != (int)W);
-                                    r311f_w = ini_write_text("MVecUnits", half ? "uvhalf" : "uv") &&
-                                              ui_ini_write("MVecSignX", nkx < 0 ? -1 : 1) && ui_ini_write("MVecSignY", nky < 0 ? -1 : 1);
-                                }
-                                snprintf(cl, sizeof cl, "[MGPU][R280] VERDICT applied live (#%u): MVecScaleX=%.2f MVecScaleY=%.2f (uv; X from %d votes, Y from %d - Y not yet measured keeps +). %s%s",
+                                snprintf(cl, sizeof cl, "[MGPU][R280] VERDICT applied live (#%u): MVecScaleX=%.2f MVecScaleY=%.2f (uv; X from %d votes, Y from %d - Y not yet measured keeps +). Nothing written to mgpu.ini.%s",
                                          s.x_verdicts, s.mvec_scale_x, s.mvec_scale_y,
-                                         s.cp_kx_votes[0] + s.cp_kx_votes[1] + s.cp_kx_votes[2], s.cp_ky_votes[0] + s.cp_ky_votes[1] + s.cp_ky_votes[2],
-                                         r311f_w ? "R311f: written to mgpu.ini (MVecUnits, MVecSignX/Y) - the next launch binds this from the arm and re-evaluates it." : "Nothing written to mgpu.ini.", el);
+                                         s.cp_kx_votes[0] + s.cp_kx_votes[1] + s.cp_kx_votes[2], s.cp_ky_votes[0] + s.cp_ky_votes[1] + s.cp_ky_votes[2], el);
                                 mgpu::diag::warn(cl);
                             }
                             else if (el[0] != 0 || (s.cp_n % 8u) == 0u)
@@ -24445,15 +25204,11 @@ void stream_poll()
                             const bool w1 = ini_write_text("MVecUnits", "px"),
                                        w2 = ui_ini_write("MVecSignX", fx < 0 ? -1 : 1) && ui_ini_write("MVecSignY", fy < 0 ? -1 : 1);
                             s.cp_written = w1 && w2;
-                            // R311a part 2: the verdict is APPLIED LIVE on the tap path (R280's path always did), not only
-                            // written for the next launch. Learning launches only (learn_on): a learned title never gets here.
-                            if (s.learn_on && fx != 0.0f && fy != 0.0f) { s.mvec_scale_x = fx; s.mvec_scale_y = fy; s.mvec_dirty = true; }
                             if (s.learn_on && s.cp_written) { (void)ui_ini_write("MVecLearned", s.learn_cand); (void)ui_ini_write("MVecTap", 1); (void)ui_ini_write("MVecCandidate", s.learn_cand); }   /* R278f: the pick the next launch must take */   // R278b: kept
                             snprintf(cl, sizeof cl,
                                      "[MGPU][R258] VERDICT: PIXEL units (this launch: MVecScaleX=%.2f MVecScaleY=%.2f, colour pixels per vector pixel) - "
-                                     "mgpu.ini %s with MVecUnits=px and the signs; every launch derives the scale from its own sizes.%s",
-                                     fx, fy, s.cp_written ? "REWRITTEN" : "NOT written (writer failed)",
-                                     s.learn_on ? " R311a: APPLIED LIVE from the next evaluate." : "");
+                                     "mgpu.ini %s with MVecUnits=px and the signs; every launch derives the scale from its own sizes.",
+                                     fx, fy, s.cp_written ? "REWRITTEN" : "NOT written (writer failed)");
                             mgpu::diag::warn(cl);
                         }
                         else if (!s.cp_written && may_write && decide(s.cp_kx_votes, s.cp_kx_half_sign, (double)W, kx))
@@ -24464,16 +25219,12 @@ void stream_poll()
                             const bool w1 = ini_write_text("MVecUnits", is_half ? "uvhalf" : "uv"),
                                        w2 = ui_ini_write("MVecSignX", kx < 0 ? -1 : 1) && ui_ini_write("MVecSignY", ky < 0 ? -1 : 1);
                             s.cp_written = w1 && w2;
-                            // R311a part 2: applied live on a learning launch (kx, ky are colour pixels per unit vector, signed:
-                            // +-W or +-W/2 - the same numbers [R278c] derives at the next arm from MVecUnits and the signs).
-                            if (s.learn_on && kx != 0 && ky != 0) { s.mvec_scale_x = (float)kx; s.mvec_scale_y = (float)ky; s.mvec_dirty = true; }
                             if (s.learn_on && s.cp_written) { (void)ui_ini_write("MVecLearned", s.learn_cand); (void)ui_ini_write("MVecTap", 1); (void)ui_ini_write("MVecCandidate", s.learn_cand); }   /* R278f: the pick the next launch must take */   // R278: closed for this title, tap kept
                             snprintf(cl, sizeof cl,
                                      "[MGPU][R258] VERDICT: %s units (this launch: MVecScaleX=%d MVecScaleY=%d) %s - mgpu.ini %s with MVecUnits and the signs; "
-                                     "every launch derives the scale from its own sizes.%s", is_half ? "UV/2" : "UV", kx, ky,
+                                     "every launch derives the scale from its own sizes.", is_half ? "UV/2" : "UV", kx, ky,
                                      (s.cp_ky_votes[0] + s.cp_ky_votes[1] + s.cp_ky_votes[2] >= 3) ? "(both axes measured)" : "(Y taken from X: not enough vertical motion seen)",
-                                     s.cp_written ? "REWRITTEN" : "NOT written (writer failed)",
-                                     s.learn_on ? " R311a: APPLIED LIVE from the next evaluate." : "");
+                                     s.cp_written ? "REWRITTEN" : "NOT written (writer failed)");
                             mgpu::diag::warn(cl);
                         }
                     }
@@ -24483,10 +25234,10 @@ void stream_poll()
                     // the title is closed. One line either way, then silence.
                     // R278e: or on balance at the end of the 24 probes - one lucky
                     // decisive vote no longer vetoes (RE4-L1: 1 vote, ~17 worse).
-                    votes_x = (unsigned)(s.cp_kx_votes[0] + s.cp_kx_votes[1] + s.cp_kx_votes[2] + s.cp_kx_votes[3]);   // R311c: declared at the block's top (the launch goto)
+                    const unsigned votes_x = (unsigned)(s.cp_kx_votes[0] + s.cp_kx_votes[1] + s.cp_kx_votes[2] + s.cp_kx_votes[3]);
                     // R278f: per candidate - a window of 8 probes. Rejected early (6 worse,
                     // no vote) or on balance at the window's end (worse >= 4 and >= 3 x votes).
-                    win_end = (s.cp_win_n >= 8u);
+                    const bool win_end = (s.cp_win_n >= 8u);
                     // R280e: on the virtual-target path there is no reject - the judge stays open (above).
                     if (g_mvec_x_active.load(std::memory_order_relaxed)) { }
                     else if (s.learn_on && !s.cp_written &&
@@ -24504,18 +25255,14 @@ void stream_poll()
                             mgpu::diag::warn(rl);
                             g_mv_cand_req.store(ns, std::memory_order_relaxed);
                             s.learn_cand = ns; s.cp_worse = 0; s.cp_win_n = 0;
-                            s.cp_const_run = 0; s.cp_const_counted = false;   // R305: a new candidate is judged afresh
                             for (int i = 0; i < 4; ++i) { s.cp_kx_votes[i] = 0; s.cp_ky_votes[i] = 0; }
                             goto r278f_next;
                         }
                         if (nc > s.learn_cand && (unsigned)nc < en)
                         {
                             (void)ui_ini_write("MVecCandidate", nc);
-                            // R306: wording only. "Same" here means same size AND same format (one slot
-                            // layout, probe.cpp R278f-r); Far Cry 6's next candidate was the same size in
-                            // another format and the old text called it "a smaller size".
-                            snprintf(rl, sizeof rl, "[MGPU][R278] vector candidate %d rejected (%u of %u probes worse than none). No other candidate of the same size "
-                                                    "AND format (switching live needs one slot layout); the next launch tries candidate %d of %u.", s.learn_cand, s.cp_worse, s.cp_win_n, nc, en);
+                            snprintf(rl, sizeof rl, "[MGPU][R278] vector candidate %d rejected (%u of %u probes worse than none). No other candidate of this size; "
+                                                    "the next launch tries candidate %d (a smaller size) of %u.", s.learn_cand, s.cp_worse, s.cp_win_n, nc, en);
                         }
                         else
                         {
@@ -24528,31 +25275,14 @@ void stream_poll()
                         s.cp_written = true;   // closes R258 for this session
                     }
                     r278f_next:;
-                    if (r311c_replay) r309::r311c::finish();   // R311c: unmap through the refs the job held, release them, job idle
-                    else
-                    {
-                        if (ok0) s.cp_rb[0]->Unmap(0, &none);
-                        if (ok1) s.cp_rb[1]->Unmap(0, &none);
-                        if (okm) s.vp_rb->Unmap(0, &none);
-                    }
-                    if (r309_q0 != 0) r309::note_hold(s, r309_q0, r309_own, r310_off);   // R310: map, score, unmap (R311c: the thread's compute time counts as 'released')
-                    for (int r310_i = 0; r310_i < 3; ++r310_i) if (r310_ref[r310_i] != nullptr) { r310_ref[r310_i]->Release(); r310_ref[r310_i] = nullptr; }   // R310
-                    r311c_launched:;   // R311c: a launched job skips the unmaps (the thread holds them) and the hold note (nothing was held)
+                    if (ok0) s.cp_rb[0]->Unmap(0, &none);
+                    if (ok1) s.cp_rb[1]->Unmap(0, &none);
+                    if (okm) s.vp_rb->Unmap(0, &none);
                 }
-                // R280e: on the virtual-target path the judge never closes (no probe budget);
-                // after the first verdict it runs every 1000 frames instead of every 100.
                 const bool x_judge = g_mvec_x_active.load(std::memory_order_relaxed);
-                const bool r309_base = (x_judge && (s.x_verdicts == 0u || (f % 1000ull) < 100ull)) || (s.cp_n < (s.learn_on ? 40u : 24u) && !s.cp_written);
-                if (s.r310_cost && !s.r309_on)   // R310: ProbeCost without the judge - a COST line every 5 minutes
-                {
-                    const unsigned long long r310_now = GetTickCount64();
-                    if (s.r310_next_ms == 0ull) s.r310_next_ms = r310_now + 300000ull;
-                    else if (r310_now >= s.r310_next_ms) { s.r310_next_ms = r310_now + 300000ull; r309::cost_line(s, "last 5 minutes (R258's probes only)"); }
-                }
-                // R309: its own probes only inside a gameplay window; R258's schedule above is unchanged.
-                const bool r309_win = s.r309_on && s.mvec_mode == 3 &&
-                                      r309::window(s, mvec_fresh, s.depth_mode == 0 || s.depth_slot_valid[slot] != 0u, f);
-                if ((r309_base || r309_win) && s.mvec_bytes2 != 0)   // R278f: room for 3 same-size windows while learning
+                const bool calibration_allowed = mgpu::calibration::should_schedule(
+                    authoritative_guides, x_judge, s.cp_n, s.cp_written, s.learn_on, f);
+                if (!authoritative_guides && (s.cp_stage != 0u || calibration_allowed) && s.mvec_bytes2 != 0)
                 {
                     // Staged recording. Stage 1 at the odd 150s (150, 450, 750, ...) so it
                     // never shares a frame with R257's readback at 300/900/1800; stage 2
@@ -24560,18 +25290,8 @@ void stream_poll()
                     // ended at f=1586, before the old gate at 1801).
                     // R258c: every 100 frames at the 50s (150, 250, 350, ...): never a
                     // multiple of 300, so never R257's frame.
-                    bool sw_ok = true;   // R307: in the sweep, a probe starts only 60+ frames into a setting
-                    if (g_sweep_on.load(std::memory_order_relaxed))
+                    if (s.cp_stage == 0u && (f % 100ull) == 50ull && f >= 150ull)
                     {
-                        const unsigned sid = g_sweep_id.load(std::memory_order_relaxed);
-                        if (sid != s.sw_seen_id) { s.sw_seen_id = sid; s.sw_seen_f = f; }
-                        sw_ok = (f - s.sw_seen_f >= 60ull);
-                    }
-                    if (s.cp_stage == 0u && (f % 100ull) == 50ull && f >= 150ull && sw_ok && (!s.r311c_thread || r309::r311c::idle()))   // R311c: the readbacks are in use while a job scores
-                    {
-                        s.sw_rec_id = s.sw_seen_id;   // R307
-                        s.r309_probe_own = !r309_base;   // R309: started by R309 alone - scored by R309 alone
-                        if (s.r309_probe_own) s.r309_bytes += 2ull * (unsigned long long)s.payload_bytes + (unsigned long long)s.mvec_bytes2;
                         if (s.cp_rb[0] == nullptr && s.ndev_b) (void)make_buf(s.ndev_b, s.payload_bytes, D3D12_HEAP_TYPE_READBACK, &s.cp_rb[0]);
                         if (s.cp_rb[1] == nullptr && s.ndev_b) (void)make_buf(s.ndev_b, s.payload_bytes, D3D12_HEAP_TYPE_READBACK, &s.cp_rb[1]);
                         if (s.vp_rb == nullptr && s.ndev_b) (void)make_buf(s.ndev_b, s.mvec_bytes2, D3D12_HEAP_TYPE_READBACK, &s.vp_rb);
@@ -24579,6 +25299,7 @@ void stream_poll()
                         {
                             s.nl->CopyBufferRegion(s.cp_rb[0], 0, s.nxfer, slot_off + SEAL_STRIDE, s.payload_bytes);
                             s.cp_stage = 1u;
+                            probe_recorded = true;
                             s.x_edge_used = (unsigned)g_mvec_x_edge_req.load(std::memory_order_relaxed);   // R280e
                             s.x_edges_rec = g_mvec_x_edges.load(std::memory_order_relaxed);                  // R280g
                         }
@@ -24590,6 +25311,7 @@ void stream_poll()
                             s.nl->CopyBufferRegion(s.cp_rb[1], 0, s.nxfer, slot_off + SEAL_STRIDE, s.payload_bytes);
                             s.nl->CopyBufferRegion(s.vp_rb, 0, s.nxfer, slot_off + s.mvec_off, s.mvec_bytes2);
                             s.cp_stage = 2u;
+                            probe_recorded = true;
                         }
                         else s.cp_stage = 0u;   // no vectors on the second frame: try at the next 150
                     }
@@ -24605,201 +25327,26 @@ void stream_poll()
                     {
                         const vec_probe_result vr = vec_probe_eval(pm, s.mvec_w, s.mvec_h, (unsigned)s.mvec_fp2.Footprint.RowPitch, s.mvec_format);
                         D3D12_RANGE none{0, 0}; s.vp_rb->Unmap(0, &none);
-                        char vl[760];
-                        char hx[24]; mv_hex(vr.first_raw, vr.texel_bytes, hx, sizeof hx);   // R305
+                        char vl[560];
                         snprintf(vl, sizeof vl,
-                                 "[MGPU][R257] vector probe %u/3 at f=%llu (%ux%u fmt=%u, every 2nd row/4th col): samples=%llu zero=%.1f%% | "
-                                 "|x| mean=%.4g max=%.4g | |y| mean=%.4g max=%.4g | x>0 %.0f%% y>0 %.0f%% | R305: first texel bytes %s, "
-                                 "%.1f%% of samples identical to it -> %s",
-                                 s.vp_n, f, s.mvec_w, s.mvec_h, s.mvec_format, vr.n,
+                                 "[MGPU][R257] vector probe %u/3 sampled_f=%llu read_f=%llu source=0x%llx (%ux%u fmt=%u, every 2nd row/4th col): samples=%llu zero=%.1f%% | "
+                                 "|x| mean=%.4g max=%.4g | |y| mean=%.4g max=%.4g | x>0 %.0f%% y>0 %.0f%% | nonfinite=%llu -> %s",
+                                 s.vp_n, s.vp_stamp.frame, f, s.vp_stamp.source,
+                                 s.mvec_w, s.mvec_h, s.mvec_format, vr.n,
                                  vr.n ? 100.0 * (double)vr.zeros / (double)vr.n : 0.0,
-                                 vr.mean_ax, vr.max_ax, vr.mean_ay, vr.max_ay, 100.0 * vr.pos_x, 100.0 * vr.pos_y,
-                                 hx[0] ? hx : "-", vr.n ? 100.0 * (double)vr.same_as_first / (double)vr.n : 0.0, vr.verdict);
+                                 vr.mean_ax, vr.max_ax, vr.mean_ay, vr.max_ay, 100.0 * vr.pos_x, 100.0 * vr.pos_y, vr.nonfinite, vr.verdict);
                         mgpu::diag::info(vl);
                     }
                 }
-                // ---- R315b (MVecBarrierSource=2): the judge ----
-                // The readback of both regions is issued here (this list, this slot, before the
-                // unpack reads the same bytes), mapped on a LATER poll (the fence says the list ran),
-                // compared on a sample grid. A frame is "same" when every sampled texel is byte-
-                // identical. Decision after R315_WINDOW_N judged frames: >= 90% same -> TAIL; else
-                // TRANSITION. The window re-opens when the published handle changes and every
-                // ~5 minutes of sealed frames. Key absent / 1: mvec2_off is 0, nothing here runs.
-                if (s.mvec2_off != 0)
-                {
-                    const unsigned R315_WINDOW_N = 24u;
-                    const unsigned long long pub = s.mvec_pub_handle.load(std::memory_order_relaxed);
-                    const int ph = g_r315_phase.load(std::memory_order_relaxed);
-                    if (ph != R315_WINDOW && pub != 0ull && s.r315_judge_handle != 0ull &&
-                        (pub != s.r315_judge_handle || f >= s.r315_recheck_at))
-                    {
-                        g_r315_phase.store(R315_WINDOW, std::memory_order_relaxed);
-                        mgpu::calibrator::set_eval_copy(1);   // R315b fix 3
-                        s.r315_judged = 0; s.r315_same = 0; s.r315_window_at = f;
-                        s.r315_prev_bits.clear(); s.r315_prev_diff = 0;   // R315b fix 4
-                        s.r315_flat = 0;   // R326
-                        char wl[260];
-                        snprintf(wl, sizeof wl, "[MGPU][R315] JUDGE window re-opened at f=%llu (%s): the DLSS-call copy delivers until the verdict.",
-                                 f, pub != s.r315_judge_handle ? "the published vector buffer changed" : "periodic re-check");
-                        mgpu::diag::info(wl);
-                    }
-                    if (s.r315_rb_pending && s.r315_rb != nullptr)
-                    {
-                        s.r315_rb_pending = false;
-                        unsigned char *pm = nullptr;
-                        D3D12_RANGE rr{ 0, (SIZE_T)(2ull * s.mvec_bytes2) };
-                        if (SUCCEEDED(s.r315_rb->Map(0, &rr, (void **)&pm)) && pm != nullptr)
-                        {
-                            const unsigned pitch = (unsigned)s.mvec_fp2.Footprint.RowPitch;
-                            // R315b fix 1: bytes per texel for ANY vector format the lane carries (mv_texel_bytes
-                            // knows the two-channel decoders only; Cyberpunk's buffer is R16G16B16A16_FLOAT = 10).
-                            unsigned tb = 0u;
-                            switch (s.mvec_format)
-                            {
-                            case 2: case 3: case 4:                         tb = 16u; break;   // R32G32B32A32 *
-                            case 10: case 11: case 12: case 13: case 14:    tb = 8u;  break;   // R16G16B16A16 *
-                            case 15: case 16: case 17: case 18:             tb = 8u;  break;   // R32G32 *
-                            case 23: case 24: case 25:                      tb = 4u;  break;   // R10G10B10A2 *, R11G11B10
-                            case 27: case 28: case 29: case 30: case 31: case 32: tb = 4u; break;   // R8G8B8A8 *
-                            case 33: case 34: case 35: case 36: case 37: case 38: tb = 4u; break;   // R16G16 *
-                            case 39: case 40: case 41: case 42: case 43:    tb = 4u;  break;   // R32 *
-                            case 48: case 49: case 50: case 51: case 52:    tb = 2u;  break;   // R8G8 *
-                            default: tb = mv_texel_bytes(s.mvec_format); break;
-                            }
-                            if (tb == 0u && !s.r315_fmt_said)
-                            {
-                                s.r315_fmt_said = true;
-                                char fl[200];
-                                snprintf(fl, sizeof fl, "[MGPU][R315] JUDGE cannot sample vector format %u (unknown texel size): the verdict will be "
-                                                        "TRANSITION by default, which is value 1.", s.mvec_format);
-                                mgpu::diag::warn(fl);
-                            }
-                            unsigned long long n = 0, diff = 0, overlap = 0;
-                            unsigned bx0 = ~0u, by0 = ~0u, bx1 = 0u, by1 = 0u;   // bounding box of the differing texels (full-res coords)
-                            // R326 (E15): sample only the area the game writes. The calibrator table carries the
-                            // vector subrect (Dawnwalker: 1485x836 at 0,0 inside a 2560x1440 buffer - two thirds
-                            // of the whole-buffer grid were texels nothing ever wrote). No subrect: the whole
-                            // buffer, as before. The grid indices (sx, sy) stay buffer-relative so the prev-bits
-                            // set keeps its meaning across frames.
-                            unsigned gx0 = 0u, gy0 = 0u, gx1 = s.mvec_w, gy1 = s.mvec_h;
-                            {
-                                mgpu::calibrator::table st;
-                                if (mgpu::calibrator::read(st) && (st.have & mgpu::calibrator::KEY_SUBRECTS) != 0u &&
-                                    st.sub_w >= 64u && st.sub_h >= 64u &&
-                                    st.mvec_x + st.sub_w <= s.mvec_w && st.mvec_y + st.sub_h <= s.mvec_h)
-                                { gx0 = st.mvec_x; gy0 = st.mvec_y; gx1 = st.mvec_x + st.sub_w; gy1 = st.mvec_y + st.sub_h; }
-                            }
-                            const unsigned ns_x = (s.mvec_w + 7u) / 8u, ns_y = (s.mvec_h + 3u) / 4u;
-                            const size_t nbits = (size_t)ns_x * ns_y;
-                            std::vector<unsigned char> bits((nbits + 7u) / 8u, 0u);
-                            const bool have_prev = (s.r315_prev_bits.size() == bits.size());
-                            // R326 (E15): a frame counts only if its field carries motion. The R305 rule the R257
-                            // probe uses: sampled texels of the DLSS-call copy byte-identical to the FIRST sampled
-                            // texel. >= 99% identical = a flat field (all zero, -0, or one constant, whatever the
-                            // format) - identical copies of it prove nothing. Dawnwalker D1B-D1D and Cyberpunk
-                            // FG1 judged 24 such frames right after the arm and picked TAIL on them.
-                            unsigned long long flat_same = 0ull;
-                            const unsigned char *first_tx = nullptr;
-                            if (tb != 0u)
-                                for (unsigned y = gy0 & ~3u, sy = y / 4u; y < gy1; y += 4u, ++sy)
-                                {
-                                    const unsigned char *a = pm + (size_t)y * pitch;
-                                    const unsigned char *b = pm + (size_t)s.mvec_bytes2 + (size_t)y * pitch;
-                                    for (unsigned x = gx0 & ~7u, sx = x / 8u; x < gx1; x += 8u, ++sx)
-                                    {
-                                        ++n;
-                                        if (first_tx == nullptr) first_tx = a + (size_t)x * tb;
-                                        if (memcmp(a + (size_t)x * tb, first_tx, tb) == 0) ++flat_same;
-                                        if (memcmp(a + (size_t)x * tb, b + (size_t)x * tb, tb) != 0)
-                                        {
-                                            ++diff;
-                                            const size_t bi = (size_t)sy * ns_x + sx;
-                                            bits[bi >> 3] |= (unsigned char)(1u << (bi & 7u));
-                                            if (have_prev && (s.r315_prev_bits[bi >> 3] & (1u << (bi & 7u))) != 0u) ++overlap;
-                                            if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y;
-                                        }
-                                    }
-                                }
-                            D3D12_RANGE none{0, 0}; s.r315_rb->Unmap(0, &none);
-                            // R326: no motion in the field -> not a judged frame. The window stays open and the
-                            // DLSS-call copy keeps delivering until 24 frames WITH motion have been compared.
-                            const bool flat = (tb != 0u && n != 0ull && flat_same * 100ull >= n * 99ull);
-                            if (flat)
-                            {
-                                ++s.r315_flat;
-                                if (s.r315_flat == 1u || s.r315_flat == 100u || s.r315_flat == 1000u)
-                                {
-                                    char fl2[260];
-                                    snprintf(fl2, sizeof fl2, "[MGPU][R326] JUDGE: frame f=%llu not counted - the vector field is flat (%.1f%% of %llu "
-                                                              "sampled texels identical to the first). %u flat frame(s) skipped in this window so far; the "
-                                                              "DLSS-call copy delivers until 24 frames with motion are judged.",
-                                             f, n ? 100.0 * (double)flat_same / (double)n : 0.0, n, s.r315_flat);
-                                    mgpu::diag::info(fl2);
-                                }
-                            }
-                            else
-                            {
-                            ++s.r315_judged;
-                            // R315b fix 4. same = identical, OR a small (< 1%) FIXED set: >= 90% of this frame's differing
-                            // samples were differing in the previous judged frame too (a deterministic write to a fixed
-                            // region after DLSS - a HUD / weapon mask - not stale motion, which moves with the scene).
-                            // The first judged frame with a difference has no previous set and counts as DIFFERENT.
-                            const bool patch_small = (n != 0ull && diff * 100ull < n);   // 'small' is a Windows macro (rpcndr.h)
-                            const bool patch_fixed = (diff != 0ull && have_prev && s.r315_prev_diff != 0ull && overlap * 10ull >= diff * 9ull);
-                            const bool same = (diff == 0ull) || (patch_small && patch_fixed);
-                            if (same) ++s.r315_same;
-                            s.r315_prev_bits.swap(bits); s.r315_prev_diff = diff;
-                            if (s.r315_judged <= 3u || s.r315_judged == R315_WINDOW_N)
-                            {
-                                char jl[520];   // R326: longer line
-                                snprintf(jl, sizeof jl, "[MGPU][R315] JUDGE frame %u/%u at f=%llu: %llu sampled texels, %llu differ (%.3f%%), %llu of them "
-                                                        "also differed last time, box x=%u..%u y=%u..%u of %ux%u -> %s | R326: grid x=%u..%u y=%u..%u, "
-                                                        "%.1f%% flat, %u flat frame(s) skipped",
-                                         s.r315_judged, R315_WINDOW_N, f, n, diff, n ? 100.0 * (double)diff / (double)n : 0.0, overlap,
-                                         diff ? bx0 : 0u, diff ? bx1 : 0u, diff ? by0 : 0u, diff ? by1 : 0u, s.mvec_w, s.mvec_h,
-                                         same ? (diff ? "same (a fixed patch)" : "same") : "DIFFERENT",
-                                         gx0, gx1, gy0, gy1, n ? 100.0 * (double)flat_same / (double)n : 0.0, s.r315_flat);
-                                mgpu::diag::info(jl);
-                            }
-                            if (s.r315_judged >= R315_WINDOW_N)
-                            {
-                                const bool tail_ok = (s.r315_same * 10u >= R315_WINDOW_N * 9u);
-                                g_r315_phase.store(tail_ok ? R315_TAIL : R315_EVALUATE, std::memory_order_relaxed);
-                                mgpu::calibrator::set_eval_copy(tail_ok ? 0 : 1);   // R315b fix 3: the DLSS-call copy stops only when the tail carries
-                                s.r315_judge_handle = pub; s.r315_recheck_at = f + 18000ull; ++s.r315_decisions;
-                                char dl[420];
-                                snprintf(dl, sizeof dl,
-                                         "[MGPU][R315] VERDICT #%u at f=%llu: %u of %u judged frames byte-identical between the copy at the DLSS "
-                                         "call and the tail of the frame -> %s. Re-judged if the published buffer changes, and every 18000 frames.",
-                                         s.r315_decisions, f, s.r315_same, R315_WINDOW_N,
-                                         tail_ok ? "the TAIL carries the vectors from here (the DLSS-call copy and its two barriers stop)"
-                                                 : "the DLSS-CALL copy carries, as today (the tail is not what DLSS consumed on this title)");
-                                mgpu::diag::info(dl);
-                            }
-                            }   // R326: !flat
-                        }
-                    }
-                    if (g_r315_phase.load(std::memory_order_relaxed) == R315_WINDOW && mvec_fresh && !s.r315_rb_pending &&
-                        s.r315_both[slot].load(std::memory_order_acquire) != 0u && s.mvec_bytes2 != 0 && (f & 3ull) == 0ull)
-                    {
-                        if (s.r315_rb == nullptr && s.ndev_b != nullptr)
-                            (void)make_buf(s.ndev_b, 2ull * s.mvec_bytes2, D3D12_HEAP_TYPE_READBACK, &s.r315_rb);
-                        if (s.r315_rb != nullptr)
-                        {
-                            s.nl->CopyBufferRegion(s.r315_rb, 0, s.nxfer, slot_off + s.mvec_off, s.mvec_bytes2);
-                            s.nl->CopyBufferRegion(s.r315_rb, s.mvec_bytes2, s.nxfer, slot_off + s.mvec2_off, s.mvec_bytes2);
-                            s.r315_rb_pending = true;
-                        }
-                    }
-                }
-                if (mvec_fresh && s.vp_n < 3u && !s.vp_pending && s.mvec_bytes2 != 0 && (f == 300ull || f == 900ull || f == 1800ull) &&
-                    (!s.r311c_thread || r309::r311c::idle()))   // R311c: vp_rb is being read by the probe thread while a job scores
+                if (mvec_fresh && s.vp_n < 3u && !s.vp_pending && s.mvec_bytes2 != 0 && (f == 300ull || f == 900ull || f == 1800ull))
                 {
                     if (s.vp_rb == nullptr && s.ndev_b != nullptr) (void)make_buf(s.ndev_b, s.mvec_bytes2, D3D12_HEAP_TYPE_READBACK, &s.vp_rb);
                     if (s.vp_rb != nullptr)
                     {
                         s.nl->CopyBufferRegion(s.vp_rb, 0, s.nxfer, slot_off + s.mvec_off, s.mvec_bytes2);
+                        s.vp_stamp = {f, s.mvec_audit_sealed[slot].source_at(f)};
                         s.vp_pending = true;
+                        probe_recorded = true;
                     }
                 }
                 if (depth_here && s.dp_n < 3u && !s.dp_pending && (f == 300ull || f == 900ull || f == 1800ull))
@@ -24816,6 +25363,7 @@ void stream_poll()
                         {
                             s.nl->CopyBufferRegion(s.dp_rb, 0, s.nxfer, slot_off + s.depth_off, s.depth_bytes);
                             s.dp_pending = true;
+                            probe_recorded = true;
                         }
                     }
                 }
@@ -24844,11 +25392,11 @@ void stream_poll()
                 //
                 // Third region of the same slot, same two before-state cases,
                 // written the same way rather than reasoned about a third
-                // time. mvec_slot_valid is what makes a frame the bind hook
+                // time. The generation-checked packet makes a frame the bind hook
                 // missed unpack nothing and bind nothing.
                 const bool mvec_here =
                     (s.mvec_mode == 3 && s.tex_mvec_r[ii] != nullptr &&
-                     s.mvec_bytes2 != 0 && s.mvec_slot_valid[slot].load(std::memory_order_acquire) != 0u);
+                     s.mvec_bytes2 != 0 && s.mvec_packets.valid(slot, f));
                 if (mvec_here)
                 {
                     if (!use_cq)
@@ -24908,32 +25456,6 @@ void stream_poll()
                     s.mvec_dirty = false;
                     ++s.mvec_fills;
                 }
-                // R309: the zero field, once, the first time R309 steps aside. In mode 3 nothing has
-                // written the upload buffer (mvec_fills == 0), and a committed resource is created
-                // zeroed, so it is copied as it is - a GPU 1 copy, no CPU fill under s.cs. If the
-                // panel ever filled it (mode switched live), it is zeroed first.
-                // R311e: THE DEFAULT IS THE ZERO FIELD. On the R280 path the extract is bound only once R280's own
-                // judge has applied a verdict (x_verdicts > 0: RE4 at its window ~16); until then, and on a title whose
-                // extract never earns one (Far Cry 6), the zero field is what DLSS-NR gets - from the first evaluate,
-                // not after a judge stepped aside from strobing vectors. The copies and the probes carry on so the
-                // verdict can still arrive. The tap path (Skyrim) and contract titles are not on this branch.
-                const bool r311e_zero = s.r309_aside || (g_mvec_x_active.load(std::memory_order_relaxed) && s.x_verdicts == 0u);
-                if (s.mvec_mode == 3 && r311e_zero && !s.r309_zero_ready &&
-                    s.tex_mvec != nullptr && s.mvec_cpu != nullptr && s.mvec_up != nullptr)
-                {
-                    if (s.mvec_fills != 0)
-                        for (UINT row = 0; row < s.height; ++row)
-                            memset(s.mvec_cpu + (size_t)row * (size_t)s.mvec_fp.Footprint.RowPitch, 0, (size_t)s.width * 8u);
-                    if (s.mvec_in_read)
-                        barrier(s.nl, s.tex_mvec, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
-                    D3D12_TEXTURE_COPY_LOCATION zs{}, zd{};
-                    zs.pResource = s.mvec_up; zs.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; zs.PlacedFootprint = s.mvec_fp;
-                    zd.pResource = s.tex_mvec; zd.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; zd.SubresourceIndex = 0;
-                    s.nl->CopyTextureRegion(&zd, 0, 0, 0, &zs, nullptr);
-                    barrier(s.nl, s.tex_mvec, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-                    s.mvec_in_read = true;
-                    s.r309_zero_ready = true;
-                }
 
                 if (s.ts_ok) s.nl->EndQuery(s.tsheap, D3D12_QUERY_TYPE_TIMESTAMP, 2);
 
@@ -24962,8 +25484,16 @@ void stream_poll()
                 // true. Falls back to the seal index if the slot never got a
                 // game-frame stamp, which can only happen on a frame sealed
                 // before this field existed.
-                const unsigned long long gnow =
-                    (s.slot_game_frame[slot] != 0ull) ? s.slot_game_frame[slot] : f;
+                const bool aligned_mode = mgpu::aligned::enabled();
+                const unsigned long long gnow = aligned_mode ? s.slot_game_frame[slot] :
+                    ((s.slot_game_frame[slot] != 0ull) ? s.slot_game_frame[slot] : f);
+                const bool predecessor_valid = s.pipeline.pending() || s.aligned_history_valid;
+                const unsigned predecessor_frame = s.pipeline.pending()
+                    ? s.pipeline.latest().engine_frame : s.aligned_history_frame;
+                const bool aligned_reset = aligned_mode && (!predecessor_valid ||
+                    !mgpu::aligned::consecutive_frame(static_cast<unsigned>(gnow), predecessor_frame));
+                if (aligned_reset && predecessor_valid) ++s.async_gap_resets;
+                if (aligned_mode && s.aligned_constants[slot].reset) ++s.async_engine_resets;
                 unsigned long long mv_elapsed = 1ull;
                 if (s.nr_last_eval_fi != 0 && gnow > s.nr_last_eval_fi)
                     mv_elapsed = gnow - s.nr_last_eval_fi;
@@ -24974,8 +25504,8 @@ void stream_poll()
                     ++s.mvec_elapsed_hist[bkt];
                     if (mv_elapsed > s.mvec_elapsed_max) s.mvec_elapsed_max = mv_elapsed;
                 }
-                s.nr_last_eval_fi = gnow;   // B1: game frames, see above
-                const float mv_el = (float)mv_elapsed;
+                if (!aligned_mode) s.nr_last_eval_fi = gnow;
+                const float mv_el = aligned_mode ? 1.0f : (float)mv_elapsed;
 
                 // ---- R102: the evaluated extent ----
                 //
@@ -25052,12 +25582,8 @@ void stream_poll()
                 {
                     ew = s.sr_w; eh = s.sr_h;
 
-                    // R312: the reduce maps depth by the COLOUR extent, so a smaller depth
-                    // (DepthTransport 3/4) is not handed to it. Today depth is always the
-                    // colour's size, so the key-absent path is unchanged.
                     sr_write_descriptors(s, s.ndev_b, ii, s.tex_in[ii],
-                                         (s.depth_mode == 1 && s.depth_w == s.width && s.depth_h == s.height)
-                                             ? s.tex_depth[ii] : nullptr);
+                                         (s.depth_mode == 1) ? s.tex_depth[ii] : nullptr);
 
                     barrier(s.nl, s.sr_color[ii], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -25148,6 +25674,22 @@ void stream_poll()
                                      "pass count is not used while it is on. Said once.");
                 }
                 const unsigned npass = vr_wh ? 2u : s.passes;   // R217
+                if (aligned_mode)
+                {
+                    static_assert(stream_state::MAX_PASSES == mgpu::neural_history::max_passes);
+                    neural_settings.active_passes = npass;
+                    for (unsigned index = 0; index < stream_state::MAX_PASSES; ++index)
+                        neural_settings.strengths[index] = s.intensity[index];
+                    neural_settings.tuning_enabled = s.tuning_on;
+                    neural_settings.tone = s.tone_strength;
+                    neural_settings.structure = s.structure_strength;
+                    neural_settings.skin = s.skin_strength;
+                    neural_settings.style = s.style;
+                    neural_settings.auto_mask = s.auto_mask;
+                    auto submission_history = s.neural_settings_history;
+                    if (s.pipeline.pending()) submission_history.complete(s.pipeline.latest().settings);
+                    neural_settings_change = submission_history.changes(neural_settings);
+                }
                 // R217: a frame where a scale mode turns on or off (the first
                 // frame, a calibration frame) resets every pass's history, so
                 // no pass blends a history built at another size.
@@ -25197,7 +25739,7 @@ void stream_poll()
                             g + (unsigned long long)stream_state::RING < s.produced + 3ull)
                         { ok = false; ++s.cv_fb_old; break; }
                         if (s.slot_game_frame[gs] != gnow - (unsigned long long)k ||
-                            s.mvec_slot_valid[gs].load(std::memory_order_acquire) == 0u)
+                            !s.mvec_packets.valid(gs, g))
                         { ok = false; ++s.cv_fb_slot; break; }
                         gsl[k - 1u] = gs;
                     }
@@ -25245,7 +25787,7 @@ void stream_poll()
                     ti.cur_game_frame = s.game_frames;
                     ti.prev_eval_gf = (gnow > mv_elapsed) ? gnow - mv_elapsed : 0ull;
                     ti.produced = s.produced; ti.elapsed = (unsigned)mv_elapsed;
-                    ti.mvec_valid_live = s.mvec_slot_valid[slot].load(std::memory_order_acquire) != 0u;
+                    ti.mvec_valid_live = s.mvec_packets.valid(slot, f);
                     { bool known = false;
                       const bool sv = mgpu::tdiag::seal_mvec_valid(slot, f, known);
                       ti.mvec_valid_seal = known ? sv : ti.mvec_valid_live; ti.seal_known = known; }
@@ -25272,31 +25814,6 @@ void stream_poll()
                     ji.nr_reset = tdec.reset ||
                                   ((jct.have & mgpu::calibrator::KEY_RESET) != 0u && jct.reset != 0u);
                     jout = mgpu::tdiag::jitter_decide(ji);
-                }
-                // R323 (HistoryGate=1): one decision per consumed frame, every pass follows it.
-                bool gate_rst = false;
-                if (g_hist_gate.load(std::memory_order_relaxed) != 0)
-                {
-                    const int gd = (int)s.slot_dlss[slot].load(std::memory_order_acquire);
-                    const bool no_dlss = (gd == 0);   // -1: no table on this title, the gate cannot tell, history as before
-                    gate_rst = no_dlss || s.gate_break;
-                    if (no_dlss && !s.gate_break)
-                    {
-                        ++s.gate_stretches; s.gate_since = f;
-                        if (s.gate_stretches <= 3u)
-                        {
-                            char gl[200];
-                            snprintf(gl, sizeof gl, "[MGPU][R323] no DLSS from the game at f=%llu: Reset=1 on every pass until it returns (stretch %u).", f, s.gate_stretches);
-                            mgpu::diag::info(gl);
-                        }
-                    }
-                    else if (!no_dlss && s.gate_break && s.gate_stretches <= 3u)
-                    {
-                        char gl[200];
-                        snprintf(gl, sizeof gl, "[MGPU][R323] DLSS is back at f=%llu after %llu frame(s): one more Reset=1, then history from the game.", f, f - s.gate_since);
-                        mgpu::diag::info(gl);
-                    }
-                    s.gate_break = no_dlss;
                 }
                 for (unsigned pi = 0; pi < npass; ++pi)
                 {
@@ -25462,11 +25979,8 @@ void stream_poll()
                     // and call it the whole frame. R30 established that each
                     // input carries its own subrect; this is the input that
                     // makes that mandatory rather than tidy.
-                    // R309: stepped aside - the zero field (tex_mvec) through the synthetic branch below,
-                    // fresh vectors or not. Exactly what MVec=1 with MVecDX=MVecDY=0 binds.
-                    const bool r309_zero = r311e_zero && s.r309_zero_ready && s.mvec_mode == 3;   // R311e: zero until R280's verdict, or stepped aside
-                    if (!r309_zero && s.mvec_mode == 3 && s.tex_mvec_r[ii] != nullptr &&
-                        s.mvec_bytes2 != 0 && s.mvec_slot_valid[slot].load(std::memory_order_acquire) != 0u &&
+                    if (s.mvec_mode == 3 && s.tex_mvec_r[ii] != nullptr &&
+                        s.mvec_bytes2 != 0 && s.mvec_packets.valid(slot, f) &&
                         tdec.bind_mvec)   // R300a1: false only with TemporalRequireTuple=1 on an incoherent tuple
                     {
                         // R217: the chained field on a late frame, in place of
@@ -25481,7 +25995,7 @@ void stream_poll()
                         // motion while frame generation is active (fg_frac is
                         // 1.0 otherwise). With a thinned frame before this one
                         // mv_el is 2 and the product is one rendered step.
-                        const float mv_k = cv_here ? 1.0f : ((t119_temporal && !own_el) ? tdec.mv_k : mv_el) * fg_frac;   // R217 / R300a1: tdec.mv_k == mv_el unless TemporalMV=single
+                        const float mv_k = aligned_mode ? 1.0f : (cv_here ? 1.0f : ((t119_temporal && !own_el) ? tdec.mv_k : mv_el) * fg_frac);
                         s.nr_params->Set("DLSSNR.MVecScaleX", s.mvec_scale_x * mv_k);
                         s.nr_params->Set("DLSSNR.MVecScaleY", s.mvec_scale_y * mv_k);
                         if (jout.apply)   // R300a7 (JitterSlot=1 only): the SLOT delta replaces R104's for this evaluate
@@ -25507,9 +26021,9 @@ void stream_poll()
                             : (unsigned int)s.mvec_h);
                         if (pi == 0 && sk == 0) ++s.mvec_bound;
                     }
-                    else if (!r309_zero && s.mvec_mode == 3 && fg_act && s.tex_mvec_keep != nullptr &&
+                    else if (s.mvec_mode == 3 && fg_act && s.tex_mvec_keep != nullptr &&
                              s.mvec_keep_f != 0ull &&
-                             f - s.mvec_keep_f <= (unsigned long long)mgpu::fgmap::reuse_window())
+                             f - s.mvec_keep_f <= (unsigned long long)fg_policy.reuse_seals)
                     {
                         // D2.0 NR2: frame generation is active and this seal
                         // brought no fresh vector. Generated or real (NR3b:
@@ -25539,7 +26053,7 @@ void stream_poll()
                             : (unsigned int)s.mvec_h);
                         if (pi == 0 && sk == 0) { ++s.mvec_bound; mgpu::fgmap::on_reuse(); }
                     }
-                    else if (!r309_zero && s.mvec_mode == 3)
+                    else if (s.mvec_mode == 3)
                     {
                         // R61's rule, applied to motion. The bind hook did not
                         // fire this frame - a menu, a load screen. UNSET it.
@@ -25653,6 +26167,13 @@ void stream_poll()
                     // now a setting rather than an edit, because which passes
                     // keep history is exactly the variable in question.
                     unsigned rst = s.nr_first ? 1u : 0u;
+                    if (neural_settings_change != 0u) rst = 1u;
+                    if (aligned_reset) rst = 1u;
+                    if ((s.nr_guide_mask & 1u) == 0u)
+                        s.nr_params->Set("DLSSNR.MVec", (ID3D12Resource *)nullptr);
+                    if ((s.nr_guide_mask & 2u) == 0u)
+                        s.nr_params->Set("DLSSNR.Depth", (ID3D12Resource *)nullptr);
+                    if (s.nr_reset_each_frame) rst = 1u;
                     if (vr_flip) rst = 1u;   // R217
                     if (s.pass_reset == 2) rst = 1u;
                     else if (s.pass_reset == 1 && pi > 0) rst = 1u;
@@ -25660,7 +26181,20 @@ void stream_poll()
                     if (p1f_here && s.p1f_fresh[fidx]) rst = 1u;           // R214
                     if (p2f_here && s.p2f_fresh[fidx]) rst = 1u;           // R215
                     if (tdec.reset) rst = 1u;   // R300a1: TemporalResetK, off unless set
-                    if (gate_rst) rst = 1u;     // R323: no history across frames the game's DLSS did not evaluate
+                    if (aligned_mode)
+                    {
+                        const auto &guides = s.aligned_constants[slot];
+                        const auto motion_scale = guides.motion_subrect_scale(s.mvec_w, s.mvec_h);
+                        s.nr_params->Set("DLSSNR.MVec", (s.nr_guide_mask & 1u) ? s.tex_mvec_r[ii] : nullptr);
+                        s.nr_params->Set("DLSSNR.MVecScaleX", motion_scale[0]);
+                        s.nr_params->Set("DLSSNR.MVecScaleY", motion_scale[1]);
+                        s.nr_params->Set("DLSSNR.MVecOffsetX", 0.0f);
+                        s.nr_params->Set("DLSSNR.MVecOffsetY", 0.0f);
+                        s.nr_params->Set("MV.Offset.X", 0.0f);
+                        s.nr_params->Set("MV.Offset.Y", 0.0f);
+                        s.nr_params->Set("DLSSNR.DepthInverted", unsigned(guides.depth_inverted));
+                        if (guides.reset) rst = 1u;
+                    }
                     s.nr_params->Set("DLSSNR.Reset", rst);
                     // [OURS] NRS: a feature rebuilt by a live scale change has no history;
                     // the first evaluate on it must discard whatever the module still has.
@@ -25747,13 +26281,21 @@ void stream_poll()
                     // and the composition, and those are game dependent.
                     LARGE_INTEGER nrs_t0{}; LARGE_INTEGER nrs_fq{};
                     if (nrs_here) { QueryPerformanceFrequency(&nrs_fq); QueryPerformanceCounter(&nrs_t0); }
-                    // R316: the residual pass module, same plain-full-frame shape as nrs_here, on
-                    // ITS pass. Never both: the module stays off when NRScale is set. Off: one
-                    // relaxed load.
-                    const bool rsd_here = mgpu::residual::active() && pi == mgpu::residual::pass() &&
-                                          sk == 0u && !p2f && !p1f_here && !vr_c && !vr_wh && !nr16_on &&
-                                          ew == s.width && eh == s.height && !s.nrs_on;
-                    if (rsd_here) mgpu::residual::before(s.nl, ii, s.nr_params, nr_color);
+
+                    if (aligned_mode && pi < mgpu::neural_history::max_passes)
+                    {
+                        unsigned applied_reset = 0;
+                        if (s.nr_params->Get("DLSSNR.Reset", &applied_reset) == NVSDK_NGX_Result_Success && applied_reset != 0u)
+                            neural_reset_pass_mask |= 1u << pi;
+                        if (s.nr_params->Get("DLSSNR.Intensity", &neural_bound_strengths[pi]) == NVSDK_NGX_Result_Success)
+                            neural_bound_strength_mask |= 1u << pi;
+                        if (pi == 0u)
+                            neural_motion_binding_valid =
+                                s.nr_params->Get("DLSSNR.MVecScaleX", &neural_bound_motion_scale[0]) == NVSDK_NGX_Result_Success &&
+                                s.nr_params->Get("DLSSNR.MVecScaleY", &neural_bound_motion_scale[1]) == NVSDK_NGX_Result_Success &&
+                                s.nr_params->Get("DLSSNR.MVecSubrectWidth", &neural_motion_width) == NVSDK_NGX_Result_Success &&
+                                s.nr_params->Get("DLSSNR.MVecSubrectHeight", &neural_motion_height) == NVSDK_NGX_Result_Success;
+                    }
 
                     const NVSDK_NGX_Result er =
                         s.nr_eval(s.nl, ngx_h, s.nr_params, nullptr);
@@ -25783,13 +26325,6 @@ void stream_poll()
                                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, true);
                         ID3D12Resource *nrs_depth = nullptr;
                         (void)s.nr_params->Get("DLSSNR.Depth", &nrs_depth);
-                        // NRScaleResolveDepth=0: the composite runs without its depth guard, as
-                        // when no depth is bound; NGX above still gets depth. On Starfield
-                        // (3840x2160, NRScale=0.75, Depth=1) the guard - native depth at 5 taps,
-                        // residual cut to 25% above a 0.02 relative range - put vertical stripes
-                        // and a dark veil on the shadowed side of faces. The bind line below then
-                        // reports depth=0.
-                        if (!s.nrs_res_depth) nrs_depth = nullptr;
                         // Depth is a GIFT, not a given: the proxy validates it before
                         // binding (SRV allowed, and the size must be the native one)
                         // and falls back to a harmless SRV with hasDepth=0 otherwise.
@@ -25976,10 +26511,6 @@ void stream_poll()
                             mgpu::diag::info(nsl);
                         }
                     }
-                    if (rsd_here)   // R316: resolve into dst, then the caller's bindings back
-                        mgpu::residual::after(s.nl, ii, s.nr_params, nr_color, nr_output,
-                                              er == NVSDK_NGX_Result_Success, nr_color, nr_output,
-                                              s.width, s.height, rbx, rby, rw, rh);
                     if (p2f)
                     {
                         s.nr_params->Set("DLSSNR.Width",  (unsigned int)s.width);
@@ -26203,7 +26734,12 @@ void stream_poll()
                 }
                 if (s.ev_ok && s.ev_count > 0u)
                     s.nl->ResolveQueryData(s.evheap, D3D12_QUERY_TYPE_TIMESTAMP, 0,
-                                           s.ev_count + 1u, s.evread, 0);
+                                           s.ev_count + 1u, job_readback ? job_readback->evaluations.Get() : s.evread, 0);
+                if (job_readback != nullptr)
+                {
+                    job_readback->evaluation_count = s.ev_count;
+                    std::copy_n(s.ev_role, stream_state::EV_MAX, job_readback->evaluation_roles.begin());
+                }
                 s.nr_first = false;
                 // P6.4: `passes` can change between frames now, so the final
                 // texture is recomputed here rather than fixed at arm time.
@@ -26307,6 +26843,8 @@ void stream_poll()
                 ID3D12Resource *const vr_keep = s.nr_final;   // R216
                 if (final_pass_ok)
                 {
+                    aligned_evaluation_recorded = aligned_mode;
+                    if (!vr_c || vr_done || vr_keep == nullptr) s.nr_final_frame = f;
                     // C2-SR writes the display-extent result into tex_out
                     // whatever the pass parity did at R, so the presenter takes
                     // tex_out directly rather than the ping-pong winner.
@@ -26334,6 +26872,93 @@ void stream_poll()
                     }
                 }
 
+                if (mgpu::official_bridge::selected() && final_pass_ok && !s.sr_ready && !vr_c && !vr_wh &&
+                    !p1f_on && !p2f_on && ew == s.width && eh == s.height &&
+                    s.fg_camera_seal[slot] == f && depth_here && mvec_here &&
+                    !mgpu::fgmap::fg_presented_active() && !fg_gen)
+                {
+                    std::array<mgpu::official_fg::texture_binding, mgpu::official_fg::shared_planes> resources{{
+                        {s.nr_final, D3D12_RESOURCE_STATE_UNORDERED_ACCESS},
+                        {s.tex_depth[ii], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE},
+                        {s.tex_mvec_r[ii], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE}
+                    }};
+                    official_recorded = mgpu::official_bridge::record(s.nl, static_cast<HWND>(dcomp_game_hwnd()),
+                        resources, static_cast<std::uint32_t>(s.slot_game_frame[slot]),
+                        s.aligned_constants[slot].key.viewport, s.fg_camera[slot],
+                        s.aligned_constants[slot].camera.min_depth_separation, neural_reset_pass_mask != 0);
+                }
+
+                if (s.fg_ready && final_pass_ok && !s.sr_ready && !vr_c && !vr_wh &&
+                    !p1f_on && !p2f_on && ew == s.width && eh == s.height &&
+                    s.fg_camera_seal[slot] == f && depth_here && mvec_here &&
+                    !mgpu::fgmap::fg_presented_active() && !fg_gen)
+                {
+                    const auto &camera = s.fg_camera[slot];
+                    mgpu::secondary_fg::frame_resources frame{};
+                    const auto source_frame = mgpu::aligned::enabled() ? s.slot_game_frame[slot] : camera.frame_id;
+                    frame.contract.frame_id = source_frame;
+                    frame.contract.depth_frame_id = source_frame;
+                    frame.contract.motion_frame_id = source_frame;
+                    frame.contract.camera_frame_id = camera.frame_id;
+                    frame.contract.capture_ns = camera.capture_ns;
+                    frame.contract.neural_output = true;
+                    frame.contract.depth_valid = true;
+                    frame.contract.motion_valid = true;
+                    frame.contract.camera_valid = camera.valid != 0u;
+                    frame.contract.camera_values_valid = true;
+                    frame.contract.reset = camera.reset != 0u || camera.automode_override_reset != 0u ||
+                        neural_reset_pass_mask != 0u;
+                    frame.contract.normalized_motion_scale_x = camera.mvec_scale[0];
+                    frame.contract.normalized_motion_scale_y = camera.mvec_scale[1];
+                    frame.neural_color = {s.nr_final, D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+                    frame.depth = {s.tex_depth[ii], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
+                    frame.motion = {s.tex_mvec_r[ii], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
+                    frame.motion_vectors_jittered = camera.mvec_jittered != 0u;
+                    frame.camera_available = true;
+                    for (unsigned output = 0; output < mgpu::secondary_fg::max_generated_frames; ++output)
+                        frame.interpolated[output] = {s.fg_interpolated[pipeline_slot][output], D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+                    frame.generated_count = mgpu::secondary_fg::generated_frame_count(s.fg_multiplier);
+                    frame.disable_interpolation = {s.fg_disable_interpolation, D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+                    if (frame.camera_available) stream_secondary_fg_camera(camera, frame.camera);
+                    if (mgpu::aligned::enabled())
+                        frame.camera.minRelativeLinearDepthObjectSeparation =
+                            s.aligned_constants[slot].camera.min_depth_separation;
+                    barrier(s.nl, s.fg_disable_interpolation, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                            D3D12_RESOURCE_STATE_COPY_DEST);
+                    s.nl->CopyBufferRegion(s.fg_disable_interpolation, 0, s.fg_hint_upload, 0, 16u);
+                    barrier(s.nl, s.fg_disable_interpolation, D3D12_RESOURCE_STATE_COPY_DEST,
+                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    const auto result = s.fg_stage.record(s.nl, frame, s.fg_decision);
+                    fg_recorded = s.fg_stage.recording();
+                    s.fg_eval_ok = !NVSDK_NGX_FAILED(result) && s.fg_decision.evaluate;
+                    s.fg_frame_id = frame.contract.frame_id;
+                    s.fg_seal_frame = f;
+                    if (fg_recorded)
+                    {
+                        s.fg_evaluations += frame.generated_count;
+                        barrier(s.nl, s.fg_disable_interpolation, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                D3D12_RESOURCE_STATE_COPY_SOURCE);
+                        s.nl->CopyBufferRegion(s.fg_hint_readback, 0, s.fg_disable_interpolation, 0, 16u);
+                        barrier(s.nl, s.fg_disable_interpolation, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                D3D12_RESOURCE_STATE_COMMON);
+                    }
+                    else
+                        barrier(s.nl, s.fg_disable_interpolation, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    if (!s.fg_eval_ok && ++s.fg_rejected <= 3ull)
+                    {
+                        snprintf(line, sizeof line, "[MGPU][FG2] record rejected f=%llu ngx=0x%08X reason=%u; using NR output.",
+                                 f, (unsigned)result, (unsigned)s.fg_decision.reason);
+                        mgpu::diag::warn(line);
+                    }
+                }
+                else if (s.fg_ready)
+                {
+                    s.fg_stage.invalidate_history();
+                    if (++s.fg_rejected <= 3ull)
+                        mgpu::diag::warn("[MGPU][FG2] no exclusive real-frame color/depth/MV tuple; upstream FG or missing guides prevents secondary FG. Original NR output retained.");
+                }
+
                 if (s.ts_ok) s.nl->EndQuery(s.tsheap, D3D12_QUERY_TYPE_TIMESTAMP, 3);
 
                 // ---- the readback probe's per-frame hook -------------------------
@@ -26346,6 +26971,7 @@ void stream_poll()
                 {
                     nrs_probe_collect(s);
                     nrs_probe_issue(s, ii, s.nr_final);
+                    probe_recorded = true;
                 }
 
                 if (!s.profile)
@@ -26363,7 +26989,7 @@ void stream_poll()
                 ss.pResource = fin;
                 ss.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
                 ss.SubresourceIndex = 0;
-                sd.pResource = s.nr_read;
+                sd.pResource = job_readback ? job_readback->sample.Get() : s.nr_read;
                 sd.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
                 sd.PlacedFootprint = s.nr_fp;
                 D3D12_BOX box{ 0, 0, 0, 64, 4, 1 };
@@ -26395,7 +27021,7 @@ void stream_poll()
                 // has a standing note about; it is written the same way as
                 // depth's so the two cannot drift apart.
                 if (s.mvec_mode == 3 && s.tex_mvec_r[ii] != nullptr &&
-                    s.mvec_bytes2 != 0 && s.mvec_slot_valid[slot].load(std::memory_order_acquire) != 0u)
+                    s.mvec_bytes2 != 0 && s.mvec_packets.valid(slot, f))
                 {
                     if (fg_act && s.tex_mvec_keep != nullptr)
                     {
@@ -26425,6 +27051,13 @@ void stream_poll()
                                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, s.tex_in_rest);
                 }
 
+                if (submit_async && aligned_evaluation_recorded)
+                {
+                    s.snapshots.record(s.nl, pipeline_slot, s.tex_in[ii], s.tex_in_rest, s.nr_final);
+                    if (f % 120ull == 0ull)
+                        (void)job_readback->difference.record(s.nl, s.snapshots.input(pipeline_slot),
+                            s.snapshots.output(pipeline_slot));
+                }
                 if (s.ts_ok) s.nl->EndQuery(s.tsheap, D3D12_QUERY_TYPE_TIMESTAMP, 4);
             }
 
@@ -26433,9 +27066,42 @@ void stream_poll()
             // would not be in the buffer we map.
             if (s.ts_ok && run_nr)
                 s.nl->ResolveQueryData(s.tsheap, D3D12_QUERY_TYPE_TIMESTAMP, 0,
-                                       stream_state::TS_MARKS, s.tsread, 0);
+                                       stream_state::TS_MARKS, job_readback ? job_readback->timestamps.Get() : s.tsread, 0);
 
             h = s.nl->Close();
+        }
+        if (SUCCEEDED(h) && submit_async)
+            h = aligned_evaluation_recorded ? s.snapshots.wait_for_read(s.nq, pipeline_slot) : E_FAIL;
+        if (SUCCEEDED(h) && use_cq && s.cqf != nullptr)
+            h = s.nq->Wait(s.cqf, s.cqa_value[ii]);
+        const auto previous_neural_fence = submit_async && s.pipeline.pending()
+            ? s.pipeline.latest().fence : 0ull;
+        bool previous_neural_unfinished = false;
+        if (SUCCEEDED(h) && submit_async)
+        {
+            mgpu::neural_pipeline::job next;
+            next.seal = f;
+            next.fence = s.nf_value + 1ull;
+            next.submitted_ms = GetTickCount64();
+            next.ring_slot = slot;
+            next.input_index = ii;
+            next.snapshot = pipeline_slot;
+            next.engine_frame = static_cast<unsigned>(s.slot_game_frame[slot]);
+            next.copy_queue = use_cq;
+            next.settings = neural_settings;
+            next.settings_change = neural_settings_change;
+            next.reset_pass_mask = neural_reset_pass_mask;
+            next.bound_strengths = neural_bound_strengths;
+            next.bound_strength_mask = neural_bound_strength_mask;
+            next.bound_motion_scale = neural_bound_motion_scale;
+            next.motion_width = neural_motion_width;
+            next.motion_height = neural_motion_height;
+            next.motion_binding_valid = neural_motion_binding_valid;
+            next.measurement_session = s.slot_measurement_session[slot];
+            next.measurement_submitted_ms = mgpu::timing::cpu_ms(mgpu::timing::cpu_ticks());
+            if (s.ts_ok) next.neural_clock = s.neural_clock_cache.sample(s.nq, mgpu::timing::cpu_ticks());
+            if (use_cq && s.cq_ts_ok) next.copy_clock = s.copy_clocks[ii];
+            if (!s.pipeline.begin(next)) h = E_FAIL;
         }
         if (SUCCEEDED(h))
         {
@@ -26446,15 +27112,50 @@ void stream_poll()
             // barrier that a copy queue is not allowed to record happens on
             // this side of it.
             if (mgpu::t119::perf_active()) mgpu::perf::job_recorded();   // R300e1
-            if (use_cq && s.cqf != nullptr) (void)s.nq->Wait(s.cqf, (UINT64)f);
+            if (previous_neural_fence != 0 && s.nf != nullptr)
+                previous_neural_unfinished = s.nf->GetCompletedValue() < previous_neural_fence;
             ID3D12CommandList *const ls[1] = { s.nl };
             s.nq->ExecuteCommandLists(1, ls);
+            official_submitted = official_recorded;
+            fg_submitted = fg_recorded;
             ++s.nf_value;
             h = s.nq->Signal(s.nf, s.nf_value);
+            if (SUCCEEDED(h) && official_recorded && !mgpu::official_bridge::submitted(s.nq)) h = E_FAIL;
+            if (SUCCEEDED(h) && submit_async) s.async_na_value[pipeline_slot] = s.nf_value;
+            if (SUCCEEDED(h) && probe_recorded) s.probe_read_fence = s.nf_value;
+            if (SUCCEEDED(h) && fg_recorded)
+            {
+                s.fg_pending = s.fg_stage.track_submission(s.nf, s.nf_value);
+                if (!s.fg_pending) h = E_FAIL;
+            }
             if (mgpu::t119::perf_active()) mgpu::perf::job_exec(use_cq);   // R300e1
+            if (SUCCEEDED(h) && submit_async)
+            {
+                // Keep the producer cursor moving while the FIFO owns this
+                // command list, textures and snapshot slot. Retirement and
+                // presentation stay ordered in the poll prologue.
+                ++s.async_submitted;
+                if (f > completed) ++s.async_before_arrival;
+                if (previous_neural_unfinished) ++s.async_submitted_while_pending;
+                s.async_inflight_peak = (std::max)(s.async_inflight_peak, s.pipeline.inflight());
+                if (s.async_submitted <= 3ull || s.async_submitted % 120ull == 0ull ||
+                    (previous_neural_unfinished && s.async_submitted_while_pending == 1ull))
+                {
+                    char report[480];
+                    std::snprintf(report, sizeof report,
+                        "[MGPU][PIPE3-SCHED] submitted=%llu seal=%llu inflight=%u peak=%u "
+                        "submitted_while_pending=%llu previous_fence_unfinished=%u "
+                        "pending_input=%llu submitted_before_observed_arrival=%llu; ordered queue occupancy, not simultaneous neural kernels",
+                        s.async_submitted, f, s.pipeline.inflight(), s.async_inflight_peak,
+                        s.async_submitted_while_pending, unsigned(previous_neural_unfinished),
+                        s.produced - s.pipeline.scheduled_seal(), s.async_before_arrival);
+                    mgpu::diag::info(report);
+                }
+                continue;
+            }
             if (SUCCEEDED(h))
             {
-                s.nf->SetEventOnCompletion(s.nf_value, s.nev);
+                const HRESULT event_hr = s.nf->SetEventOnCompletion(s.nf_value, s.nev);
                 // DEFECT E. THE ONLY BLOCKING CALL IN THIS FUNCTION, AND IT
                 // RUNS WITH THE MUTEX RELEASED. What the game thread does while
                 // we are here is exactly what it should be free to do: record
@@ -26469,36 +27170,67 @@ void stream_poll()
                 // iteration names it. Being lapped is a fact about our speed;
                 // blocking the game to avoid it never was.
                 lk.unlock();
-                const DWORD wr = WaitForSingleObject(s.nev, 5000);
+                const DWORD wr = SUCCEEDED(event_hr) ? WaitForSingleObject(s.nev, 5000) : WAIT_FAILED;
                 lk.lock();
                 if (mgpu::t119::perf_active()) mgpu::perf::job_done();   // R300e1
-                if (wr != WAIT_OBJECT_0)
-                {
-                    h = E_FAIL;
-                    const unsigned long long r311b_now = GetTickCount64();   // R311b: see the copy-queue wait above
-                    if (r311b_now - s.r311b_last_ms >= 10000ull)
-                    {
-                        s.r311b_last_ms = r311b_now;
-                        char tl[300];
-                        snprintf(tl, sizeof tl, "[MGPU][R311b] GPU 1 FENCE TIMEOUT (evaluate): waited 5000 ms for fence %llu, completed %llu, f=%llu - "
-                                                "the frame is counted consumed and the poll goes on. If this repeats, GPU 1 is not finishing the evaluate; "
-                                                "the bridge picture freezes meanwhile.",
-                                 (unsigned long long)s.nf_value, (unsigned long long)s.nf->GetCompletedValue(), (unsigned long long)f);
-                        mgpu::diag::warn(tl);
-                    }
-                }
+                if (wr != WAIT_OBJECT_0) h = E_FAIL;
+                if ((s.fg_requested || mgpu::aligned::enabled()) && (s.nf->GetCompletedValue() == UINT64_MAX ||
+                                      s.nf->GetCompletedValue() < s.nf_value)) h = E_FAIL;
             }
         }
-        if (FAILED(h)) { if (mgpu::t119::perf_active()) mgpu::perf::job_abort(); s.consumed = f; continue; }   // R300e1
+        if (FAILED(h))
+        {
+            if (official_recorded) mgpu::official_bridge::submission_failed(official_submitted);
+            if (mgpu::t119::perf_active()) mgpu::perf::job_abort();
+            if (mgpu::aligned::enabled())
+            {
+                s.finished = true;
+                s.aligned_history_valid = false;
+                g_present_read_fault.store(true);
+                mgpu::diag::error("[MGPU][R323-ALIGN] neural submission did not complete; stream held without reusing in-flight buffers");
+                return;
+            }
+            s.consumed = f;
+            if (s.fg_requested)
+            {
+                if (fg_recorded && !fg_submitted) (void)s.fg_stage.cancel_recording();
+                s.fg_queue_fault = true;
+                s.finished = true;
+                s.fg_output_valid = false;
+                s.mvec_live.store(false, std::memory_order_release);
+                mgpu::diag::error("[MGPU][FG2] GPU submission/completion failed; stopping stream without reusing its allocator or output textures.");
+                return;
+            }
+            continue;
+        }
+        if (s.fg_ready && !stream_secondary_fg_complete(s, f)) return;
 
+        if (mgpu::aligned::enabled())
+        {
+            s.aligned_history_valid = aligned_evaluation_recorded;
+            if (aligned_evaluation_recorded)
+            {
+                s.aligned_history_frame = static_cast<unsigned>(s.slot_game_frame[slot]);
+                s.nr_last_eval_fi = s.slot_game_frame[slot];
+                s.neural_settings_history.complete(neural_settings);
+            }
+        }
         // D1: one checker, two callers. See seal_consume.
         seal_consume(s, f, slot, run_nr, use_cq, ii);
         s.consumed = f;
         if (mgpu::t119::perf_active()) { mgpu::perf::job_end(s.produced); mgpu::perf::periodic(s.consumed); }   // R300e1
+        if (s.fg_requested && f % 300ull == 0ull)
+        {
+            snprintf(line, sizeof line, "[MGPU][FG2] f=%llu ready=%u evaluate=%llu rejected=%llu presented_interpolated=%llu presented_real=%llu pending=%u",
+                     f, s.fg_ready ? 1u : 0u, s.fg_evaluations, s.fg_rejected,
+                     s.fg_generated_presents, s.fg_real_presents, s.fg_pair.pending() ? 1u : 0u);
+            mgpu::diag::info(line);
+        }
+        if (s.fg_pair.pending()) break;
     }
 
     // ---- summary, once, after the producer has stopped and drained ----
-    if (s.finished && s.consumed >= s.produced && !s.summarised)
+    if (!t_consumer_poll && s.finished && s.consumed >= s.produced && !s.summarised && !s.fg_pair.pending() && !s.pipeline.ready())
     {
         s.summarised = true;
         s.ll_due_summary = true;   // R267b: written off the lock at the tail of this stream_poll

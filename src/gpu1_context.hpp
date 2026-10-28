@@ -7,6 +7,9 @@
 // and swapchain arrive with T4/T5.
 #pragma once
 
+namespace mgpu::gpu1 { void sync_official_output_visibility(); }
+#include "motion_frame_packet.hpp"
+
 #include <windows.h>
 
 #include "adapter.hpp"
@@ -66,10 +69,6 @@ namespace mgpu::gpu1
     // V53. Roots the composition visual on the first frame carrying neural
     // output, so the idle screen never blacks out the game. Bridge thread.
     void dcomp_root_on_first_neural_frame();
-    // R313 DcompSafeMode: applies the overlay thread's root/unroot request and
-    // the value-3 deferred root. Bridge thread, every loop pass. Keys absent:
-    // two relaxed loads.
-    void dcomp_apply_pending();
     // V52. CTRL+ALT+F6. Unroots the visual so the GAME's own ReShade overlay -
     // which is behind it by construction - can be reached, and roots it again.
     // Returns whether the bridge is on screen AFTER the call. Bridge thread.
@@ -387,38 +386,18 @@ unsigned autoarm_frames();
 unsigned long long game_effects_frames();   // finish_effects events seen, armed or not
 void set_mvec_eligible_count(unsigned n);   // R278: probe's eligible velocity candidates, via dllmain
 void set_mvec_extract_active(bool on);     // R280c: mvec_extract's virtual target exists (units uv by construction; no verdict keys on that path)
-bool mvec_extract_stand_down();            // R311d: the judge stepped aside from R280's vectors - R280 goes inert for the session
-void set_mvec_sweep(bool on);              // R307: MVecSweep test mode - R258 scores each setting, changes nothing
-void set_mvec_sweep_combo(unsigned id);    // R307: the setting mvec_extract has in force (its number)
 int  mvec_extract_edge_request();         // R280e: which write edge of the source the module should hold (0 = last of the frame, 1 = first) - the judge decides
 void set_mvec_extract_edges(unsigned n);  // R280e: the module reports the last frame's write-edge count
 void set_mvec_extract_deciding(bool on); // R280j: armed, no source yet, candidates being written - the arm's hold does not count these frames (bounded by the module's give-up)
 // R280k: a contract title = the game's NGX Init was seen OR the calibrator holds the game's
 // own NGX table (DW-R1: Dawnwalker's Init never reaches the hook, its table does). Lock-free.
 bool game_contract_seen();
-// R311: game_contract_seen() for the VECTOR path only - false when MVecSource is set (key absent: identical).
-bool vectors_contract();
-int  mvec_source_in_force();   // R311: MVecSource as stored (0 until the hold or R280's arm read it)
 // R280o. dllmain brackets the R277 tap with this (game render thread): a
 // motion-vector copy made inside the bracket, on that thread, is a TAP copy and
 // is counted apart, so R118's "the barrier route produced zero copies" is not
 // defeated by the tap's own copies (SF-R1). Thread-local: barrier-route copies
 // on the engine's recording threads and evaluate-route copies are never tagged.
 void tap_copy_scope(bool on);
-// R312 (DepthTransport). depth_transport(): the key, 1..4 (absent = 1). r312_set_target: dllmain, once,
-// the geometry it pushed into the tap's .fx; the arm then holds for depth until the tap matches it.
-int depth_transport();
-void r312_set_target(unsigned w, unsigned h, unsigned fmt);
-// R315: dllmain hands over the probe's MVecBarrierSource key and its fire count, each game frame, key on only.
-void r315_note(int on, unsigned long long fires);
-// R315b (value 2): the judge's phase (0 window, 1 the tail carries, 2 the transition carries) and the
-// scope dllmain sets around the probe's tail copy.
-int  r315_phase();
-void r315_tail_scope(bool on);
-// R323 (HistoryGate=1): dllmain's per-game-frame fact - the game's own DLSS evaluated for this frame
-// (1), did not (0), no table to tell (-1). history_gate(): the key, read at arm (one relaxed load).
-void note_game_dlss(int evaluated);
-int  history_gate();
 int mvec_tap_live();   // R278b: tap mode the first-launch learning turned on (0 = none)
 void set_mvec_neighbours(int cur, int next_same, int next_class);   // R278f: from probe, via dllmain
 int mvec_candidate_request();   // R278f: the learning's live switch (-1 = none)
@@ -469,6 +448,14 @@ struct ui_state
 {
     bool armed = false, summarised = false, neural = false, nr_ok = false;
     bool profile = false;
+    bool fg_requested = false, fg_ready = false;
+    unsigned fg_multiplier = 2;
+    unsigned fg_runtime_max_multiplier = 0;
+    bool fg_capability_reported = false;
+    unsigned long long fg_evaluations = 0, fg_generated_presents = 0, fg_real_presents = 0;
+    bool fg_official_route = false, fg_rates_valid = false, fg_rates_last_visible = false;
+    double fg_real_fps = 0, fg_sdk_fps = 0, fg_effective_multiplier = 0, fg_source_age_ms = -1;
+    unsigned long long fg_rates_age_ms = 0;
     // P7.4: 0 = neural output, 1 = the frame handed TO the model, 2 = split
     // (left half input, right half output, the same frame).
     int present_mode = 0;
@@ -635,9 +622,6 @@ void ui_set_passes(unsigned n);
 
 // pass_1based == 0 sets every pass; otherwise that one. Clamped 0.0..2.0.
 void ui_set_intensity(unsigned pass_1based, float v);
-// R300n: PanelPersist=1 only - writes the value to mgpu.ini once (the panel calls it when the
-// slider is released), with no lock held. No-op without PanelPersist=1.
-void ui_persist_intensity(unsigned pass_1based, float v);
 
 // P7.9. The DLSS-NR tuning parameters, names and types taken from the feature's
 // programming guide rather than guessed:
@@ -766,10 +750,6 @@ bool ui_ini_write(const char *key, int value);
 // the two disagree until the next launch, and that difference is the whole
 // point of showing it.
 int ui_ini_read(const char *key, int dflt);
-// R309: MVecStepAside as the file has it - 0 (absent or 0), 1 (forced zero field), 2 (auto, the
-// judge). Read from the file itself, never through ui_ini_read's mirror. mvec_extract uses it.
-int mvec_step_aside_mode();
-int mvec_source_mode();   // R311: MVecSource 0..3 from the file; stores it for the hot paths
 
 // R219. ScaleMode and CropAuto as the file has them, parsed exactly as the arm
 // does (ScaleMode crop|whole or 1|2; CropAuto 0|off|false turns it off).
@@ -782,7 +762,6 @@ void ui_ini_read_crop(unsigned &mode, bool &crop_auto);
 bool ui_ini_write_float(const char *key, float value);
 // T1.19 (Dom, T1.17): a word value, same writer. Used only by PanelPersist=1.
 bool ui_ini_write_word(const char *key, const char *value);
-void ui_ini_read_word(const char *key, char *out, size_t n);   // R311: a short word value from the file, empty when absent
 
 // ---- V46: THE INSTALL LAYOUT, AND IT IS NOT A COSMETIC WARNING ----
 //
@@ -829,7 +808,6 @@ void ui_split_move(int dir, bool coarse);
 
 // P7.5. Absolute seam position for the panel slider, 0.0 .. 1.0.
 void ui_set_split_pos(float v);
-void ui_persist_split_pos(float v);   // R300n: as ui_persist_intensity, for SplitPos
 
 // P6.3. BRIDGE THREAD ONLY - both of these are called from the hotkey handler
 // in the message pump, which runs on the bridge thread, and they touch state
@@ -933,6 +911,7 @@ void stream_note_real_vectors();
 // consumer reads a slot whose copy has not landed and the SEAL checker says so
 // on the first frame - bad_magic or a contract mismatch, loudly, not silently.
 void stream_on_present(void *cmd_queue);
+void stream_finish_present(void *cmd_queue);
 
 void stream_on_finish_effects(void *cmd_list, void *cmd_queue,
                               unsigned long long rtv_handle,
@@ -961,12 +940,19 @@ void stream_mvec_copy(void *cmd_list, unsigned long long mvec_handle);
 // moment with the state the game declared in sl::Resource. The transition is recorded inside
 // stream_mvec_copy, only when the copy itself is, and the declared state is restored.
 void stream_mvec_copy_tagged(void *cmd_list, unsigned long long mvec_handle,
-                             unsigned declared_state, int lifecycle);
+                             unsigned declared_state, int lifecycle, unsigned top,
+                             unsigned left, unsigned width, unsigned height,
+                             mgpu::motion_packet::identity engine);
 
 // Bridge thread, once per present. Consumes whatever the fence says has
 // arrived, checks each seal, and prints the summary once the producer has
 // stopped and drained.
 void stream_poll();
+bool stream_consumer_ready();
+void stream_consumer_active(bool active);
+void stream_consumer_poll();
+void stream_consumer_wait(void *stop, void *timer);
+bool present_capacity_gate(unsigned timeout_ms);
 
 // P5.1. Bridge thread, called immediately before present_frame. Returns true
 // when the bridge should put a frame on screen.

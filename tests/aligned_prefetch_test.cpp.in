@@ -1,0 +1,130 @@
+#include "neural_pipeline.hpp"
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstdio>
+
+using UINT64 = unsigned long long;
+struct fake_fence
+{
+    UINT64 completed = 0;
+    UINT64 GetCompletedValue() const { return completed; }
+};
+struct stream_state
+{
+    static constexpr unsigned PIPELINE_SLOTS = mgpu::neural_pipeline::schedule::SLOTS;
+    bool async_neural = true, compatible = true, finished = false;
+    bool copy_queue = true, cq_gated = true;
+    fake_fence arrival;
+    fake_fence *nfence = &arrival;
+    void *cq = this;
+    UINT64 consumed = 0, produced = 0, max_frames = 1000;
+    UINT64 cq_issued = 0, cq_ahead = 0, cq_spec = 0;
+    std::array<UINT64, PIPELINE_SLOTS> cq_frame{};
+    mgpu::neural_pipeline::schedule pipeline;
+    bool copy_available = true, copied_reserved_input = false;
+    unsigned copy_calls = 0;
+};
+std::atomic<bool> g_present_read_fault{false};
+namespace mgpu::diag { void info(const char *) {} }
+bool stream_parallel_compatible(const stream_state &stream) { return stream.compatible; }
+bool stream_cq_submit(stream_state &stream, UINT64 seal, unsigned input_slot)
+{
+    ++stream.copy_calls;
+    stream.copied_reserved_input = stream.pipeline.reserved_seal() == seal &&
+        stream.pipeline.write_slot() == input_slot && !stream.pipeline.owns_input(input_slot);
+    if (!stream.copy_available) return false;
+    stream.cq_frame[input_slot] = seal;
+    return true;
+}
+
+@ALIGNED_PREFETCH_IMPLEMENTATION@
+
+int main()
+{
+    unsigned failures = 0;
+    const auto check = [&](bool passed, const char *name)
+    {
+        std::printf("%s: %s\n", passed ? "PASS" : "FAIL", name);
+        if (!passed) ++failures;
+    };
+    stream_state stream;
+    stream.produced = 3;
+    check(stream_schedule_target(stream, 0) == 3,
+          "neural scheduling follows submitted payloads without waiting for CPU-observed arrival");
+    stream.cq_gated = false;
+    check(stream_schedule_target(stream, 1) == 1, "ungated copies cannot authorize pre-arrival inference");
+    stream.cq_gated = true;
+    stream.compatible = false;
+    check(stream_schedule_target(stream, 1) == 1, "incompatible mode cannot schedule ahead");
+    stream.compatible = true;
+    stream.nfence = nullptr;
+    check(stream_schedule_target(stream, 1) == 1, "missing cross-adapter fence cannot schedule ahead");
+    stream.nfence = &stream.arrival;
+    stream.max_frames = 2;
+    check(stream_schedule_target(stream, 0) == 2, "submission horizon respects the configured frame limit");
+    check(stream_schedule_target(stream, UINT64_MAX) == stream.consumed, "device removal is not an infinite scheduling horizon");
+    stream.max_frames = 1000;
+    mgpu::neural_pipeline::job first{1, 10, 1, 0, 0, 0, 100, true};
+    check(stream.pipeline.begin(first), "previous neural job is in flight");
+    stream.produced = 1;
+    stream_prefetch_aligned_locked(stream);
+    check(stream.copy_calls == 0 && stream.pipeline.reserved_seal() == 0,
+          "never waits for a payload that has not been submitted");
+    stream.produced = 2;
+    stream.arrival.completed = 1;
+    stream_prefetch_aligned_locked(stream);
+    check(stream.copy_calls == 1 && stream.cq_frame[1] == 2 && stream.copied_reserved_input &&
+          stream.pipeline.pending() && stream.cq_spec == 1,
+          "next submitted payload is copied before arrival with previous inference still pending");
+    stream_prefetch_aligned_locked(stream);
+    check(stream.copy_calls == 1, "repeated polls do not duplicate a reserved copy");
+    check(stream.pipeline.publish(10), "previous inference retires independently of the copy");
+    stream.consumed = 1;
+    mgpu::neural_pipeline::job second{2, 11, 2, 1, 1, 1, 101, true};
+    check(stream.pipeline.begin(second), "neural submission adopts the prefetched identity and slot");
+    stream.produced = 3;
+    stream_prefetch_aligned_locked(stream);
+    check(stream.copy_calls == 2 && stream.cq_frame[2] == 3,
+          "display and current inference leave only the third slot for the next copy");
+    check(stream.pipeline.publish(11) && stream.pipeline.write_slot() == 2,
+          "display retirement cannot redirect prefetched pixels to a newly free lower slot");
+    stream.consumed = 2;
+    mgpu::neural_pipeline::job third{3, 12, 3, 2, 2, 2, 102, true};
+    check(stream.pipeline.begin(third), "pinned slot is adopted after display retirement");
+    stream.produced = 4;
+    stream.copy_available = false;
+    stream_prefetch_aligned_locked(stream);
+    check(stream.copy_calls == 3 && stream.pipeline.reserved_seal() == 0 && stream.cq_issued == 3,
+          "copy backpressure releases only the unsubmitted reservation without advancing identity");
+    stream.copy_available = true;
+    stream.arrival.completed = 4;
+    stream_prefetch_aligned_locked(stream);
+    check(stream.copy_calls == 4 && stream.cq_frame[0] == 4 && stream.cq_spec == 2,
+          "retry can prefetch an already arrived frame without counting it as a pre-arrival copy");
+    mgpu::neural_pipeline::job fourth{4, 13, 4, 3, 0, 0, 103, true};
+    check(stream.pipeline.begin(fourth), "retry keeps FIFO order");
+    stream.produced = 5;
+    stream_prefetch_aligned_locked(stream);
+    check(stream.copy_calls == 4, "display plus two neural jobs protects all occupied inputs");
+
+    const auto stopped = [&](auto configure, const char *name)
+    {
+        stream_state candidate;
+        candidate.produced = 1;
+        configure(candidate);
+        stream_prefetch_aligned_locked(candidate);
+        check(candidate.copy_calls == 0 && candidate.pipeline.reserved_seal() == 0, name);
+    };
+    stopped([](auto &candidate) { candidate.async_neural = false; }, "serial mode is unchanged");
+    stopped([](auto &candidate) { candidate.compatible = false; }, "incompatible modes are unchanged");
+    stopped([](auto &candidate) { candidate.finished = true; }, "stopped stream cannot prefetch");
+    stopped([](auto &candidate) { candidate.copy_queue = false; }, "disabled COPY path is unchanged");
+    stopped([](auto &candidate) { candidate.cq_gated = false; }, "ungated COPY path is unchanged");
+    stopped([](auto &candidate) { candidate.nfence = nullptr; }, "missing arrival fence blocks prefetch");
+    stopped([](auto &candidate) { candidate.cq = nullptr; }, "missing copy queue blocks prefetch");
+    stopped([](auto &candidate) { candidate.max_frames = 0; }, "frame limit blocks prefetch");
+    stopped([](auto &candidate) { candidate.arrival.completed = UINT64_MAX; }, "device removal cannot authorize a copy");
+    check(g_present_read_fault.load(), "device removal propagates a stream fault");
+    return failures == 0 ? 0 : 1;
+}

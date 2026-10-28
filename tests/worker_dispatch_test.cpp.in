@@ -1,0 +1,186 @@
+#include <array>
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include "../experimental/secondary_fg/source_lead.hpp"
+
+using ID3D12GraphicsCommandList = void;
+using ID3D12CommandQueue = void;
+using ID3D12Resource = void;
+
+namespace
+{
+unsigned acquires = 0, submits = 0, live_leases = 0;
+bool capture_enabled = true, input_ready = true, transfer_ready = true;
+bool raw_game_objects_seen = false;
+unsigned official_route_queries = 0, official_backpressure_queries = 0;
+unsigned next_engine_frame = 100;
+std::array<unsigned, 16> delivered_frames{};
+}
+
+namespace mgpu::diag
+{
+void info(const char *) {}
+}
+
+namespace mgpu::official_bridge
+{
+bool selected() { ++official_route_queries; return true; }
+bool backpressured() { ++official_backpressure_queries; return true; }
+}
+
+namespace mgpu::aligned
+{
+struct lease
+{
+    struct identity { unsigned frame = 0; } key;
+    struct plane { void *buffer = nullptr; };
+    std::array<plane, 3> planes{};
+    bool held = false;
+    ~lease() { if (held) --live_leases; }
+};
+bool enabled() { return capture_enabled; }
+bool acquire(lease &result)
+{
+    ++acquires;
+    if (!input_ready) return false;
+    result.held = true;
+    ++live_leases;
+    result.key.frame = next_engine_frame;
+    result.planes = {lease::plane{reinterpret_cast<void *>(0x1000)},
+                     lease::plane{reinterpret_cast<void *>(0x2000)},
+                     lease::plane{reinterpret_cast<void *>(0x3000)}};
+    return true;
+}
+}
+
+struct stream_state
+{
+    static constexpr unsigned RING = 6;
+    bool requested = true, armed = true, finished = false, summarised = false, fg_requested = false, fg_ready = false;
+    int depth_mode = 1, mvec_mode = 3;
+    unsigned long long produced = 0, consumed = 0, max_frames = 1000;
+    struct pipeline_state
+    {
+        bool busy = true;
+        bool pending() const { return busy; }
+    } pipeline;
+    struct live_flag
+    {
+        bool value = true;
+        void store(bool next, std::memory_order) { value = next; }
+    } mvec_live;
+};
+
+static void stream_produce_locked(stream_state &state, ID3D12GraphicsCommandList *command,
+    ID3D12CommandQueue *queue, ID3D12Resource *source, unsigned long long color,
+    unsigned long long depth, unsigned long long motion, mgpu::aligned::lease &frame)
+{
+    ++submits;
+    raw_game_objects_seen |= command != nullptr || queue != nullptr || source != nullptr ||
+        color != 0x1000 || depth != 0x2000 || motion != 0x3000;
+    if (!transfer_ready) return;
+    delivered_frames.at(static_cast<unsigned>(state.produced)) = frame.key.frame;
+    ++state.produced;
+    ++next_engine_frame;
+}
+
+@WORKER_DISPATCH_IMPLEMENTATION@
+
+int main()
+{
+    unsigned failures = 0;
+    const auto check = [&](bool passed, const char *name)
+    {
+        std::printf("%s: %s\n", passed ? "PASS" : "FAIL", name);
+        if (!passed) ++failures;
+    };
+    stream_state state;
+    stream_pump_aligned_locked(state);
+#if defined(MGPU_M358_CONTROL)
+    check(state.produced == 0 && acquires == 0 && official_route_queries == 1 && official_backpressure_queries == 1,
+        "archived M358 gate blocks acquisition when official export slots are busy");
+    return failures == 0 ? 0 : 1;
+#endif
+    check(state.produced == 3 && acquires == 3 && submits == 3 && state.pipeline.pending(),
+        "actual worker dispatcher fills three owned inputs with neural work pending and zero game callbacks");
+    check(official_route_queries == 0 && official_backpressure_queries == 0,
+        "official export backpressure cannot prevent safe source-ring prefetch");
+    check(live_leases == 0 && !raw_game_objects_seen,
+        "one poll releases its lease and never forwards a game command list");
+    input_ready = false;
+    stream_pump_aligned_locked(state);
+    check(acquires == 4 && submits == 3 && state.produced == 3,
+        "incomplete texture or constants readiness returns without submission");
+    input_ready = true;
+    transfer_ready = false;
+    stream_pump_aligned_locked(state);
+    check(state.produced == 3 && next_engine_frame == 103 && live_leases == 0,
+        "temporary COPY backpressure releases the lease without advancing the sequence");
+    transfer_ready = true;
+    stream_pump_aligned_locked(state);
+    check(state.produced == 6 && delivered_frames[0] == 100 && delivered_frames[1] == 101 &&
+          delivered_frames[2] == 102 && delivered_frames[3] == 103,
+        "next worker poll retries and drains the next bounded batch without a game callback");
+    state.produced = stream_state::RING;
+    const auto before_full = acquires;
+    stream_pump_aligned_locked(state);
+    check(acquires == before_full, "full ring is checked before any acquire");
+    ++state.consumed;
+    stream_pump_aligned_locked(state);
+    check(state.produced == stream_state::RING + 1 && acquires == before_full + 1,
+        "consumer retirement releases exactly one bounded dispatch");
+    const auto blocked = [&](stream_state stopped, const char *name)
+    {
+        const auto before = acquires;
+        stream_pump_aligned_locked(stopped);
+        check(acquires == before, name);
+    };
+    state = {};
+    state.requested = false;
+    blocked(state, "unrequested stream cannot acquire");
+    state = {};
+    state.armed = false;
+    blocked(state, "worker cannot arm a stream");
+    state = {};
+    state.finished = true;
+    blocked(state, "finished stream cannot acquire");
+    state = {};
+    state.summarised = true;
+    blocked(state, "summarised stream cannot acquire");
+    state = {};
+    state.fg_requested = true;
+    stream_pump_aligned_locked(state);
+    check(state.produced == 3, "secondary FG preserves worker-owned aligned input dispatch");
+    state = {};
+    state.fg_requested = state.fg_ready = true;
+    stream_pump_aligned_locked(state);
+    stream_pump_aligned_locked(state);
+    check(state.produced == 2, "active FG admits at most two unconsumed payloads");
+    state = {};
+    state.depth_mode = 0;
+    blocked(state, "disabled depth is not silently accepted");
+    state = {};
+    state.mvec_mode = 0;
+    blocked(state, "disabled motion is not silently accepted");
+    state = {};
+    capture_enabled = false;
+    blocked(state, "stopped capture cannot acquire");
+    capture_enabled = true;
+    state.max_frames = 0;
+    const auto before_limit = acquires;
+    stream_pump_aligned_locked(state);
+    check(state.finished && !state.mvec_live.value && acquires == before_limit,
+        "frame limit stops capture without waiting for another callback");
+    stream_state legacy_fg;
+    legacy_fg.fg_ready = true;
+    const auto before_legacy = acquires;
+    stream_pump_aligned_locked(legacy_fg);
+    check(legacy_fg.produced == mgpu::secondary_fg::source_lead_limit && acquires == before_legacy + 2,
+        "legacy in-process FG retains its original two-frame budget");
+    const auto legacy_full = acquires;
+    stream_pump_aligned_locked(legacy_fg);
+    check(acquires == legacy_full && live_leases == 0,
+        "legacy budget still blocks acquisition before any unsafe reuse");
+    return failures == 0 ? 0 : 1;
+}

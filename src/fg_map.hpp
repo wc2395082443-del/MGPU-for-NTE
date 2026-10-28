@@ -49,28 +49,77 @@
 // fg reads the SAME MotionVectors resource as the scene feature, there is no
 // second field; a generated frame cannot be told by resource identity; the
 // only per-seal fact that tells it apart is "no fresh vector copy"):
-// NRFrameFilter=2: fix the vectors. While fg evaluates, every NR evaluate
-//   scales the game's vectors by 1/(MultiFrameCount+1) - a vector describes
-//   one RENDERED frame (R87) and a presented step is a fraction of it - and a
-//   seal without a fresh vector binds the last rendered frame's vectors from
-//   a kept copy on GPU 1 (tex_mvec_keep) instead of none. History and vector
-//   then agree on every frame, generated or rendered.
+// R313: NRFrameFilter=2 only applies the fraction/reuse policy to captures
+//   matched to distinct outputs of a successful, identified FG evaluate.
+//   A matching interpolated capture must precede its matching real capture.
+//   Unmatched, aliased, failed or expired records keep motion fraction 1 and
+//   cannot reuse FG vectors. This is conservative for copy-based integrations:
+//   they remain unknown until their resource lineage can be established.
 // NRFrameFilter=3: as 2, and only 1 generated frame in N (NRFrameKeep, 2..8,
 //   default 2) is evaluated; the rest re-present the last output. THE DEFAULT
 //   (key absent) since 2026-10-05 22:01: Dawnwalker's sizzle on skin went
 //   with mode 3 at N=2 and not with mode 2. Both modes and N are live on the
 //   ReShade panel; the ini is the default at launch; NRFrameFilter=0 is off.
-// Which seal is the generated frame (NR3b): the FIRST seal after an fg
-//   evaluate, recorded per ring slot at seal time. Not "no fresh vector":
-//   that was title-dependent (Requiem and Cyberpunk opposite).
-// fg "active" = an fg evaluate within the last 2 x (MultiFrameCount+1)
-// seals. Off fg, a seal without a vector is treated as before (R61 unset).
+// R313: the first seal after a call is NOT automatically generated. Only a
+//   matched interpolated capture may be thinned. Recent API calls are retained
+//   separately for diagnostics and the secondary-FG exclusion guard.
 //
 // Ledger: Claude outputs\0.3.0-Discovery\D2_0_LEDGER.md, section 10.
 #pragma once
 
+#include <cstdint>
+#include "fg_present_evidence.hpp"
+
 namespace mgpu::fgmap
 {
+    struct camera_snapshot
+    {
+        std::uint64_t frame_id = 0;
+        std::uint64_t capture_ns = 0;
+        std::uint64_t scene_sequence = 0;
+        std::uint64_t backbuffer = 0;
+        std::uint64_t output_real = 0;
+        std::uint64_t output_interpolated = 0;
+        std::uint64_t depth = 0;
+        std::uint64_t motion = 0;
+        float camera_view_to_clip[16] = {};
+        float clip_to_camera_view[16] = {};
+        float clip_to_lens_clip[16] = {};
+        float clip_to_prev_clip[16] = {};
+        float prev_clip_to_clip[16] = {};
+        float jitter[2] = {};
+        float mvec_scale[2] = {};
+        float pinhole_offset[2] = {};
+        float camera_pos[3] = {};
+        float camera_up[3] = {};
+        float camera_right[3] = {};
+        float camera_fwd[3] = {};
+        float camera_near = 0.0f;
+        float camera_far = 0.0f;
+        float camera_fov = 0.0f;
+        float camera_aspect = 0.0f;
+        unsigned color_buffers_hdr = 0;
+        unsigned depth_inverted = 0;
+        unsigned camera_motion_included = 0;
+        unsigned reset = 0;
+        unsigned automode_override_reset = 0;
+        unsigned not_rendering_game_frames = 0;
+        unsigned ortho_projection = 0;
+        float motion_vectors_invalid_value = 0.0f;
+        unsigned motion_vectors_dilated = 0;
+        unsigned menu_detection_enabled = 0;
+        unsigned mvec_subrect_width = 0;
+        unsigned mvec_subrect_height = 0;
+        unsigned depth_subrect_width = 0;
+        unsigned depth_subrect_height = 0;
+        unsigned mvec_subrect_x = 0;
+        unsigned mvec_subrect_y = 0;
+        unsigned depth_subrect_x = 0;
+        unsigned depth_subrect_y = 0;
+        unsigned mvec_jittered = 0;
+        unsigned valid = 0;
+    };
+
     // What one evaluate's parameter block said. Resources by identity only;
     // the only call made on one is GetDesc, on a handle seen for the first
     // time (the game handed it to NGX in this same call).
@@ -99,6 +148,9 @@ namespace mgpu::fgmap
         unsigned int g_have;
 
         bool scene;   // the calibrator's latched scene feature (SR / RR)
+        bool succeeded;
+        unsigned camera_valid;
+        camera_snapshot camera;
     };
 
     // on_init_swapchain, never DllMain: reads NRFrameFilter once.
@@ -107,11 +159,13 @@ namespace mgpu::fgmap
 
     // D2.0 NR2 / NR3, read by the stream consumer on the bridge thread.
     bool act();                 // mode >= 2
-    bool fg_active();           // an fg evaluate within the reuse window of seals
+    bool fg_active();           // recent API calls only; not proof of displayed interpolation
+    bool fg_presented_active(); // recent API calls plus a verified interpolated Present
+    captured_policy policy_for_seal(unsigned slot, unsigned long long frame_index);
     unsigned reuse_window();    // 2 x (MultiFrameCount + 1) presents
     float step_fraction();      // 1 / (MultiFrameCount + 1)
     bool thin_this();           // mode 3: counts a generated seal; true = do not evaluate it
-    bool seal_generated(unsigned slot, unsigned long long frame_index);   // NR3b: first seal after an fg evaluate
+    bool seal_generated(unsigned slot, unsigned long long frame_index);
     void on_reuse();            // a generated frame was evaluated with the kept vectors
 
     // Panel (dllmain). Live; the ini stays the launch default.
@@ -123,9 +177,13 @@ namespace mgpu::fgmap
 
     // calibrator hook_create, after the real create succeeded.
     void on_create(unsigned int feature_id, unsigned long long handle);
+    void on_release(unsigned long long handle);
 
-    // calibrator hook_evaluate, before the real evaluate, any feature.
+    // Called after the real evaluate returns; succeeded records its result.
     void on_evaluate(unsigned long long handle, const eval_rec &r);
+
+    bool read_camera(camera_snapshot &out);
+    std::uint64_t scene_sequence();
 
     // gpu1 stream_mvec_copy, after the copy is recorded into `slot`.
     void on_mvec_copy(unsigned int slot);

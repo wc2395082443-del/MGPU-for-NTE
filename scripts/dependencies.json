@@ -1,0 +1,82 @@
+[
+  {
+    "Path": "ext/reshade/LICENSE.md",
+    "URL": "https://raw.githubusercontent.com/crosire/reshade/18deaa52de0c425a78b329e9cb3c497281cd00ec/LICENSE.md",
+    "SHA256": "237DED5B8344F820113EFAB1E65E91E1F159D9202C5B4856606A0590D3FFDAB0"
+  },
+  {
+    "Path": "ext/reshade/reshade_api_device.hpp",
+    "URL": "https://raw.githubusercontent.com/crosire/reshade/18deaa52de0c425a78b329e9cb3c497281cd00ec/include/reshade_api_device.hpp",
+    "SHA256": "A716C44B6FBB064DBBB0826687728F21AA71ED45E13564E4DC1CDF36DA5BDFA0"
+  },
+  {
+    "Path": "ext/reshade/reshade_api_format.hpp",
+    "URL": "https://raw.githubusercontent.com/crosire/reshade/18deaa52de0c425a78b329e9cb3c497281cd00ec/include/reshade_api_format.hpp",
+    "SHA256": "68CAA17FEF712043E810AB88770C15AF009AA3C7693E5C115DDC324F2D0809A7"
+  },
+  {
+    "Path": "ext/reshade/reshade_api_pipeline.hpp",
+    "URL": "https://raw.githubusercontent.com/crosire/reshade/18deaa52de0c425a78b329e9cb3c497281cd00ec/include/reshade_api_pipeline.hpp",
+    "SHA256": "5BDA8E07260C2C60F0FD18A78B11782AED8F69E5D24B5757874614CAAFDF416F"
+  },
+  {
+    "Path": "ext/reshade/reshade_api_resource.hpp",
+    "URL": "https://raw.githubusercontent.com/crosire/reshade/18deaa52de0c425a78b329e9cb3c497281cd00ec/include/reshade_api_resource.hpp",
+    "SHA256": "32CDAFE6D783813F3AC72AD43E426638D8D0FEF56BCB558FAD218A14CFB75EE3"
+  },
+  {
+    "Path": "ext/reshade/reshade_api.hpp",
+    "URL": "https://raw.githubusercontent.com/crosire/reshade/18deaa52de0c425a78b329e9cb3c497281cd00ec/include/reshade_api.hpp",
+    "SHA256": "8D83EC8A620C48DA7A20D975BD27B3345B24D3F0D5B78AE4C4FE633D61B804EB"
+  },
+  {
+    "Path": "ext/reshade/reshade_events.hpp",
+    "URL": "https://raw.githubusercontent.com/crosire/reshade/18deaa52de0c425a78b329e9cb3c497281cd00ec/include/reshade_events.hpp",
+    "SHA256": "2717F56E2BD89AF6D708C9C316353D6581C5A41D4526629FADBA51D13BE57A89"
+  },
+  {
+    "Path": "ext/reshade/reshade_overlay.hpp",
+    "URL": "https://raw.githubusercontent.com/crosire/reshade/18deaa52de0c425a78b329e9cb3c497281cd00ec/include/reshade_overlay.hpp",
+    "SHA256": "ED914B12FBC41ED038287B0163C0BC934772AFCFF2C22392044C6008ADC5AE79"
+  },
+  {
+    "Path": "ext/reshade/reshade.hpp",
+    "URL": "https://raw.githubusercontent.com/crosire/reshade/18deaa52de0c425a78b329e9cb3c497281cd00ec/include/reshade.hpp",
+    "SHA256": "CF3CD150920EA310B4B1E2E4F11AB8D7221A9FC18755F4891A026563311B524C"
+  },
+  {
+    "Path": "ext/ngx/LICENSE.txt",
+    "URL": "https://raw.githubusercontent.com/NVIDIA/DLSS/a291cc7d2cc642a51566f3dfd5376f635cd1b284/LICENSE.txt",
+    "SHA256": "21B5DAEC892B12BEA692E66BC8FE45CF5902CCAF3A7B831E78050D8859881C37"
+  },
+  {
+    "Path": "ext/ngx/nvsdk_ngx_defs_dlssg.h",
+    "URL": "https://raw.githubusercontent.com/NVIDIA/DLSS/a291cc7d2cc642a51566f3dfd5376f635cd1b284/include/nvsdk_ngx_defs_dlssg.h",
+    "SHA256": "5E76E5CF0397F0B093887D0392B427A6B3E3F722CEC5F5A4795357EDEB6DE4BA"
+  },
+  {
+    "Path": "ext/ngx/nvsdk_ngx_defs.h",
+    "URL": "https://raw.githubusercontent.com/NVIDIA/DLSS/a291cc7d2cc642a51566f3dfd5376f635cd1b284/include/nvsdk_ngx_defs.h",
+    "SHA256": "EA23F33497CD274860D1C25A97644FCE807DCB0037C594547203343103FAD03E"
+  },
+  {
+    "Path": "ext/ngx/nvsdk_ngx_helpers_dlssg.h",
+    "URL": "https://raw.githubusercontent.com/NVIDIA/DLSS/a291cc7d2cc642a51566f3dfd5376f635cd1b284/include/nvsdk_ngx_helpers_dlssg.h",
+    "SHA256": "85894E5F44C3D1ADD74B3997C80F8D6A25DCBEB4DF5D092138E71DA5629B60E8"
+  },
+  {
+    "Path": "ext/ngx/nvsdk_ngx_params_dlssg.h",
+    "URL": "https://raw.githubusercontent.com/NVIDIA/DLSS/a291cc7d2cc642a51566f3dfd5376f635cd1b284/include/nvsdk_ngx_params_dlssg.h",
+    "SHA256": "C24FA5AA68FFA2808C828B75CFA32843F1606F80A145F84055AC450D7E6C74AD"
+  },
+  {
+    "Path": "ext/ngx/nvsdk_ngx_params.h",
+    "URL": "https://raw.githubusercontent.com/NVIDIA/DLSS/a291cc7d2cc642a51566f3dfd5376f635cd1b284/include/nvsdk_ngx_params.h",
+    "SHA256": "943BC8CC5CDAE03B6303016FBAD3183636F2335AE27A2D18776798C3B4EFABBC"
+  },
+  {
+    "Path": "ext/ngx/nvsdk_ngx.h",
+    "URL": "https://raw.githubusercontent.com/NVIDIA/DLSS/a291cc7d2cc642a51566f3dfd5376f635cd1b284/include/nvsdk_ngx.h",
+    "SHA256": "F6014A256F9D75CCEC1278AC6E23D596B398A76CC3960048CA1A274B378B1989"
+  }
+]

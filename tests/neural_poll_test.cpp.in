@@ -1,0 +1,160 @@
+#include "neural_pipeline.hpp"
+#include "../experimental/secondary_fg/frame_contract.hpp"
+#include <atomic>
+#include <cstdio>
+
+static std::uint64_t now_ms = 1000;
+static std::atomic<bool> g_present_read_fault{false};
+static unsigned error_count = 0;
+
+static std::uint64_t GetTickCount64() { return now_ms; }
+namespace mgpu::diag
+{
+void error(const char *) { ++error_count; }
+}
+
+struct fake_fence
+{
+    std::uint64_t completed = 0;
+    std::uint64_t GetCompletedValue() const { return completed; }
+};
+
+struct stream_state
+{
+    fake_fence fence;
+    fake_fence *nf = &fence;
+    mgpu::neural_pipeline::schedule pipeline;
+    bool finished = false;
+    bool aligned_history_valid = false;
+    bool submission_reached = false;
+    unsigned history_frame = 0;
+    std::uint64_t submitted = 0;
+    bool fg_requested = false;
+    bool fg_ready = false;
+    bool fg_completion_ok = true;
+    unsigned fg_completions = 0;
+    mgpu::secondary_fg::presentation_pair fg_pair;
+};
+
+static bool stream_secondary_fg_complete(stream_state &stream, std::uint64_t)
+{
+    ++stream.fg_completions;
+    return stream.fg_completion_ok;
+}
+
+static void poll(stream_state &stream, bool has_input = true)
+{
+    stream.submission_reached = false;
+    if (g_present_read_fault.load()) return;
+@NEURAL_RETIRE_GUARD@
+        stream.aligned_history_valid = true;
+        stream.history_frame = pending.engine_frame;
+        const bool retired = stream.fg_ready ? stream.pipeline.retire(completed_fence) : stream.pipeline.publish(completed_fence);
+        if (!retired) return;
+    }
+    if (stream.fg_ready && !stream.fg_pair.pending() && stream.pipeline.ready())
+        stream.pipeline.publish_ready();
+    stream.submission_reached = true;
+    if (stream.finished || !has_input || !stream.pipeline.has_capacity()) return;
+    mgpu::neural_pipeline::job next;
+    next.seal = stream.submitted + 1;
+    next.fence = next.seal;
+    next.submitted_ms = now_ms;
+    next.engine_frame = static_cast<unsigned>(next.seal + 100);
+    next.input_index = next.snapshot = stream.pipeline.write_slot();
+    if (stream.pipeline.begin(next)) ++stream.submitted;
+}
+
+int main()
+{
+    unsigned failures = 0;
+    const auto check = [&](bool passed, const char *name)
+    {
+        std::printf("%s: %s\n", passed ? "PASS" : "FAIL", name);
+        if (!passed) ++failures;
+    };
+    stream_state stream;
+    poll(stream);
+    check(stream.submitted == 1 && stream.pipeline.inflight() == 1, "first job starts");
+    poll(stream);
+    check(stream.submission_reached && stream.submitted == 2 && stream.pipeline.inflight() == 2,
+          "unfinished oldest job still permits another submission");
+    check(!stream.pipeline.displayed() && !stream.aligned_history_valid,
+          "pending jobs cannot advance display or temporal history");
+    poll(stream);
+    poll(stream);
+    check(stream.submitted == 3 && stream.pipeline.inflight() == 3,
+          "three startup slots bound pending work without reuse");
+    stream.fence.completed = 1;
+    poll(stream);
+    check(stream.pipeline.display_seal() == 1 && stream.history_frame == 101 &&
+          stream.pipeline.current().seal == 2 && stream.submitted == 3,
+          "display and two pending jobs reserve all three slots");
+    stream.fence.completed = 2;
+    poll(stream);
+    check(stream.pipeline.display_seal() == 2 && stream.history_frame == 102 &&
+          stream.pipeline.current().seal == 3 && stream.pipeline.latest().seal == 4 &&
+          stream.submitted == 4 && stream.pipeline.inflight() == 2,
+          "retired display slot accepts the next frame before the oldest pending job completes");
+    poll(stream);
+    check(stream.submitted == 4 && stream.pipeline.display_seal() == 2,
+          "repeated polling cannot overwrite displayed or pending slots");
+    stream.fence.completed = 4;
+    poll(stream, false);
+    check(!stream.pipeline.pending() && stream.pipeline.display_seal() == 4 &&
+          stream.history_frame == 104, "completed FIFO drains in order with no new input");
+
+    stream_state timeout;
+    now_ms = 1000;
+    poll(timeout);
+    timeout.aligned_history_valid = true;
+    now_ms = 6001;
+    poll(timeout);
+    check(timeout.finished && !timeout.aligned_history_valid && !timeout.submission_reached &&
+          timeout.submitted == 1 && timeout.pipeline.inflight() == 1 && g_present_read_fault.load(),
+          "timeout stops submission and retains in-flight ownership");
+    poll(timeout);
+    check(timeout.submitted == 1 && !timeout.submission_reached,
+          "faulted stream cannot resume on the next poll");
+
+    g_present_read_fault.store(false);
+    now_ms = 1000;
+    stream_state removed;
+    poll(removed);
+    removed.fence.completed = UINT64_MAX;
+    poll(removed);
+    check(removed.finished && !removed.aligned_history_valid && !removed.submission_reached &&
+          removed.submitted == 1 && removed.pipeline.inflight() == 1 && g_present_read_fault.load(),
+          "device removal stops submission without publishing or freeing the job");
+    check(error_count == 2, "fatal paths report once each");
+
+    g_present_read_fault.store(false);
+    now_ms = 1000;
+    stream_state boundary;
+    poll(boundary);
+    now_ms = 6000;
+    poll(boundary);
+    check(!boundary.finished && boundary.submitted == 2,
+          "timeout threshold does not reject a nonexpired pending job");
+    stream_state fg;
+    fg.fg_requested = true;
+    fg.fg_ready = true;
+    poll(fg);
+    fg.fence.completed = 1;
+    mgpu::secondary_fg::decision decision{};
+    fg.fg_pair.enqueue(77, 100000000, decision, true, true, 2);
+    poll(fg, false);
+    check(!fg.pipeline.displayed() && !fg.pipeline.pending() && fg.pipeline.ready() && fg.fg_completions == 1,
+          "actual retirement guard completes GPU/history while old display group remains pending");
+    fg.fg_pair.presented(mgpu::secondary_fg::picture::real, true);
+    poll(fg, false);
+    check(fg.pipeline.display_seal() == 1 && fg.fg_completions == 1,
+          "actual retirement guard completes FG after previous display group retires");
+    poll(fg);
+    fg.fence.completed = 2;
+    fg.fg_completion_ok = false;
+    poll(fg, false);
+    check(fg.pipeline.display_seal() == 1 && fg.pipeline.pending(),
+          "FG completion failure cannot publish or release the new slot");
+    return failures == 0 ? 0 : 1;
+}

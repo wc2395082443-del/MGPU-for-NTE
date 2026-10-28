@@ -9,7 +9,6 @@
 // WriteFile; one short pointer line goes to ReShade's log through the queue.
 #include <windows.h>
 #include <psapi.h>     // K32EnumProcessModules & co. (kernel32 exports, no psapi.lib needed)
-#include <tlhelp32.h>  // R295: CreateToolhelp32Snapshot / Thread32First / Thread32Next (kernel32)
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -61,11 +60,6 @@ std::atomic<long long> g_last_present{0};
 std::atomic<unsigned long long> g_presents{0};
 bool g_outside_reported = false;               // watchdog only
 long long g_outside_since = 0;                 // watchdog only
-// R295: the thread that made the last game present, and the passes taken
-// over every thread when a stall is outside our callbacks.
-std::atomic<unsigned long> g_present_tid{0};
-int  g_outside_passes = 0;                     // watchdog only: 0, 1 or 2 per stall
-long long g_outside_pass1_at = 0;              // watchdog only
 
 // ---- module table (watchdog only) ----
 struct mod_t { unsigned long long base; unsigned long long size; char name[48]; };
@@ -198,77 +192,6 @@ bool where(buf_t &o, unsigned long tid, const slot_t &s, long long entry)
     return true;
 }
 
-// R295. A STALL OUTSIDE OUR CALLBACKS HAS NO SLOT TO POINT AT, and on a title
-// whose presents come from a job system (Cyberpunk: about 16 threads, CP-01)
-// the last presenter is not necessarily the stuck thread. So every thread of
-// the process is read once, one at a time, with the same rules as where():
-// while a thread is suspended only GetThreadContext and ReadProcessMemory run,
-// into stack buffers; names come from the table built earlier; the line is
-// formatted and written after the resume. The snapshot itself is a kernel
-// object (no heap of this process). The watchdog's own thread is skipped.
-void dump_threads(unsigned pass)
-{
-    const DWORD me = GetCurrentThreadId();
-    const DWORD pid = GetCurrentProcessId();
-    const unsigned long presenter = g_present_tid.load(std::memory_order_relaxed);
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    {
-        buf_t o; app_time(o);
-        app(o, "R295 THREADS pass "); app_u(o, pass);
-        app(o, pass == 1 ? " (at the stall)" : " (2 s later - an address that did not move is a thread that is stuck)");
-        app(o, " | last game presenter tid "); app_u(o, presenter);
-        if (snap == INVALID_HANDLE_VALUE) app(o, " | snapshot FAILED");
-        emit(o);
-    }
-    if (snap == INVALID_HANDLE_VALUE) return;
-    THREADENTRY32 te{};
-    te.dwSize = sizeof te;
-    unsigned n = 0;
-    for (BOOL more = Thread32First(snap, &te); more && n < 512u; more = Thread32Next(snap, &te))
-    {
-        if (te.th32OwnerProcessID != pid || te.th32ThreadID == me) continue;
-        ++n;
-        HANDLE th = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
-                               FALSE, te.th32ThreadID);
-        buf_t o;
-        app(o, "  tid "); app_u(o, te.th32ThreadID);
-        if (te.th32ThreadID == presenter) app(o, " (last game presenter)");
-        if (th == nullptr) { app(o, " | OpenThread failed"); emit(o); continue; }
-        CONTEXT ctx{};
-        ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
-        unsigned long long stack[128];
-        SIZE_T got = 0;
-        bool ok = false;
-        if (SuspendThread(th) != (DWORD)-1)
-        {
-            if (GetThreadContext(th, &ctx))
-            {
-                ok = true;
-                ReadProcessMemory(GetCurrentProcess(), (const void *)ctx.Rsp, stack, sizeof stack, &got);
-            }
-            ResumeThread(th);
-        }
-        CloseHandle(th);
-        if (!ok) { app(o, " | context not read"); emit(o); continue; }
-        app(o, " | rip="); app_addr(o, ctx.Rip);
-        app(o, " | stack:");
-        unsigned shown = 0;
-        for (SIZE_T i = 0; i < got / sizeof(unsigned long long) && shown < 8u; ++i)
-        {
-            const unsigned long long a = stack[i];
-            if (find_mod(a) == nullptr) continue;
-            app(o, " "); app_addr(o, a);
-            ++shown;
-        }
-        if (shown == 0) app(o, " (no code address in the first 1 KB)");
-        emit(o);
-    }
-    CloseHandle(snap);
-    buf_t o; app_time(o);
-    app(o, "R295 THREADS pass "); app_u(o, pass); app(o, " done: "); app_u(o, n); app(o, " thread(s)");
-    emit(o);
-}
-
 DWORD WINAPI watchdog(LPVOID)
 {
     refresh_modules();
@@ -345,25 +268,7 @@ DWORD WINAPI watchdog(LPVOID)
                 emit(o);
                 g_outside_reported = true;
                 g_outside_since = lp;
-                // R295: read every thread now, and once more 2 s later.
-                dump_threads(1);
-                g_outside_passes = 1;
-                g_outside_pass1_at = qpc();
-                if (mgpu::lq::running())
-                {
-                    buf_t p;
-                    app(p, "[MGPU][R295] STALL OUTSIDE OUR CALLBACKS: no game present for over ");
-                    app_u(p, (unsigned long long)lim);
-                    app(p, " ms - every thread's position written to mgpu\\stall.log");
-                    mgpu::lq::post(mgpu::lq::TO_WARN, p.b);
-                }
             }
-        }
-        if (g_outside_reported && g_outside_passes == 1 && lp == g_outside_since &&
-            qpc() - g_outside_pass1_at > g_freq.QuadPart * 2)
-        {
-            dump_threads(2);
-            g_outside_passes = 2;
         }
         if (g_outside_reported && lp != g_outside_since)
         {
@@ -373,13 +278,10 @@ DWORD WINAPI watchdog(LPVOID)
             app(o, " ms");
             emit(o);
             g_outside_reported = false;
-            g_outside_passes = 0;
         }
 
         // Module table: refresh every 30 s, never while something is stalled.
-        // R295: nor while a stall outside our callbacks is open - the stuck
-        // thread may hold the loader lock that the enumeration takes.
-        if (!any_stalled && !g_outside_reported && now - g_mods_at > g_freq.QuadPart * 30) refresh_modules();
+        if (!any_stalled && now - g_mods_at > g_freq.QuadPart * 30) refresh_modules();
     }
     g_loop_left.store(true, std::memory_order_release);
     return 0;
@@ -485,7 +387,6 @@ void on_present(void *chain)
     if (chain == nullptr || chain != g_game_chain.load(std::memory_order_acquire)) return;
     g_last_present.store(qpc(), std::memory_order_relaxed);
     g_presents.fetch_add(1, std::memory_order_relaxed);
-    g_present_tid.store(GetCurrentThreadId(), std::memory_order_relaxed);   // R295
 }
 
 scope::scope(stage s)

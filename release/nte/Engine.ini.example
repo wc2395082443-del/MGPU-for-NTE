@@ -1,0 +1,6 @@
+[SystemSettings]
+r.Streamline.ForceTagging=1
+t.Streamline.Reflex.Enable=1
+t.Streamline.Reflex.Mode=1
+t.Streamline.Reflex.Auto=1
+r.OneFrameThreadLag=1

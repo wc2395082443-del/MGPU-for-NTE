@@ -1,0 +1,34 @@
+<WindowsPerformanceRecorder Version="1.0">
+  <Profiles>
+    <SystemCollector Id="M343_System" Name="MGPU bounded CPU scheduling">
+      <BufferSize Value="256" /><Buffers Value="128" />
+    </SystemCollector>
+    <EventCollector Id="M343_Events" Name="MGPU bounded GPU dependencies">
+      <BufferSize Value="256" /><Buffers Value="256" />
+    </EventCollector>
+    <SystemProvider Id="M343_CPU">
+      <Keywords><Keyword Value="ProcessThread" /><Keyword Value="Loader" /><Keyword Value="CSwitch" /><Keyword Value="ReadyThread" /></Keywords>
+    </SystemProvider>
+    <EventProvider Id="M343_DxgKrnl" Name="802ec45a-1e99-4b83-9920-87c98277ba9d" NonPagedMemory="true" Strict="true" Level="5">
+      <Keywords><Keyword Value="0x04008a77" /></Keywords>
+      <CaptureStateOnStart Timeout="5"><Keyword Value="0x04008a77" /></CaptureStateOnStart>
+      <CaptureStateOnSave Timeout="5"><Keyword Value="0x04008a77" /></CaptureStateOnSave>
+    </EventProvider>
+    <EventProvider Id="M343_D3D12" Name="5d8087dd-3a9b-4f56-90df-49196cdc4f11" Level="5">
+      <Keywords><Keyword Value="0x83" /></Keywords>
+      <CaptureStateOnStart Timeout="5"><Keyword Value="0x83" /></CaptureStateOnStart>
+      <CaptureStateOnSave Timeout="5"><Keyword Value="0x83" /></CaptureStateOnSave>
+    </EventProvider>
+    <EventProvider Id="M343_DXGI" Name="ca11c036-0102-4a2d-a6ad-f03cfed5d3c9" Level="5">
+      <Keywords><Keyword Value="0xf" /></Keywords>
+    </EventProvider>
+    <Profile Id="MGPUFrame.Verbose.File" Name="MGPUFrame" Description="M343 bounded file-mode CPU/GPU causality; no stacks; coverage must be validated" LoggingMode="File" DetailLevel="Verbose">
+      <Collectors>
+        <SystemCollectorId Value="M343_System"><SystemProviderId Value="M343_CPU" /></SystemCollectorId>
+        <EventCollectorId Value="M343_Events"><EventProviders>
+          <EventProviderId Value="M343_DxgKrnl" /><EventProviderId Value="M343_D3D12" /><EventProviderId Value="M343_DXGI" />
+        </EventProviders></EventCollectorId>
+      </Collectors>
+    </Profile>
+  </Profiles>
+</WindowsPerformanceRecorder>

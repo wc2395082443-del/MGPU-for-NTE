@@ -60,7 +60,11 @@
 // startup has finished cannot race a startup.
 //
 // OFF BY DEFAULT. SLTags=0 in mgpu.ini touches nothing at all.
+// SLTags=3 additionally covers unique cached tag API pointers in the main
+// executable's writable data. This is opt-in; swaps and restore use compare-exchange.
 #pragma once
+#include "motion_frame_packet.hpp"
+#include "aligned_input.hpp"
 
 namespace mgpu::sltags
 {
@@ -74,6 +78,8 @@ namespace mgpu::sltags
     //       2 as 1, and re-log a buffer type whenever its resource pointer
     //         changes, which is what a resolution change or a resource
     //         recreation looks like from here
+    //       3 also intercept unique cached tag pointers in the main image's
+    //         writable, non-executable sections; bounded and reversible
     void tick(unsigned long long frames, int mode);
 
     // The authoritative motion-vector resource the game declared, or 0 if the
@@ -88,8 +94,16 @@ namespace mgpu::sltags
     // ID3D12GraphicsCommandList* on D3D12), `state` is sl::Resource.state as declared by the game, and
     // `lifecycle` the ResourceTag lifecycle. Installed only with SLTagsCapture=1|2; none = observer only.
     using mvec_capture_fn = void (*)(void *cmd_buffer, unsigned long long resource,
-                                     unsigned state, int lifecycle);
+                                     unsigned state, int lifecycle, unsigned top,
+                                     unsigned left, unsigned width, unsigned height,
+                                     motion_packet::identity engine);
     void set_mvec_capture(mvec_capture_fn fn);
+    using resource_capture_fn = void (*)(void *command, unsigned buffer_type,
+                                         const aligned::tagged_resource &resource,
+                                         motion_packet::identity engine);
+    void set_resource_capture(resource_capture_fn fn);
+    using constants_capture_fn = void (*)(const aligned::guide_constants &constants);
+    void set_constants_capture(constants_capture_fn fn);
 
     // The same for the colour buffers that matter to HDR work:
     // kBufferTypeHUDLessColor, then kBufferTypeScalingInputColor. Zero when

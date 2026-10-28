@@ -1,0 +1,39 @@
+{
+  "Scope": "Historical measurement evidence; not controlled A/B or current FPS promise",
+  "GPU_Game": "RTX 4080 SUPER",
+  "GPU_NR": "RTX 5080",
+  "Measurements": [
+    {
+      "Frames": 82,
+      "Version": "M339c",
+      "TransferMs": 7.073058,
+      "NeuralHz": 26.69876
+    },
+    {
+      "Frames": 104,
+      "Version": "M340 + ForceTagging",
+      "NRMs": 15.159885,
+      "TransferMs": 6.012607,
+      "NeuralHz": 33.451161
+    },
+    {
+      "Frames": 96,
+      "Version": "M341",
+      "NRMs": 15.157783,
+      "TransferMs": 5.502414,
+      "NeuralHz": 32.064379
+    }
+  ],
+  "LatestDetailed": {
+    "HeavyInstrumentation": true,
+    "NeuralHz": 22.739,
+    "PhysicalGeneratedFramesClassified": false,
+    "DisplayEventHz": 98.256,
+    "FineJobsTruncated": 867,
+    "SDKHz": 136.268,
+    "MainRecordsLost": 1,
+    "Seconds": 120.0135057,
+    "Version": "M364 + M363"
+  },
+  "HistoricalGainPercent": 25.2910659521266
+}

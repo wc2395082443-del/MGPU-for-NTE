@@ -17,19 +17,6 @@
 // to the log through mgpu::diag (the log queue, never written on the game
 // thread): one header and up to 24 lines, at game frames 1200, 3000, 6000.
 //
-// R303: three report modes, each behind its own key - fixed (TexCensus=1
-// alone: frames 1200/3000/6000), periodic (TexCensusEvery=N: also every N
-// frames after 6000, 12 at most) and hotkey (TexCensusHotkey=1: CTRL+ALT+END
-// - R308; CTRL+ALT+F5 before, which opens Far Cry 6's photo mode - reports
-// now, and arms the peek when TexPeek=1). A second D3D12 chain no
-// longer overwrites the scene size, and dllmain calls init for the game's
-// chain only. The report header names the mode and counts table overflow.
-//
-// R304: the table holds 1024 textures (was 256), and every report adds one
-// line of live formats by count and a list of every live two-channel texture
-// in the band (48 at most), whatever its activity rank. R304b: still a fixed
-// table with the original scan and sort - nothing allocated on the game's threads.
-//
 // R279b: TexPeek=1 (with TexCensus=1) adds the PEEK: the texture with the
 // velocity USAGE signature (two channels, scene size, into RT and RT->SRV about
 // once per frame) is copied three times from its known state into one

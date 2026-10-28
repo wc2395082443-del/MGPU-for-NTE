@@ -28,11 +28,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
+#include <mutex>
 
 #include "fg_map.hpp"
 #include "log_queue.hpp"
 #include "journal.hpp"
 #include "mgpu_ini_parser.hpp"
+#include "motion_source_audit.hpp"
 
 namespace mgpu::fgmap
 {
@@ -41,23 +43,25 @@ namespace
 std::atomic<int> g_mode{0};                       // 0 off (also before init), 1 map, 2 fix, 3 fix + thin (D2.0 NR2/NR3)
 std::atomic<unsigned> g_keep{2u};                   // NR3: keep 1 generated frame in N (NRFrameKeep, 2..8)
 // ---- D2.0 NR2 / NR3: what the acting modes read (see the top of the file) ----
-// fg is "active" while a frame-gen evaluate was seen within the last
-// 2 x (MultiFrameCount + 1) seals: two rendered frames' worth of presents,
-// read from fg's own parameter. Seals since the last fg evaluate, saturating.
+// Recent calls are diagnostic activity, not proof of presented interpolation.
 std::atomic<unsigned> g_fg_idle{255u};
 std::atomic<unsigned long long> g_gen_seen{0};     // generated seals the consumer asked about (thin counter)
 std::atomic<unsigned long long> c_reused{0};       // NR2: generated frames evaluated with the kept vectors
-// NR3b: the label that holds on every title. DLSS-G evaluates, then presents
-// the interpolated frame, then the real one; the interpolated present cannot
-// precede its own evaluate. So the FIRST seal after an fg evaluate is the
-// generated frame. "No fresh vector" is not that label: which present
-// consumes our copy depends on where the copy lands against fg's evaluate in
-// that engine (Requiem: first seal after fg had vectors 28% of the time;
-// Cyberpunk: 71%). Recorded per ring slot at seal time, read by the consumer
-// for the same frame.
+// Position remains diagnostic only. Acting policy is tied to captured resource
+// identity and stored with the seal, never inferred from call position.
 constexpr unsigned SLOT_N = 8u;                     // >= the stream's RING (6)
 std::atomic<unsigned long long> g_slot_frame[SLOT_N];
 std::atomic<unsigned> g_slot_pos[SLOT_N];
+std::mutex g_evidence_mutex;
+present_evidence g_present_evidence;
+struct sealed_policy
+{
+    unsigned long long frame = 0;
+    captured_policy policy{};
+};
+sealed_policy g_sealed_policies[SLOT_N];
+std::atomic<unsigned long long> c_verified_seals{0}, c_unknown_seals{0};
+std::atomic<bool> g_last_verified{false};
 std::atomic<unsigned long long> c_thinned{0};      // NR3: generated frames not evaluated (last output re-presented)
 std::atomic<bool> g_inited{false};
 // Set once in init(), before g_mode is published (release); on() acquires.
@@ -75,6 +79,8 @@ std::atomic<float> g_fg_sx{0.0f}, g_fg_sy{0.0f};
 std::atomic<unsigned> g_fg_mf_count{0}, g_fg_mf_index{0}, g_fg_cam_motion{0}, g_fg_jittered{0};
 std::atomic<unsigned long long> g_fg_frame_id{0};
 std::atomic<unsigned> g_since_fg{3u};              // position, see the top of the file
+std::mutex g_camera_mutex;
+camera_snapshot g_camera{};
 
 // ---- counters (cumulative) ----
 std::atomic<unsigned long long> c_scene{0}, c_fg{0}, c_other{0};
@@ -143,9 +149,11 @@ unsigned pos_now()
     return k > 3u ? 3u : k;
 }
 
-void desc_of(unsigned long long h, unsigned &w, unsigned &hh, unsigned &fmt)
+void desc_of(unsigned long long h, unsigned &w, unsigned &hh, unsigned &fmt,
+             char *name = nullptr, size_t name_size = 0)
 {
     w = hh = fmt = 0u;
+    if (name != nullptr && name_size != 0) std::snprintf(name, name_size, "<unavailable>");
     if (h == 0ull) return;
     // R233. The handle is whatever the game set in the NGX block: an
     // ID3D12Resource on D3D12, an ID3D11Resource on D3D11 (the calibrator's
@@ -157,6 +165,7 @@ void desc_of(unsigned long long h, unsigned &w, unsigned &hh, unsigned &fmt)
     {
         const D3D12_RESOURCE_DESC d = r12->GetDesc();
         w = (unsigned)d.Width; hh = (unsigned)d.Height; fmt = (unsigned)d.Format;
+        mgpu::motion_audit::read_name(r12, name, name_size);
         r12->Release();
         return;
     }
@@ -166,6 +175,7 @@ void desc_of(unsigned long long h, unsigned &w, unsigned &hh, unsigned &fmt)
         D3D11_TEXTURE2D_DESC d{};
         t11->GetDesc(&d);
         w = d.Width; hh = d.Height; fmt = (unsigned)d.Format;
+        mgpu::motion_audit::read_name(t11, name, name_size);
         t11->Release();
     }
 }
@@ -291,7 +301,7 @@ void report()
              "CameraMotionIncluded %u MvecJittered %u | fg Reset x%llu NotRenderingGameFrames x%llu | "
              "BackbufferFrameID step +1 x%llu same x%llu other x%llu (last %llu)",
              rn, now_s(), ld(c_scene), ld(c_fg), ld(c_other), (void *)(uintptr_t)fgh,
-             fgh != 0ull ? "(id 11 at create)" : "(no id 11 create seen: every non-scene evaluate counts as fg)",
+             fgh != 0ull ? "(id 11 at create)" : "(no id 11 create seen: unidentified handles remain other)",
              ld(c_fg_mv_same), ld(c_fg_mv_diff), ld(c_fg_mv_none),
              (double)g_fg_sx.load(std::memory_order_relaxed), (double)g_fg_sy.load(std::memory_order_relaxed),
              (double)g_scene_sx.load(std::memory_order_relaxed), (double)g_scene_sy.load(std::memory_order_relaxed),
@@ -318,11 +328,13 @@ void report()
     if (g_mode.load(std::memory_order_relaxed) >= 2)
     {
         snprintf(l, sizeof l,
-                 "[MGPU][D20][NR2] r%u mode=%d | fg active now=%d (idle %u seals, window %u) | step fraction %.3f | "
-                 "frames evaluated with the kept vectors=%llu | thinned (NRFrameKeep=%u)=%llu",
+                 "[MGPU][R313] r%u mode=%d | recent FG API calls=%d (idle %u seals, window %u) | nominal fraction %.3f | "
+                 "kept vectors=%llu | thinned (NRFrameKeep=%u)=%llu | verified captures=%llu unknown=%llu; "
+                 "unknown captures get fraction=1, no FG reuse or thinning",
                  rn, g_mode.load(std::memory_order_relaxed), fg_active() ? 1 : 0,
                  g_fg_idle.load(std::memory_order_relaxed), reuse_window(), (double)step_fraction(),
-                 ld(c_reused), g_keep.load(std::memory_order_relaxed), ld(c_thinned));
+                 ld(c_reused), g_keep.load(std::memory_order_relaxed), ld(c_thinned),
+                 ld(c_verified_seals), ld(c_unknown_seals));
         say(l);
     }
     if (rn <= MAX_BURSTS) burst(rn);
@@ -340,9 +352,10 @@ void first_sight(unsigned long long h, const eval_rec &r, char kind)
     g_hseen[n].store(h, std::memory_order_release);
     char l[1000];
     unsigned w1, h1, f1, w2, h2, f2, w3, h3, f3;
+    char motion_name[192];
     if (kind == 'S' || kind == 'O')
     {
-        desc_of(r.mvec, w1, h1, f1);
+        desc_of(r.mvec, w1, h1, f1, motion_name, sizeof motion_name);
         desc_of(r.color, w2, h2, f2);
         desc_of(r.output, w3, h3, f3);
         snprintf(l, sizeof l,
@@ -355,9 +368,12 @@ void first_sight(unsigned long long h, const eval_rec &r, char kind)
                  (void *)(uintptr_t)r.output, w3, h3, f3, (void *)(uintptr_t)r.depth,
                  (double)r.mv_scale_x, (double)r.mv_scale_y, (double)r.jitter_x, (double)r.jitter_y, r.reset);
         say(l);
+        snprintf(l, sizeof l, "[MGPU][R316-NGX-MV] kind=%c source=0x%llx name=%s %ux%u fmt=%u; declared input, not selected by size",
+                 kind, r.mvec, motion_name, w1, h1, f1);
+        say(l);
         return;
     }
-    desc_of(r.g_mvecs, w1, h1, f1);
+    desc_of(r.g_mvecs, w1, h1, f1, motion_name, sizeof motion_name);
     desc_of(r.g_backbuffer, w2, h2, f2);
     desc_of(r.g_out_interp, w3, h3, f3);
     snprintf(l, sizeof l,
@@ -374,6 +390,9 @@ void first_sight(unsigned long long h, const eval_rec &r, char kind)
              (double)r.g_mv_scale_x, (double)r.g_mv_scale_y, r.g_mf_count, r.g_mf_index,
              r.g_bb_frame_id, r.g_cam_motion, r.g_mv_jittered, r.g_reset, r.g_not_rendering,
              (void *)(uintptr_t)r.mvec);
+    say(l);
+    snprintf(l, sizeof l, "[MGPU][R316-NGX-MV] kind=F source=0x%llx name=%s %ux%u fmt=%u; does not imply displayed frame generation",
+             r.g_mvecs, motion_name, w1, h1, f1);
     say(l);
     if (r.g_have & (1u << 15))
     {
@@ -416,11 +435,9 @@ void init()
     {
         char l[400];
         snprintf(l, sizeof l,
-                 "[MGPU][D20][NR2] FRAME-GEN VECTOR FIX ON (NRFrameFilter=%d%s). While frame generation "
-                 "evaluates, every NR evaluate scales the game's vectors by 1/(MultiFrameCount+1) - one "
-                 "presented step - and a seal without a fresh vector (a generated frame) binds the last "
-                 "rendered frame's vectors from a kept copy on GPU 1 instead of none.%s The map below "
-                 "stays on as the instrument.",
+                 "[MGPU][R313] CAPTURE-VERIFIED FG policy (NRFrameFilter=%d%s). API calls alone never "
+                 "change motion scale. Unknown or unmatched captures keep fraction=1 and cannot reuse "
+                 "FG vectors or be thinned.%s",
                  mode, (mode == 3) ? ", thin" : "",
                  (mode == 3) ? " Mode 3 also evaluates only 1 generated frame in N (NRFrameKeep) and "
                                "re-presents the last output for the rest." : "");
@@ -449,6 +466,10 @@ bool fg_active()
     return g_fg_handle.load(std::memory_order_acquire) != 0ull &&
            g_fg_idle.load(std::memory_order_relaxed) <= reuse_window();
 }
+bool fg_presented_active()
+{
+    return g_last_verified.load(std::memory_order_acquire) && fg_active();
+}
 float step_fraction()
 {
     const unsigned mf = g_fg_mf_count.load(std::memory_order_relaxed);
@@ -466,9 +487,14 @@ bool thin_this()
 void on_reuse() { c_reused.fetch_add(1, std::memory_order_relaxed); }
 bool seal_generated(unsigned slot, unsigned long long frame_index)
 {
-    if (slot >= SLOT_N) return false;
-    if (g_slot_frame[slot].load(std::memory_order_acquire) != frame_index) return false;
-    return g_slot_pos[slot].load(std::memory_order_relaxed) == 1u;
+    return policy_for_seal(slot, frame_index).generated;
+}
+captured_policy policy_for_seal(unsigned slot, unsigned long long frame_index)
+{
+    if (!act() || slot >= SLOT_N || frame_index == 0ull) return {};
+    std::lock_guard<std::mutex> lock(g_evidence_mutex);
+    const auto &record = g_sealed_policies[slot];
+    return record.frame == frame_index ? record.policy : captured_policy{};
 }
 
 // ---- panel ----
@@ -495,7 +521,7 @@ void ui_set_keep(unsigned n)
 }
 void ui_counters(bool &fg_now, unsigned long long &reused, unsigned long long &thinned)
 {
-    fg_now = fg_active();
+    fg_now = fg_presented_active();
     reused = c_reused.load(std::memory_order_relaxed);
     thinned = c_thinned.load(std::memory_order_relaxed);
 }
@@ -503,11 +529,27 @@ void ui_counters(bool &fg_now, unsigned long long &reused, unsigned long long &t
 void on_create(unsigned int feature_id, unsigned long long handle)
 {
     if (!on() || feature_id != 11u || handle == 0ull) return;
+    {
+        std::lock_guard<std::mutex> lock(g_evidence_mutex);
+        g_present_evidence.reset();
+    }
+    g_last_verified.store(false, std::memory_order_relaxed);
     g_fg_handle.store(handle, std::memory_order_release);
     char l[200];
     snprintf(l, sizeof l, "[MGPU][D20][NR1] frame generation created (NGX feature id 11): handle %p, t=%.2fs",
              (void *)(uintptr_t)handle, now_s());
     say(l);
+}
+
+void on_release(unsigned long long handle)
+{
+    if (handle == 0ull) return;
+    auto expected = handle;
+    if (!g_fg_handle.compare_exchange_strong(expected, 0ull, std::memory_order_acq_rel)) return;
+    std::lock_guard<std::mutex> lock(g_evidence_mutex);
+    g_present_evidence.reset();
+    g_last_verified.store(false, std::memory_order_relaxed);
+    g_fg_idle.store(255u, std::memory_order_relaxed);
 }
 
 void on_evaluate(unsigned long long handle, const eval_rec &r)
@@ -517,7 +559,7 @@ void on_evaluate(unsigned long long handle, const eval_rec &r)
     char kind;
     if (r.scene) kind = 'S';
     else if (fgh != 0ull) kind = (handle == fgh) ? 'G' : 'O';
-    else kind = 'G';
+    else kind = 'O';
     first_sight(handle, r, kind);
 
     if (kind == 'S')
@@ -541,6 +583,15 @@ void on_evaluate(unsigned long long handle, const eval_rec &r)
     }
 
     c_fg.fetch_add(1, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(g_evidence_mutex);
+        const bool count_known = (r.g_have & (1u << 10)) != 0u;
+        const bool index_known = (r.g_have & (1u << 11)) != 0u;
+        g_present_evidence.evaluated({
+            r.g_backbuffer, r.g_out_real, r.g_out_interp,
+            count_known ? r.g_mf_count : 0u, index_known ? r.g_mf_index : 0u,
+            r.succeeded, (r.g_have & (1u << 12)) != 0u && r.g_not_rendering == 0u});
+    }
     const bool has_mv = (r.g_have & 2u) != 0u && r.g_mvecs != 0ull;
     if (!has_mv) c_fg_mv_none.fetch_add(1, std::memory_order_relaxed);
     else if (r.g_mvecs == g_scene_mvec.load(std::memory_order_relaxed)) c_fg_mv_same.fetch_add(1, std::memory_order_relaxed);
@@ -570,6 +621,18 @@ void on_evaluate(unsigned long long handle, const eval_rec &r)
     g_fg_real.store((r.g_have & (1u << 5)) ? r.g_out_real : 0ull, std::memory_order_relaxed);
     g_fg_bb.store((r.g_have & 1u) ? r.g_backbuffer : 0ull, std::memory_order_relaxed);
 
+    if (r.camera_valid != 0u)
+    {
+        std::lock_guard<std::mutex> lock(g_camera_mutex);
+        g_camera = r.camera;
+        g_camera.scene_sequence = c_scene.load(std::memory_order_relaxed);
+        g_camera.backbuffer = r.g_backbuffer;
+        g_camera.output_real = r.g_out_real;
+        g_camera.output_interpolated = r.g_out_interp;
+        g_camera.depth = r.g_depth;
+        g_camera.motion = r.g_mvecs;
+    }
+
     // Frame gen's vector handle changing: a resource recreation, or a ring of
     // its own. First 20 changes, with the scene's handle beside it.
     const unsigned long long prev_mv = g_fg_mvecs.exchange(has_mv ? r.g_mvecs : 0ull, std::memory_order_relaxed);
@@ -591,6 +654,19 @@ void on_evaluate(unsigned long long handle, const eval_rec &r)
            (r.g_have & (1u << 11)) ? r.g_mf_index : 0u);
 }
 
+bool read_camera(camera_snapshot &out)
+{
+    std::lock_guard<std::mutex> lock(g_camera_mutex);
+    if (g_camera.valid == 0u) return false;
+    out = g_camera;
+    return true;
+}
+
+std::uint64_t scene_sequence()
+{
+    return c_scene.load(std::memory_order_relaxed);
+}
+
 void on_mvec_copy(unsigned int slot)
 {
     if (!on()) return;
@@ -602,7 +678,14 @@ void on_seal(unsigned long long frame_index, unsigned int slot, unsigned int mve
              unsigned long long back_buffer)
 {
     if (!on()) return;
-    (void)slot;
+    {
+        std::lock_guard<std::mutex> lock(g_evidence_mutex);
+        const auto policy = g_present_evidence.capture(back_buffer);
+        if (slot < SLOT_N) g_sealed_policies[slot] = {frame_index, policy};
+        g_last_verified.store(policy.verified, std::memory_order_relaxed);
+        if (policy.verified) c_verified_seals.fetch_add(1, std::memory_order_relaxed);
+        else c_unknown_seals.fetch_add(1, std::memory_order_relaxed);
+    }
     {
         unsigned idle = g_fg_idle.load(std::memory_order_relaxed);   // NR2
         if (idle < 255u) g_fg_idle.store(idle + 1u, std::memory_order_relaxed);

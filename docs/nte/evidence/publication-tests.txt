@@ -1,0 +1,100 @@
+ 1/75 Test  #1: mgpu_continuous_trace_test .........................   Passed    0.42 sec
+ 2/75 Test  #2: mgpu_continuous_measurement_test ...................   Passed    6.32 sec
+ 3/75 Test  #3: mgpu_incomplete_measurement_rejected_test ..........   Passed    0.08 sec
+ 4/75 Test  #4: mgpu_legacy_continuous_transition_rejected_test ....   Passed    0.03 sec
+ 5/75 Test  #5: mgpu_continuous_game_work_warp_test ................   Passed    0.66 sec
+ 6/75 Test  #6: mgpu_nonblocking_recording_warp_test ...............   Passed    3.83 sec
+ 7/75 Test  #7: mgpu_nonblocking_fine_capacity_warp_test ...........   Passed    3.80 sec
+ 8/75 Test  #8: mgpu_nonblocking_unsubmitted_test ..................   Passed    5.22 sec
+ 9/75 Test  #9: mgpu_nonblocking_replay_test .......................   Passed    0.24 sec
+10/75 Test #10: mgpu_nonblocking_queue-limit_test ..................   Passed    0.21 sec
+11/75 Test #11: mgpu_nonblocking_delayed-retirement_test ...........   Passed    0.35 sec
+12/75 Test #12: mgpu_nonblocking_stop-during-scope_test ............   Passed    0.21 sec
+13/75 Test #13: mgpu_official_capacity_test ........................   Passed    0.04 sec
+14/75 Test #14: mgpu_official_capacity_old_rejected ................   Passed    0.04 sec
+15/75 Test #15: mgpu_game_work_policy_test .........................   Passed    0.04 sec
+16/75 Test #16: mgpu_game_work_trace_warp_test .....................   Passed    2.96 sec
+17/75 Test #17: mgpu_game_work_trace_stress_warp_test ..............   Passed    2.98 sec
+18/75 Test #18: mgpu_native_work_policy_test .......................   Passed    0.04 sec
+19/75 Test #19: mgpu_native_work_abi_test ..........................   Passed    0.03 sec
+20/75 Test #20: mgpu_native_work_warp_test .........................   Passed    2.98 sec
+21/75 Test #21: mgpu_native_work_stop_warp_test ....................   Passed    0.08 sec
+22/75 Test #22: mgpu_native_work_capacity_warp_test ................   Passed    2.95 sec
+23/75 Test #23: mgpu_trace_log_parts_test ..........................   Passed    0.04 sec
+24/75 Test #24: mgpu_game_work_native_boundary_warp_test ...........   Passed    3.79 sec
+25/75 Test #25: mgpu_game_work_native_reset_after_stop_warp_test ...   Passed    2.93 sec
+26/75 Test #26: mgpu_frame_measurement_test ........................   Passed    0.07 sec
+27/75 Test #27: mgpu_worker_dispatch_test ..........................   Passed    0.04 sec
+28/75 Test #28: mgpu_worker_dispatch_m358_control ..................   Passed    0.04 sec
+29/75 Test #29: mgpu_aligned_prefetch_test .........................   Passed    0.04 sec
+30/75 Test #30: mgpu_neural_poll_test ..............................   Passed    0.03 sec
+31/75 Test #31: mgpu_neural_poll_old_return_is_rejected ............   Passed    0.04 sec
+32/75 Test #32: mgpu_pipeline_timing_test ..........................   Passed    0.03 sec
+33/75 Test #33: mgpu_queue_clock_cache_test ........................   Passed    0.04 sec
+34/75 Test #34: mgpu_producer_copy_warp_test .......................   Passed    0.17 sec
+35/75 Test #35: mgpu_color_copy_overlap_warp_test ..................   Passed    0.68 sec
+36/75 Test #36: mgpu_guide_copy_overlap_warp_test ..................   Passed    0.91 sec
+37/75 Test #37: mgpu_neural_history_test ...........................   Passed    0.04 sec
+38/75 Test #38: mgpu_neural_snapshots_warp_test ....................   Passed    0.15 sec
+39/75 Test #39: mgpu_async_consumer_test ...........................   Passed    0.11 sec
+40/75 Test #40: mgpu_presentation_freshness_test ...................   Passed    0.04 sec
+41/75 Test #41: mgpu_presentation_feedback_warp_test ...............   Passed    0.09 sec
+42/75 Test #42: mgpu_secondary_fg_pipeline_test ....................   Passed    0.05 sec
+43/75 Test #43: mgpu_secondary_fg_retirement_test ..................   Passed    0.45 sec
+44/75 Test #44: mgpu_fg_presentation_old_defect_is_rejected ........   Passed    0.06 sec
+45/75 Test #45: mgpu_fg_partial_progress_old_defect_is_rejected ....   Passed    0.45 sec
+46/75 Test #46: mgpu_secondary_fg_contract_test ....................   Passed    0.04 sec
+47/75 Test #47: mgpu_secondary_fg_api_test .........................   Passed    0.04 sec
+48/75 Test #48: mgpu_secondary_fg_stage_warp_test ..................   Passed    0.17 sec
+49/75 Test #49: mgpu_streamline_constants_test .....................   Passed    0.04 sec
+50/75 Test #50: mgpu_neural_pipeline_test ..........................   Passed    0.03 sec
+51/75 Test #51: mgpu_depth_plane_policy_test .......................   Passed    0.05 sec
+52/75 Test #52: mgpu_depth_normalizer_warp_test ....................   Passed    0.15 sec
+53/75 Test #53: mgpu_d3d12_device_identity_test ....................   Passed    0.05 sec
+54/75 Test #54: mgpu_aligned_texture_policy_test ...................   Passed    0.04 sec
+55/75 Test #55: mgpu_aligned_frame_policy_test .....................   Passed    0.04 sec
+56/75 Test #56: mgpu_calibration_policy_test .......................   Passed    0.04 sec
+57/75 Test #57: mgpu_native_reflex_request_test ....................   Passed    0.04 sec
+58/75 Test #58: mgpu_aligned_queue_abi_test ........................   Passed    0.04 sec
+59/75 Test #59: mgpu_aligned_submission_test .......................   Passed    0.04 sec
+60/75 Test #60: mgpu_fenced_pipeline_warp_test .....................   Passed    0.16 sec
+61/75 Test #61: mgpu_source_ready_dispatch_warp_test ...............   Passed    0.29 sec
+62/75 Test #62: mgpu_motion_frame_packet_test ......................   Passed    0.04 sec
+63/75 Test #63: mgpu_present_read_retirement_test ..................   Passed    0.04 sec
+64/75 Test #64: mgpu_tagged_motion_policy_test .....................   Passed    0.04 sec
+65/75 Test #65: mgpu_streamline_tag_reader_test ....................   Passed    0.04 sec
+66/75 Test #66: mgpu_streamline_route_audit_test ...................   Passed    0.04 sec
+67/75 Test #67: mgpu_motion_source_audit_test ......................   Passed    0.04 sec
+68/75 Test #68: mgpu_fg_present_evidence_test ......................   Passed    0.04 sec
+69/75 Test #69: mgpu_adapter_selection_test ........................   Passed    0.04 sec
+70/75 Test #70: mgpu_temporal_diag_test ............................   Passed    0.04 sec
+71/75 Test #71: mgpu_perf_diag_test ................................   Passed    0.03 sec
+72/75 Test #72: mgpu_feature_diag_test .............................   Passed    0.03 sec
+73/75 Test #73: mgpu_producer_diag_test ............................   Passed    0.03 sec
+74/75 Test #74: mgpu_queue_dependency_trace_warp_test ..............   Passed    0.11 sec
+75/75 Test #75: mgpu_queue_dependency_trace_overflow_test ..........   Passed    0.47 sec
+100% tests passed, 0 tests failed out of 75
+Total Test time (real) =  46.14 sec
+ 1/20 Test  #1: official_fg_mode_policy ...................   Passed    0.04 sec
+ 2/20 Test  #2: official_output_trace_pipeline ............   Passed    3.11 sec
+ 3/20 Test  #3: official_reflex_contract ..................   Passed    0.04 sec
+ 4/20 Test  #4: official_output_trace .....................   Passed    0.27 sec
+ 5/20 Test  #5: official_output_osd_warp ..................   Passed    0.23 sec
+ 6/20 Test  #6: official_output_visibility ................   Passed    0.04 sec
+ 7/20 Test  #7: official_output_window ....................   Passed    0.49 sec
+ 8/20 Test  #8: official_input_queue_isolation ............   Passed    0.34 sec
+ 9/20 Test  #9: official_input_queue_legacy_control .......   Passed    0.09 sec
+10/20 Test #10: official_mouse_passthrough ................   Passed    0.08 sec
+11/20 Test #11: official_mouse_passthrough_m362_control ...   Passed    0.08 sec
+12/20 Test #12: official_metrics ..........................   Passed    0.04 sec
+13/20 Test #13: official_live_log_readable ................   Passed    0.04 sec
+14/20 Test #14: official_source_history ...................   Passed    0.05 sec
+15/20 Test #15: shared_frame_contract .....................   Passed    0.04 sec
+16/20 Test #16: shared_transport_warp_processes ...........   Passed    0.35 sec
+17/20 Test #17: probe_policy ..............................   Passed    0.04 sec
+18/20 Test #18: probe_requires_explicit_mode ..............   Passed    0.04 sec
+19/20 Test #19: probe_rejects_unknown_mode ................   Passed    0.01 sec
+20/20 Test #20: probe_rejects_relative_runtime ............   Passed    0.01 sec
+100% tests passed, 0 tests failed out of 20
+Total Test time (real) =   5.48 sec
+PASS: source build and CTest; live game performance and visual acceptance are separate

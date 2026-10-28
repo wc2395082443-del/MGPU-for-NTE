@@ -1,0 +1,42 @@
+Internal ctest changing into directory: <archived-M363-build>
+Test project <archived-M363-build>
+      Start  1: official_fg_mode_policy
+ 1/18 Test  #1: official_fg_mode_policy ...................   Passed    0.04 sec
+      Start  2: official_output_trace_pipeline
+ 2/18 Test  #2: official_output_trace_pipeline ............   Passed    3.09 sec
+      Start  3: official_reflex_contract
+ 3/18 Test  #3: official_reflex_contract ..................   Passed    0.03 sec
+      Start  4: official_output_trace
+ 4/18 Test  #4: official_output_trace .....................   Passed    0.27 sec
+      Start  5: official_output_visibility
+ 5/18 Test  #5: official_output_visibility ................   Passed    0.04 sec
+      Start  6: official_output_window
+ 6/18 Test  #6: official_output_window ....................   Passed    0.36 sec
+      Start  7: official_input_queue_isolation
+ 7/18 Test  #7: official_input_queue_isolation ............   Passed    0.21 sec
+      Start  8: official_input_queue_legacy_control
+ 8/18 Test  #8: official_input_queue_legacy_control .......   Passed    0.20 sec
+      Start  9: official_mouse_passthrough
+ 9/18 Test  #9: official_mouse_passthrough ................   Passed    0.04 sec
+      Start 10: official_mouse_passthrough_m362_control
+10/18 Test #10: official_mouse_passthrough_m362_control ...   Passed    0.05 sec
+      Start 11: official_metrics
+11/18 Test #11: official_metrics ..........................   Passed    0.04 sec
+      Start 12: official_live_log_readable
+12/18 Test #12: official_live_log_readable ................   Passed    0.03 sec
+      Start 13: official_source_history
+13/18 Test #13: official_source_history ...................   Passed    0.04 sec
+      Start 14: shared_frame_contract
+14/18 Test #14: shared_frame_contract .....................   Passed    0.03 sec
+      Start 15: probe_policy
+15/18 Test #15: probe_policy ..............................   Passed    0.03 sec
+      Start 16: probe_requires_explicit_mode
+16/18 Test #16: probe_requires_explicit_mode ..............   Passed    0.06 sec
+      Start 17: probe_rejects_unknown_mode
+17/18 Test #17: probe_rejects_unknown_mode ................   Passed    0.02 sec
+      Start 18: probe_rejects_relative_runtime
+18/18 Test #18: probe_rejects_relative_runtime ............   Passed    0.01 sec
+
+100% tests passed, 0 tests failed out of 18
+
+Total Test time (real) =   4.63 sec

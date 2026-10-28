@@ -3,12 +3,14 @@
 // on the bridge thread.
 
 #include "nr16.hpp"
+#include "neural_pipeline.hpp"
 
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
+#include <array>
 #include <vector>
 
 #include "diag.hpp"
@@ -33,8 +35,9 @@ ID3D12PipelineState  *g_enc  = nullptr;
 ID3D12PipelineState  *g_dec  = nullptr;
 ID3D12DescriptorHeap *g_heap = nullptr;
 UINT                  g_inc  = 0;
-ID3D12Resource       *g_in16  = nullptr;
-ID3D12Resource       *g_out16 = nullptr;
+constexpr unsigned PIPELINE_SLOTS = neural_pipeline::schedule::SLOTS;
+std::array<ID3D12Resource *, PIPELINE_SLOTS> g_in16{};
+std::array<ID3D12Resource *, PIPELINE_SLOTS> g_out16{};
 
 const unsigned FAILS_MAX = 3;
 const UINT     SLOTS_PER_PARITY = 4;   // SRV src, UAV in16 | SRV out16, UAV dst
@@ -76,8 +79,11 @@ void release_all()
     u = g_dec;   rel(u); g_dec   = nullptr;
     u = g_rs;    rel(u); g_rs    = nullptr;
     u = g_heap;  rel(u); g_heap  = nullptr;
-    u = g_in16;  rel(u); g_in16  = nullptr;
-    u = g_out16; rel(u); g_out16 = nullptr;
+    for (unsigned i = 0; i < PIPELINE_SLOTS; ++i)
+    {
+        u = g_in16[i];  rel(u); g_in16[i]  = nullptr;
+        u = g_out16[i]; rel(u); g_out16[i] = nullptr;
+    }
     g_dev = nullptr;
 }
 
@@ -166,10 +172,8 @@ bool build_kernels(ID3D12Device *dev)
     for (int i = 0; i < 2; ++i)
     {
         ID3DBlob *err = nullptr;
-        // R208a: cs_5_0 - FC6's d3dcompiler_47 rejects cs_5_1 (X3506; R316c found it). The two
-        // kernels use nothing from shader model 5.1.
         const HRESULT hr = compile(kHLSL, strlen(kHLSL), "nr16", nullptr, nullptr, entry[i],
-                                   "cs_5_0", 0, 0, &cs[i], &err);
+                                   "cs_5_1", 0, 0, &cs[i], &err);
         if (FAILED(hr) || cs[i] == nullptr)
         {
             snprintf(line, sizeof line, "[MGPU][R208] kernel '%s' failed to compile: 0x%08X %s",
@@ -236,7 +240,7 @@ bool build_kernels(ID3D12Device *dev)
 
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = 2u * SLOTS_PER_PARITY;
+    hd.NumDescriptors = PIPELINE_SLOTS * SLOTS_PER_PARITY;
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     hr = dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&g_heap));
     if (FAILED(hr)) return false;
@@ -264,7 +268,7 @@ DXGI_FORMAT code_value_format(DXGI_FORMAT f)
 D3D12_GPU_DESCRIPTOR_HANDLE write_pair(unsigned parity, unsigned first,
                                        ID3D12Resource *srv_res, ID3D12Resource *uav_res)
 {
-    const SIZE_T slot = (SIZE_T)(parity & 1u) * SLOTS_PER_PARITY + first;
+    const SIZE_T slot = (SIZE_T)(parity % PIPELINE_SLOTS) * SLOTS_PER_PARITY + first;
     D3D12_CPU_DESCRIPTOR_HANDLE h = g_heap->GetCPUDescriptorHandleForHeapStart();
     h.ptr += slot * g_inc;
     D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
@@ -342,8 +346,12 @@ bool arm(ID3D12Device *dev, unsigned width, unsigned height)
     g_dev = dev;
     g_w = width;
     g_h = height;
-    HRESULT h = make_tex16(dev, width, height, &g_in16);
-    if (SUCCEEDED(h)) h = make_tex16(dev, width, height, &g_out16);
+    HRESULT h = S_OK;
+    for (unsigned i = 0; i < PIPELINE_SLOTS && SUCCEEDED(h); ++i)
+    {
+        h = make_tex16(dev, width, height, &g_in16[i]);
+        if (SUCCEEDED(h)) h = make_tex16(dev, width, height, &g_out16[i]);
+    }
     if (FAILED(h) || !build_kernels(dev))
     {
         char l[240];
@@ -378,20 +386,23 @@ void encode(ID3D12GraphicsCommandList *cl, unsigned parity, ID3D12Resource *src,
             ID3D12Resource **nr_color, ID3D12Resource **nr_output)
 {
     if (!active() || cl == nullptr || src == nullptr) return;
-    const D3D12_GPU_DESCRIPTOR_HANDLE t = write_pair(parity, 0u, src, g_in16);
+    const unsigned slot = parity % PIPELINE_SLOTS;
+    const D3D12_GPU_DESCRIPTOR_HANDLE t = write_pair(slot, 0u, src, g_in16[slot]);
     dispatch(cl, g_enc, t);
     // in16 as NR's input, in the state this project always hands NGX an input.
-    transition(cl, g_in16, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+    transition(cl, g_in16[slot], D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    if (nr_color != nullptr) *nr_color = g_in16;
-    if (nr_output != nullptr) *nr_output = g_out16;
+    if (nr_color != nullptr) *nr_color = g_in16[slot];
+    if (nr_output != nullptr) *nr_output = g_out16[slot];
 }
 
 void decode(ID3D12GraphicsCommandList *cl, unsigned parity, ID3D12Resource *dst,
             bool evaluate_ok)
 {
-    if (g_in16 == nullptr || cl == nullptr) return;
-    transition(cl, g_in16, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+    if (cl == nullptr) return;
+    const unsigned slot = parity % PIPELINE_SLOTS;
+    if (g_in16[slot] == nullptr || g_out16[slot] == nullptr) return;
+    transition(cl, g_in16[slot], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     if (!g_said_first)
     {
@@ -416,12 +427,12 @@ void decode(ID3D12GraphicsCommandList *cl, unsigned parity, ID3D12Resource *dst,
     }
     g_fails = 0;
     if (dst == nullptr) return;
-    uav_barrier(cl, g_out16);   // NR's writes done before the decode reads
-    transition(cl, g_out16, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+    uav_barrier(cl, g_out16[slot]);   // NR's writes done before the decode reads
+    transition(cl, g_out16[slot], D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    const D3D12_GPU_DESCRIPTOR_HANDLE t = write_pair(parity, 2u, g_out16, dst);
+    const D3D12_GPU_DESCRIPTOR_HANDLE t = write_pair(slot, 2u, g_out16[slot], dst);
     dispatch(cl, g_dec, t);
-    transition(cl, g_out16, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+    transition(cl, g_out16[slot], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     uav_barrier(cl, dst);       // the decode's writes done before anything reads dst
 }

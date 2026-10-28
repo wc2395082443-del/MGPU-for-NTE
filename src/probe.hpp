@@ -121,15 +121,6 @@ int jitter_mode();
 // the DLSS evaluate call instead - once per frame, guaranteed.
 int eval_copy_mode();
 
-// R315. MVecBarrierSource: 0 absent/as before, 1 the barrier route also fires on the published
-// source (R103's handle), on a write-state -> shader_resource transition. Fires = that route's count.
-int mvec_barrier_source();
-unsigned long long mvec_barrier_source_fires();
-// R315b (value 2): gpu1's per-frame answer (fire at the transition or not), the tail copy, its count.
-void r315_set_transition(bool on);
-void r315_tail_copy(void *command_list_ptr);
-unsigned long long r315_tail_copies();
-
 // R180/R182. The Starfield path key: -2 absent (AUTO), 0 off, 1 on.
 int sf_path_mode();
 
@@ -218,7 +209,6 @@ void mvec_pick_lock(bool on);   // R278f-r: the stream is producing; the dump ke
 // publishes no source while on (and the pick is not locked).
 void mvec_offer(unsigned long long handle, unsigned w, unsigned h, unsigned fmt);
 void mvec_defer(bool on);
-void mvec_force(unsigned long long handle);   // R307: the sweep's target is the pick whenever it is eligible (0 = rule as before)
 void mvec_withdraw(unsigned long long handle);   // R280g: an add-on-created candidate is gone (ReShade raises no destroy_resource for it)
 
 // Installed by dllmain. Called at most ONCE PER FRAME, on the game's render

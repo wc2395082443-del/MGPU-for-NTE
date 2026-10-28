@@ -1,0 +1,316 @@
+#include "producer_copy.hpp"
+#include <dxgi1_4.h>
+#include <d3d12sdklayers.h>
+#include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstring>
+#include <vector>
+
+using Microsoft::WRL::ComPtr;
+namespace mgpu::diag { void info(const char *) {} }
+static std::atomic<bool> g_present_read_fault{false};
+static constexpr UINT64 SEAL_STRIDE = 512;
+#ifdef MGPU_TEST_GUIDE_SPLIT
+static constexpr bool test_guide_split = true;
+#else
+static constexpr bool test_guide_split = false;
+#endif
+struct copy_queue_proxy
+{
+    ID3D12CommandQueue *queue = nullptr;
+    ID3D12Fence *failed_wait = nullptr, *failed_signal = nullptr;
+    unsigned submissions = 0;
+    copy_queue_proxy &operator=(ID3D12CommandQueue *value) { queue = value; return *this; }
+    operator ID3D12CommandQueue *() const { return queue; }
+    copy_queue_proxy *operator->() { return this; }
+    HRESULT Wait(ID3D12Fence *fence, UINT64 value) { return fence == failed_wait ? E_FAIL : queue->Wait(fence, value); }
+    HRESULT Signal(ID3D12Fence *fence, UINT64 value) { return fence == failed_signal ? E_FAIL : queue->Signal(fence, value); }
+    void ExecuteCommandLists(UINT count, ID3D12CommandList *const *commands) { ++submissions; queue->ExecuteCommandLists(count, commands); }
+};
+struct stream_state
+{
+    static constexpr unsigned PIPELINE_SLOTS = 3, RING = 4;
+    struct { bool busy = false; bool owns_input(unsigned) const { return busy; } } pipeline;
+    copy_queue_proxy cq;
+    ID3D12Fence *cqf = nullptr, *nfence = nullptr, *ncolor_ready = nullptr;
+    ID3D12Fence *ndepth_ready = nullptr;
+    ID3D12CommandAllocator *cqa[PIPELINE_SLOTS]{}, *cq_color_allocators[PIPELINE_SLOTS]{};
+    ID3D12GraphicsCommandList *cql[PIPELINE_SLOTS]{}, *cq_color_lists[PIPELINE_SLOTS]{};
+    ID3D12CommandAllocator *cq_depth_allocators[PIPELINE_SLOTS]{};
+    ID3D12GraphicsCommandList *cq_depth_lists[PIPELINE_SLOTS]{};
+    ID3D12Resource *tex_in[PIPELINE_SLOTS]{}, *tex_depth[PIPELINE_SLOTS]{}, *tex_mvec_r[PIPELINE_SLOTS]{};
+    ID3D12Resource *nxfer = nullptr, *cq_tsread = nullptr;
+    ID3D12QueryHeap *cq_tsheap = nullptr;
+    bool color_copy_overlap = true, cq_gated = true, cq_ts_ok = false, finished = false;
+    bool guide_copy_overlap = test_guide_split;
+    UINT64 cqa_value[PIPELINE_SLOTS]{}, cq_frame[PIPELINE_SLOTS]{}, cqf_value = 0;
+    unsigned long long cq_issued = 0;
+    UINT64 slot_bytes = 0, depth_bytes = 0, mvec_bytes2 = 0, depth_off = 0, mvec_off = 0;
+    unsigned depth_mode = 1, mvec_mode = 3, depth_unpacks = 0, mvec_unpacks = 0;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{}, depth_fp{}, mvec_fp2{};
+    mgpu::timing::calibration copy_clocks[PIPELINE_SLOTS]{};
+    mgpu::timing::queue_clock_cache copy_clock_cache;
+};
+
+@CONSUMER_COPY_IMPLEMENTATION@
+
+void require(HRESULT result) { if (FAILED(result)) throw result; }
+void wait_for(ID3D12Fence *fence, UINT64 value)
+{
+    const auto deadline = GetTickCount64() + 5000;
+    while (fence->GetCompletedValue() < value && GetTickCount64() < deadline) Sleep(1);
+    if (fence->GetCompletedValue() == UINT64_MAX || fence->GetCompletedValue() < value) throw E_FAIL;
+}
+ComPtr<ID3D12Resource> make_buffer(ID3D12Device *device, D3D12_HEAP_TYPE type, UINT64 bytes)
+{
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = type;
+    D3D12_RESOURCE_DESC description{};
+    description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    description.Width = bytes;
+    description.Height = description.DepthOrArraySize = description.MipLevels = description.SampleDesc.Count = 1;
+    description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    const auto state = type == D3D12_HEAP_TYPE_UPLOAD ? D3D12_RESOURCE_STATE_GENERIC_READ :
+        type == D3D12_HEAP_TYPE_READBACK ? D3D12_RESOURCE_STATE_COPY_DEST : D3D12_RESOURCE_STATE_COMMON;
+    ComPtr<ID3D12Resource> resource;
+    require(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description, state, nullptr, IID_PPV_ARGS(&resource)));
+    return resource;
+}
+struct release_gate { ID3D12Fence *fence; UINT64 value; ~release_gate() { fence->Signal(value); } };
+
+int main()
+{
+    try
+    {
+        ComPtr<ID3D12Debug> debug;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) debug->EnableDebugLayer();
+        ComPtr<IDXGIFactory4> factory;
+        ComPtr<IDXGIAdapter> adapter;
+        ComPtr<ID3D12Device> device;
+        require(CreateDXGIFactory1(IID_PPV_ARGS(&factory)));
+        require(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)));
+        require(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)));
+        ComPtr<ID3D12InfoQueue> validation;
+        device.As(&validation);
+        stream_state state;
+        ComPtr<ID3D12CommandQueue> receiver, renderer;
+        D3D12_COMMAND_QUEUE_DESC queue_description{};
+        queue_description.Type = D3D12_COMMAND_LIST_TYPE_COPY;
+        require(device->CreateCommandQueue(&queue_description, IID_PPV_ARGS(&receiver)));
+        queue_description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        require(device->CreateCommandQueue(&queue_description, IID_PPV_ARGS(&renderer)));
+        state.cq = receiver.Get();
+        ComPtr<ID3D12Fence> arrived, color_ready, depth_ready, guides_ready, consumed, rendered, drained;
+        for (auto *fence : {arrived.GetAddressOf(), color_ready.GetAddressOf(), depth_ready.GetAddressOf(), guides_ready.GetAddressOf(), consumed.GetAddressOf(), rendered.GetAddressOf(), drained.GetAddressOf()})
+            require(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence)));
+        std::array<ComPtr<ID3D12Fence>, 3> source_gates;
+        for (auto &gate : source_gates) require(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate)));
+        state.cqf = consumed.Get(); state.nfence = arrived.Get(); state.ncolor_ready = color_ready.Get();
+        state.ndepth_ready = depth_ready.Get();
+        std::array<ComPtr<ID3D12CommandAllocator>, 9> allocators;
+        std::array<ComPtr<ID3D12GraphicsCommandList>, 9> commands;
+        for (unsigned index = 0; index < 9; ++index)
+        {
+            require(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, IID_PPV_ARGS(&allocators[index])));
+            require(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY, allocators[index].Get(), nullptr, IID_PPV_ARGS(&commands[index])));
+            require(commands[index]->Close());
+            if (index < 3) { state.cqa[index] = allocators[index].Get(); state.cql[index] = commands[index].Get(); }
+            else if (index < 6) { state.cq_color_allocators[index-3] = allocators[index].Get(); state.cq_color_lists[index-3] = commands[index].Get(); }
+            else { state.cq_depth_allocators[index-6] = allocators[index].Get(); state.cq_depth_lists[index-6] = commands[index].Get(); }
+        }
+        const std::array<DXGI_FORMAT, 3> formats{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R16G16_FLOAT};
+        std::array<D3D12_PLACED_SUBRESOURCE_FOOTPRINT, 3> footprints{};
+        std::array<UINT64, 3> plane_bytes{};
+        std::array<std::array<ComPtr<ID3D12Resource>, 3>, 3> textures;
+        D3D12_HEAP_PROPERTIES texture_heap{}; texture_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        for (unsigned plane = 0; plane < 3; ++plane)
+        {
+            D3D12_RESOURCE_DESC texture{};
+            texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; texture.Width = 17; texture.Height = 5;
+            texture.DepthOrArraySize = texture.MipLevels = texture.SampleDesc.Count = 1; texture.Format = formats[plane];
+            device->GetCopyableFootprints(&texture, 0, 1, 0, &footprints[plane], nullptr, nullptr, &plane_bytes[plane]);
+            for (unsigned input = 0; input < 3; ++input)
+                require(device->CreateCommittedResource(&texture_heap, D3D12_HEAP_FLAG_NONE, &texture,
+                    D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&textures[plane][input])));
+        }
+        const UINT64 plane_stride = (plane_bytes[0] + 511) & ~UINT64(511);
+        state.slot_bytes = SEAL_STRIDE + plane_stride * 3;
+        state.depth_off = SEAL_STRIDE + plane_stride; state.mvec_off = SEAL_STRIDE + plane_stride * 2;
+        state.depth_bytes = plane_bytes[1]; state.mvec_bytes2 = plane_bytes[2];
+        state.fp = footprints[0]; state.depth_fp = footprints[1]; state.mvec_fp2 = footprints[2];
+        for (unsigned input = 0; input < 3; ++input)
+        {
+            state.tex_in[input] = textures[0][input].Get(); state.tex_depth[input] = textures[1][input].Get();
+            state.tex_mvec_r[input] = textures[2][input].Get();
+        }
+        auto shared = make_buffer(device.Get(), D3D12_HEAP_TYPE_DEFAULT, state.slot_bytes * state.RING);
+        auto upload = make_buffer(device.Get(), D3D12_HEAP_TYPE_UPLOAD, state.slot_bytes);
+        auto readback = make_buffer(device.Get(), D3D12_HEAP_TYPE_READBACK, state.slot_bytes);
+        state.nxfer = shared.Get();
+        std::array<ComPtr<ID3D12Resource>, 3> source_planes;
+        for (unsigned plane = 0; plane < 3; ++plane) source_planes[plane] = make_buffer(device.Get(), D3D12_HEAP_TYPE_DEFAULT, plane_bytes[plane]);
+        ComPtr<ID3D12CommandAllocator> render_allocator;
+        ComPtr<ID3D12GraphicsCommandList> render_command;
+        require(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&render_allocator)));
+        require(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, render_allocator.Get(), nullptr, IID_PPV_ARGS(&render_command)));
+        require(render_command->Close());
+        ComPtr<ID3D12QueryHeap> timestamps;
+        ComPtr<ID3D12Resource> timestamp_readback;
+        D3D12_FEATURE_DATA_D3D12_OPTIONS3 options{};
+        if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3, &options, sizeof options)) && options.CopyQueueTimestampQueriesSupported)
+        {
+            D3D12_QUERY_HEAP_DESC description{}; description.Type = D3D12_QUERY_HEAP_TYPE_COPY_QUEUE_TIMESTAMP; description.Count = 18;
+            require(device->CreateQueryHeap(&description, IID_PPV_ARGS(&timestamps)));
+            timestamp_readback = make_buffer(device.Get(), D3D12_HEAP_TYPE_READBACK, 18 * sizeof(UINT64));
+            state.cq_tsheap = timestamps.Get(); state.cq_tsread = timestamp_readback.Get(); state.cq_ts_ok = true;
+        }
+        mgpu::producer_copy::transfer_queue transfer;
+        require(transfer.initialize(device.Get()));
+        unsigned overlap_verified = 0;
+        unsigned depth_early_verified = 0, partial_failures_verified = 0;
+        for (UINT64 frame = 1; frame <= 9; ++frame)
+        {
+            const unsigned input = unsigned((frame-1) % 3), slot = unsigned((frame-1) % state.RING);
+            const UINT64 offset = slot * state.slot_bytes;
+            std::vector<unsigned char> expected(static_cast<size_t>(state.slot_bytes));
+            for (size_t index = 0; index < expected.size(); ++index) expected[index] = static_cast<unsigned char>(index * 7 + frame * 19);
+            const UINT64 seal[2] = {frame, 1000 + frame * 3};
+            std::memcpy(expected.data(), seal, sizeof seal);
+            void *mapped = nullptr;
+            require(upload->Map(0, nullptr, &mapped)); std::memcpy(mapped, expected.data(), expected.size()); upload->Unmap(0, nullptr);
+            require(render_allocator->Reset()); require(render_command->Reset(render_allocator.Get(), nullptr));
+            for (unsigned plane = 0; plane < 3; ++plane)
+                render_command->CopyBufferRegion(source_planes[plane].Get(), 0, upload.Get(), SEAL_STRIDE + plane_stride * plane, plane_bytes[plane]);
+            require(render_command->Close()); ID3D12CommandList *render_lists[] = {render_command.Get()};
+            renderer->ExecuteCommandLists(1, render_lists); require(renderer->Signal(rendered.Get(), frame * 2 - 1));
+            std::array<mgpu::producer_copy::range, 4> ranges{};
+            ranges[0] = {upload.Get(), 0, offset, sizeof seal};
+            for (unsigned plane = 0; plane < 3; ++plane)
+                ranges[plane+1] = {source_planes[plane].Get(), 0, offset + SEAL_STRIDE + plane_stride * plane, plane_bytes[plane]};
+            std::array<mgpu::producer_copy::dependency, 3> gates{{{rendered.Get(),frame*2-1},{guides_ready.Get(),frame},{rendered.Get(),frame*2-1}}};
+            release_gate unblock{guides_ready.Get(), frame};
+            release_gate unblock_color{source_gates[0].Get(), frame};
+            release_gate unblock_depth{source_gates[1].Get(), frame};
+            release_gate unblock_motion{source_gates[2].Get(), frame};
+            if (test_guide_split)
+            {
+                wait_for(rendered.Get(), frame * 2 - 1);
+                for (unsigned plane = 0; plane < 3; ++plane) gates[plane] = {source_gates[plane].Get(), frame};
+                if (frame == 1)
+                {
+                    UINT64 rejected = 99;
+                    if (transfer.submit(ranges, 4, shared.Get(), arrived.Get(), frame, rejected, gates, color_ready.Get(), arrived.Get()) != E_INVALIDARG || rejected != 0) throw E_FAIL;
+                    if (transfer.submit(ranges, 4, shared.Get(), arrived.Get(), frame, rejected, gates, nullptr, depth_ready.Get()) != E_INVALIDARG) throw E_FAIL;
+                    if (transfer.submit(ranges, 4, shared.Get(), arrived.Get(), frame, rejected, gates, color_ready.Get(), color_ready.Get()) != E_INVALIDARG) throw E_FAIL;
+                    auto overlapping = ranges;
+                    overlapping[2].target_offset = overlapping[3].target_offset;
+                    if (transfer.submit(overlapping, 4, shared.Get(), arrived.Get(), frame, rejected, gates, color_ready.Get(), depth_ready.Get()) != E_INVALIDARG) throw E_FAIL;
+                }
+            }
+            UINT64 retirement = 0;
+            require(transfer.submit(ranges, 4, shared.Get(), arrived.Get(), frame, retirement, gates,
+                color_ready.Get(), test_guide_split ? depth_ready.Get() : nullptr));
+            state.pipeline.busy = true;
+            if (stream_cq_submit(state, frame, input)) throw E_FAIL;
+            state.pipeline.busy = false;
+            if (!stream_cq_submit(state, frame, input)) throw E_FAIL;
+            const unsigned delayed_plane = unsigned((frame - 1) % 3);
+            if (test_guide_split)
+            {
+                for (unsigned plane = 0; plane < 3; ++plane)
+                    if (plane != delayed_plane) require(source_gates[plane]->Signal(frame));
+                if (delayed_plane != 0) wait_for(color_ready.Get(), frame);
+                if (delayed_plane == 2) wait_for(depth_ready.Get(), frame);
+                if (delayed_plane == 0 && color_ready->GetCompletedValue() >= frame) throw E_FAIL;
+                if (delayed_plane < 2 && depth_ready->GetCompletedValue() >= frame) throw E_FAIL;
+            }
+            else wait_for(color_ready.Get(), frame);
+            const bool held = transfer.pending() && arrived->GetCompletedValue() < frame && consumed->GetCompletedValue() < state.cqa_value[input];
+            const bool rejected_reuse = !stream_cq_submit(state, frame, input);
+            Sleep(30);
+            if (test_guide_split) require(source_gates[delayed_plane]->Signal(frame));
+            else require(guides_ready->Signal(frame));
+            wait_for(arrived.Get(), frame); wait_for(consumed.Get(), state.cqa_value[input]);
+            if (!held || !rejected_reuse || transfer.pending() || state.cq_frame[input] != frame || g_present_read_fault.load()) throw E_FAIL;
+            const auto sent = transfer.sample(retirement);
+            if (state.cq_ts_ok && sent.guides_execution.start_ms >= 0)
+            {
+                require(timestamp_readback->Map(0, nullptr, &mapped));
+                const auto *values = static_cast<const UINT64 *>(mapped) + input * 6;
+                const auto color = mgpu::timing::decode(values[0], values[1], state.copy_clocks[input]);
+                const auto depth = test_guide_split ? mgpu::timing::decode(values[2], values[3], state.copy_clocks[input]) : mgpu::timing::span{};
+                timestamp_readback->Unmap(0, nullptr);
+                if (!test_guide_split || delayed_plane == 1)
+                {
+                    if (color.end_ms < 0 || color.end_ms >= sent.guides_execution.start_ms) throw E_FAIL;
+                    ++overlap_verified;
+                }
+                if (test_guide_split && delayed_plane == 2)
+                {
+                    if (depth.end_ms < 0 || depth.end_ms >= sent.motion_execution.start_ms) throw E_FAIL;
+                    ++depth_early_verified;
+                }
+            }
+            wait_for(rendered.Get(), frame*2-1);
+            require(render_allocator->Reset()); require(render_command->Reset(render_allocator.Get(), nullptr));
+            render_command->CopyBufferRegion(readback.Get(), 0, shared.Get(), offset, sizeof seal);
+            for (unsigned plane = 0; plane < 3; ++plane)
+            {
+                D3D12_TEXTURE_COPY_LOCATION source{}, destination{};
+                source.pResource = textures[plane][input].Get(); source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                destination.pResource = readback.Get(); destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                destination.PlacedFootprint = footprints[plane]; destination.PlacedFootprint.Offset = SEAL_STRIDE + plane_stride * plane;
+                render_command->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+            }
+            require(render_command->Close()); renderer->ExecuteCommandLists(1, render_lists);
+            require(renderer->Signal(rendered.Get(), frame*2)); wait_for(rendered.Get(), frame*2);
+            require(readback->Map(0, nullptr, &mapped));
+            bool exact = std::memcmp(mapped, expected.data(), sizeof seal) == 0;
+            for (unsigned plane = 0; plane < 3; ++plane)
+                for (unsigned row = 0; row < 5; ++row)
+                {
+                    const size_t position = static_cast<size_t>(SEAL_STRIDE + plane_stride * plane + row * footprints[plane].Footprint.RowPitch);
+                    exact &= std::memcmp(static_cast<const char *>(mapped)+position, expected.data()+position, 17*4) == 0;
+                }
+            readback->Unmap(0, nullptr); if (!exact) throw E_FAIL;
+        }
+        if (test_guide_split)
+        {
+            for (unsigned failure = 0; failure < 3; ++failure)
+            {
+                const UINT64 frame = 10 + failure;
+                const unsigned input = failure;
+                require(color_ready->Signal(frame));
+                require(depth_ready->Signal(frame));
+                require(arrived->Signal(frame));
+                state.cq.failed_wait = failure == 0 ? depth_ready.Get() : failure == 1 ? arrived.Get() : nullptr;
+                state.cq.failed_signal = failure == 2 ? consumed.Get() : nullptr;
+                state.cq.submissions = 0;
+                if (stream_cq_submit(state, frame, input) || !state.finished || !g_present_read_fault.load() ||
+                    state.cqa_value[input] != UINT64_MAX || state.cq_issued < frame ||
+                    state.cq.submissions != failure + 1 || stream_cq_submit(state, frame, input)) throw E_FAIL;
+                require(receiver->Signal(drained.Get(), frame));
+                wait_for(drained.Get(), frame);
+                state.cqa_value[input] = consumed->GetCompletedValue();
+                state.finished = false;
+                g_present_read_fault.store(false);
+                state.cq.failed_wait = state.cq.failed_signal = nullptr;
+                ++partial_failures_verified;
+            }
+        }
+        if (validation)
+            for (UINT64 index = 0; index < validation->GetNumStoredMessages(); ++index)
+            {
+                SIZE_T bytes = 0; validation->GetMessage(index, nullptr, &bytes);
+                std::vector<unsigned char> storage(bytes); auto *message = reinterpret_cast<D3D12_MESSAGE *>(storage.data());
+                require(validation->GetMessage(index, message, &bytes));
+                if (message->Severity <= D3D12_MESSAGE_SEVERITY_ERROR) { std::puts(message->pDescription); throw E_FAIL; }
+            }
+        std::printf("PASS actual producer/consumer code: guide_split=%u, 9 exact tuples, skipped engine IDs, ring/input wraps, full-frame retirement; early_color=%u early_depth=%u partial_failure_guards=%u; debug_layer=%u\n",
+            unsigned(test_guide_split), overlap_verified, depth_early_verified, partial_failures_verified, unsigned(validation != nullptr));
+        if (!overlap_verified) std::puts("SKIP hardware overlap timing: WARP copy timestamps unavailable; byte and gate checks passed");
+        return 0;
+    }
+    catch (HRESULT status) { std::printf("FAIL: 0x%08lx\n", static_cast<unsigned long>(status)); return 1; }
+}

@@ -1,0 +1,30 @@
+name: MGPU for NTE
+on:
+  push:
+    branches: [mgpu-for-nte]
+  pull_request:
+    branches: [mgpu-for-nte]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Fetch pinned headers
+        shell: pwsh
+        run: ./scripts/Fetch-Dependencies.ps1
+      - name: Build and test source
+        shell: pwsh
+        run: ./scripts/Build.ps1
+      - name: Upload rebuilt artifacts (not deployed release binaries)
+        uses: actions/upload-artifact@v4
+        with:
+          name: MGPU-for-NTE-rebuilt
+          path: |
+            _build/nte/main/mgpu_bridge.addon64
+            _build/nte/helper/mgpu_official_host.exe

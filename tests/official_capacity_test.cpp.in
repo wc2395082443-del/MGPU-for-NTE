@@ -1,0 +1,77 @@
+#include "neural_pipeline.hpp"
+#include <atomic>
+#include <mutex>
+#include <cstdio>
+
+using DWORD = unsigned long;
+constexpr DWORD WAIT_OBJECT_0 = 0, WAIT_TIMEOUT = 258, WAIT_FAILED = 0xfffffffful;
+static unsigned capacity_calls = 0, errors = 0;
+static std::atomic<bool> g_present_read_fault{false};
+static bool official_selected = false;
+static void Sleep(unsigned) {}
+namespace mgpu::diag { void error(const char *) { ++errors; } }
+namespace mgpu::official_bridge { bool selected() { return official_selected; } }
+namespace mgpu::presentation
+{
+struct feedback
+{
+    DWORD outcome = WAIT_TIMEOUT;
+    DWORD acquire(unsigned) { ++capacity_calls; return outcome; }
+};
+}
+struct feedback_pointer
+{
+    mgpu::presentation::feedback value;
+    mgpu::presentation::feedback *get() { return &value; }
+};
+struct state
+{
+    std::mutex cs;
+    feedback_pointer presentation_feedback;
+};
+static state &st() { static state instance; return instance; }
+
+@OFFICIAL_CAPACITY_IMPLEMENTATION@
+
+int main()
+{
+    unsigned failures = 0;
+    const auto check = [&](bool condition, const char *name) {
+        std::printf("%s %s\n", condition ? "PASS" : "FAIL", name);
+        if (!condition) ++failures;
+    };
+    check(!present_capacity_gate(4) && capacity_calls == 1, "ordinary route still respects unavailable capacity");
+    official_selected = true;
+    const unsigned before = capacity_calls;
+    check(present_capacity_gate(4) && capacity_calls == before, "official route ignores unrelated old-chain capacity");
+    g_present_read_fault.store(true);
+    check(!present_capacity_gate(4), "actual GPU read fault is never bypassed");
+    g_present_read_fault.store(false);
+    mgpu::neural_pipeline::schedule pipeline;
+    unsigned submitted = 0, published = 0;
+    for (unsigned tick = 0; tick < 80; ++tick) {
+        if (pipeline.pending()) check(pipeline.retire(pipeline.current().fence), "completed GPU output retired");
+        if (present_capacity_gate(4) && pipeline.ready()) {
+            check(pipeline.publish_ready(), "display owner releases completed slot");
+            ++published;
+        }
+        if (submitted < 12) {
+            const auto slot = pipeline.write_slot();
+            if (slot < mgpu::neural_pipeline::schedule::SLOTS) {
+                mgpu::neural_pipeline::job job{};
+                job.seal = job.fence = submitted + 1;
+                job.snapshot = slot;
+                job.input_index = slot;
+                job.engine_frame = submitted + 101;
+                if (pipeline.begin(job)) ++submitted;
+            }
+        }
+    }
+    check(submitted == 12 && published == 12, "12 NR frames flow while old composition capacity never signals");
+    check(capacity_calls == before, "no hidden-chain waits on official route");
+    official_selected = false;
+    st().presentation_feedback.value.outcome = WAIT_FAILED;
+    check(!present_capacity_gate(4) && g_present_read_fault.load() && errors == 1, "nonofficial wait failure still recorded");
+    std::printf("submitted=%u published=%u failures=%u\n", submitted, published, failures);
+    return failures ? 1 : 0;
+}

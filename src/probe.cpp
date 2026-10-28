@@ -191,9 +191,6 @@ typedef void (*mvec_hook_fn)(void *cmd_list_native, unsigned long long resource)
 mvec_hook_fn g_mvec_hook = nullptr;
 std::atomic<unsigned long long> g_mvec_src;        // the identified velocity buffer
 std::atomic<unsigned long long> g_mvec_copies;     // handed over
-std::atomic<unsigned long long> g_r315_fires{0};   // R315: barrier-route fires on the PUBLISHED source (MVecBarrierSource=1)
-std::atomic<bool> g_r315_transition{true};         // R315b: gpu1's answer - fire at the transition (false = the tail carries)
-std::atomic<unsigned long long> g_r315_tail_copies{0};
 std::atomic<unsigned long long> g_mvec_skips;      // already done this frame
 unsigned long long g_mvec_last_frame = ~0ull;
 
@@ -244,7 +241,6 @@ std::atomic<int> g_sfpath{-2};   // R180/R182: see the read below
 std::atomic<int> g_sltags{0};
 std::atomic<int> g_jitter{0};   // R104: 0 off, 1 apply, -1 apply negated
 std::atomic<int> g_evalcopy{0}; // R106: 0 barrier trigger, 1 evaluate trigger
-std::atomic<int> g_r315{0};     // R315: MVecBarrierSource, 0 absent/as before, 1 the barrier route also matches the published source
 
 // How many shader-resource descriptors the engine pushed through ROOT
 // descriptors. Not attributed to any candidate on purpose - see
@@ -692,7 +688,6 @@ unsigned long long g_mvec_pick_said = 0;       // R277d: the last pick logged
 std::atomic<unsigned> g_mvec_elig_n{0};         // R278: eligible candidates at the last pick
 std::atomic<bool> g_tap12_active{false};       // R278e: the D3D12 tap has run this session
 std::atomic<bool> g_mvec_defer{false};        // R280: mvec_extract asks the dump not to publish a source yet
-std::atomic<unsigned long long> g_mvec_forced{0};   // R307: the sweep's target - always the pick while it is eligible
 // R278f: the sorted eligible list as of the last pick, and the current pick's
 // neighbours: the next candidate of the SAME size (switchable live - same slot
 // layout) and the first one of the next size down (needs a new launch).
@@ -1553,12 +1548,7 @@ void on_barrier(reshade::api::command_list *cl, uint32_t count,
                 const reshade::api::resource_usage *new_states)
 {
     if (!g_mvec_on.load(std::memory_order_relaxed) || res == nullptr || count == 0) return;
-    // R315 (MVecBarrierSource=1): the published source is matched even when the census
-    // table is empty; the table's early-out stays exactly as before otherwise.
-    const bool r315 = g_r315.load(std::memory_order_relaxed) != 0 &&
-                      g_r315_transition.load(std::memory_order_relaxed);   // R315b: off while the tail carries
-    const unsigned long long r315_want = r315 ? g_mvec_src.load(std::memory_order_relaxed) : 0ull;
-    if (g_mvec.n.load(std::memory_order_acquire) == 0 && r315_want == 0ull) return;
+    if (g_mvec.n.load(std::memory_order_acquire) == 0) return;
 
     const unsigned long long r0 = qpc();
     g_bar_fires.fetch_add(1, std::memory_order_relaxed);
@@ -1567,23 +1557,6 @@ void on_barrier(reshade::api::command_list *cl, uint32_t count,
     {
         if (res[k].handle == 0) continue;
         g_bar_res.fetch_add(1, std::memory_order_relaxed);
-        // R315: the published source, census member or not. One compare per resource.
-        // The edge is widened to either write state: a title that writes its vectors as
-        // a render target transitions render_target -> shader_resource, not UAV.
-        if (r315_want != 0ull && res[k].handle == r315_want &&
-            old_states != nullptr && new_states != nullptr)
-        {
-            using ru = reshade::api::resource_usage;
-            const unsigned sr = static_cast<unsigned>(ru::shader_resource);
-            const bool from_write = (old_states[k] == ru::unordered_access) ||
-                                    (old_states[k] == ru::render_target);
-            if (from_write && (static_cast<unsigned>(new_states[k]) & sr) != 0)
-            {
-                g_r315_fires.fetch_add(1, std::memory_order_relaxed);
-                fire_mvec_hook(cl, res[k].handle, new_states[k]);
-                continue;   // the census bookkeeping below is for table members
-            }
-        }
         const int ci = find_index(g_mvec, res[k].handle);
         if (ci < 0) continue;
         g_mvec.t[ci].e.fetch_add(1, std::memory_order_relaxed);
@@ -2327,14 +2300,6 @@ void dump()
                 const unsigned long long cur_src = g_mvec_src.load(std::memory_order_relaxed);
                 for (unsigned a = 0; a < en; ++a) if (el[a].h == cur_src) { pick = cur_src; break; }
             }
-            // R307: the sweep's target wins outright. On Far Cry 6 the game has
-            // two-channel buffers of the same size, and the area-then-barriers rule
-            // would hand the slot to one of them instead (RE4 never had that tie).
-            {
-                const unsigned long long forced = g_mvec_forced.load(std::memory_order_relaxed);
-                if (forced != 0ull)
-                    for (unsigned a = 0; a < en; ++a) if (el[a].h == forced) { pick = forced; break; }
-            }
             g_mvec_elig_n.store(en, std::memory_order_relaxed);   // R278
             {   // R278f: snapshot + neighbours of the current pick
                 std::lock_guard<std::mutex> lk(g_snap_cs);
@@ -3051,29 +3016,6 @@ int eval_copy_mode()
     return g_evalcopy.load(std::memory_order_relaxed);
 }
 
-int mvec_barrier_source() { return g_r315.load(std::memory_order_relaxed); }                                   // R315
-unsigned long long mvec_barrier_source_fires() { return g_r315_fires.load(std::memory_order_relaxed); }     // R315
-void r315_set_transition(bool on) { g_r315_transition.store(on, std::memory_order_relaxed); }               // R315b
-unsigned long long r315_tail_copies() { return g_r315_tail_copies.load(std::memory_order_relaxed); }        // R315b
-
-// R315b (MVecBarrierSource=2 only; dllmain calls it at finish_effects, inside gpu1's tail scope).
-// The published source copied at the TAIL of the frame, whatever delivered it earlier - no
-// once-per-frame dedupe, because in the judge window this is the second copy of the same
-// frame. State ASSUMED shader_resource, the tap's assumption (R277): what the game leaves the
-// buffer in after DLSS and the passes that read it. A wrong assumption shows as bytes that
-// differ from the transition copy, which is exactly what the judge refuses.
-void r315_tail_copy(void *command_list_ptr)
-{
-    reshade::api::command_list *cl = static_cast<reshade::api::command_list *>(command_list_ptr);
-    const unsigned long long want = g_mvec_src.load(std::memory_order_relaxed);
-    if (cl == nullptr || want == 0ull || g_mvec_hook == nullptr) return;
-    const reshade::api::resource r = { want };
-    cl->barrier(r, reshade::api::resource_usage::shader_resource, reshade::api::resource_usage::copy_source);
-    g_mvec_hook(reinterpret_cast<void *>(cl->get_native()), want);
-    cl->barrier(r, reshade::api::resource_usage::copy_source, reshade::api::resource_usage::shader_resource);
-    g_r315_tail_copies.fetch_add(1, std::memory_order_relaxed);
-}
-
 // R180/R182. -2 absent (AUTO), 0 explicitly off, 1 on.
 int sf_path_mode()
 {
@@ -3176,7 +3118,7 @@ mode mode_from_ini()
         const char *sk = mgpu::config::find(buf, strlen(buf), "SLTags");
         int sv = 0;
         if (sk != nullptr) sv = atoi(sk);
-        g_sltags.store((sv < 0 || sv > 2) ? 0 : sv, std::memory_order_relaxed);
+        g_sltags.store((sv < 0 || sv > 3) ? 0 : sv, std::memory_order_relaxed);
     }
     {
         // R180/R182. SFPath: the Starfield path. ABSENT IS NOT OFF.
@@ -3212,22 +3154,6 @@ mode mode_from_ini()
         int ev = 0;
         if (ek != nullptr) ev = atoi(ek);
         g_evalcopy.store((ev < 0 || ev > 2) ? 0 : ev, std::memory_order_relaxed);
-    }
-    {
-        // R315. MVecBarrierSource=1: on_barrier also fires the transport on the resource
-        // R103 PUBLISHED (the game's own DLSS vector buffer from the calibrator's table),
-        // not only on a member of this file's census table - and on a transition out of
-        // either write state (unordered_access or render_target) into shader_resource.
-        // Measured 2026-10-16 (Cyberpunk, both_default log): the published handle was
-        // never in the census, so the route read zero and the evaluate copy armed.
-        // Absent or 0: the census-only match, exactly as before.
-        // 2 (R315b): the same match, plus the judge - gpu1 compares the transition copy
-        // with a copy at the tail of the frame and, when they are byte-identical on this
-        // title, carries the vectors from the tail (the transition copy stops). r315_set_
-        // transition() is gpu1's answer each frame; it only ever turns the match OFF.
-        const char *bk = mgpu::config::find(buf, strlen(buf), "MVecBarrierSource");
-        const int bv = (bk != nullptr) ? atoi(bk) : 0;
-        g_r315.store((bv == 1 || bv == 2) ? bv : 0, std::memory_order_relaxed);
     }
     {
         // R74. MVecProbe=1 reads the velocity field. MVecProbeIndex picks which
@@ -3509,7 +3435,6 @@ void mvec_offer(unsigned long long handle, unsigned w, unsigned h, unsigned fmt)
     add_candidate(g_mvec, handle, w, h, fmt);
 }
 void mvec_defer(bool on) { g_mvec_defer.store(on, std::memory_order_relaxed); }
-void mvec_force(unsigned long long handle) { g_mvec_forced.store(handle, std::memory_order_relaxed); }   // R307
 // R280g: the same as on_destroy_resource for the mvec lane, called by mvec_extract
 // when it destroys its own target (a resize): the census must not keep the handle.
 void mvec_withdraw(unsigned long long handle)

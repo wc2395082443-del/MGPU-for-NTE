@@ -9,7 +9,6 @@
 #include "gpu1_context.hpp"   // ui_ini_read
 
 #include <reshade.hpp>
-#include <windows.h>          // R303: GetAsyncKeyState, GetForegroundWindow
 
 #include <atomic>
 #include <cmath>
@@ -36,15 +35,7 @@ namespace
         unsigned last_state = 0;                    // R279b: the state the engine LAST put it in (barrier new_state)
     };
 
-    // R304: 1024, was 256. Far Cry 6's gameplay load had more than 256
-    // textures in the band alive at once: 59 were never recorded, and the
-    // report could not say whether the velocity buffer was among them.
-    // R304b: still a fixed table with the original linear scan - no allocation
-    // and no growth on the game's threads (the rule probe.cpp states for its
-    // tables). The scan is up to 4x longer than at 256; nothing measures that
-    // cost yet, and the hash index R304 first used to avoid it allocated on the
-    // game's threads, so it is gone.
-    const unsigned MAX = 1024;
+    const unsigned MAX = 256;
     entry g_t[MAX];
     std::mutex g_cs;
     std::atomic<bool> g_on{false};
@@ -71,35 +62,6 @@ namespace
     unsigned peek_bpp(unsigned f)  { return (f == 10 || f == 11 || f == 13) ? 8u : two_ch_bpp(f); }
     unsigned peek_chans(unsigned f){ return (f == 10 || f == 11 || f == 13) ? 4u : (two_ch_bpp(f) ? 2u : 0u); }
     std::atomic<int> g_peek_fmt{0};      // R279d: TexPeekFormat (0 = the velocity usage signature)
-
-    // R303: WHEN THE REPORTS ARE MADE. Far Cry 6 ran at ~250 fps in its menus,
-    // so frames 1200/3000/6000 all fell in the first 24 s and the census never
-    // saw gameplay. Three report modes, each behind its own key, and the init
-    // line names which are on:
-    //   fixed     TexCensus=1 alone - 1200, 3000, 6000, as before R303. Right
-    //             for titles that reach gameplay fast (RE4).
-    //   periodic  TexCensusEvery=N (N >= 600) - also a report every N game
-    //             frames after 6000, at most EVERY_MAX of them.
-    //   hotkey    TexCensusHotkey=1 - CTRL+ALT+END reports now, at most
-    //             (R308: was CTRL+ALT+F5, which opens Far Cry 6's photo mode -
-    //             the press then changed the very frame the peek copies)
-    //             HOTKEY_MAX presses. Right for titles with a long menu or
-    //             cutscene intro (Far Cry 6, RDR2). With TexPeek=1 the press
-    //             also arms the peek, and the fixed-frame peeks are not taken.
-    // The fixed reports run in every mode: they cost nothing and give the
-    // menu-time baseline the later reports are compared against.
-    unsigned g_every = 0;                // TexCensusEvery (0 = off)
-    unsigned g_every_done = 0;
-    const unsigned EVERY_MAX = 12;
-    bool g_hotkey = false;               // TexCensusHotkey=1
-    bool g_hk_down = false;              // the key's last state, for the press edge
-    unsigned g_hk_reports = 0;
-    bool g_hk_cap_logged = false;
-    const unsigned HOTKEY_MAX = 40;
-    // R303: textures in the band that could not be recorded because all MAX
-    // slots held live textures. Before R303 this was silent, and a full table
-    // read as a complete census.
-    std::atomic<unsigned long long> g_dropped{0};
 
     bool is_game(reshade::api::device *d)
     {
@@ -133,7 +95,7 @@ namespace
         for (unsigned i = 0; i < MAX && slot == nullptr; ++i) if (g_t[i].handle == 0) slot = &g_t[i];
         if (slot == nullptr)   // full: reuse the oldest dead one
             for (unsigned i = 0; i < MAX && slot == nullptr; ++i) if (g_t[i].died != 0) slot = &g_t[i];
-        if (slot == nullptr) { g_dropped.fetch_add(1, std::memory_order_relaxed); return; }   // R303
+        if (slot == nullptr) return;
         *slot = entry{};
         slot->handle = res.handle;
         slot->w = desc.texture.width; slot->h = desc.texture.height;
@@ -195,16 +157,9 @@ namespace
         }
     }
 
-    void report(unsigned long long f, const char *why)   // R303: why = which mode made this report
+    void report(unsigned long long f)
     {
-        // R304b: static, not on the stack. At MAX=1024 the copy is ~96 KB (24 KB at
-        // 256). report() runs on whatever thread the game presents from, and some
-        // engines present from threads or fibers with small stacks; a stack
-        // overflow there ends the process with nothing logged. A static buffer is
-        // fixed at load (never allocated, untouched pages cost no memory while the
-        // census is off), and its worst case is a garbled report, not a crash.
-        // report() is reached only from on_present on the game's device.
-        static entry copy[MAX]; unsigned n = 0, dead = 0;
+        entry copy[MAX]; unsigned n = 0, dead = 0;
         {
             std::lock_guard<std::mutex> lk(g_cs);
             for (unsigned i = 0; i < MAX; ++i)
@@ -218,13 +173,12 @@ namespace
         for (unsigned a = 0; a < n; ++a)
             for (unsigned b = a + 1; b < n; ++b)
                 if (copy[b].barriers > copy[a].barriers) { const entry t = copy[a]; copy[a] = copy[b]; copy[b] = t; }
-        char l[560];
+        char l[400];
         snprintf(l, sizeof l,
-                 "[MGPU][R279] TEX CENSUS at game frame %llu (%s): %u live texture(s) between half and full scene size "
-                 "(%ux%u), %u destroyed since start, %llu not recorded because the table (%u) was full. Format "
-                 "numbers are DXGI_FORMAT values. Most active first; usage is ReShade's resource_usage mask "
-                 "(0x8 UAV, 0xC0 SRV, 0x4 RT, 0x30 depth).",
-                 f, why, n, g_w, g_h, dead, g_dropped.load(std::memory_order_relaxed), MAX);
+                 "[MGPU][R279] TEX CENSUS at game frame %llu: %u live texture(s) between half and full scene size "
+                 "(%ux%u), %u destroyed since start. Format numbers are DXGI_FORMAT values. Most active first; "
+                 "usage is ReShade's resource_usage mask (0x8 UAV, 0xC0 SRV, 0x4 RT, 0x30 depth).",
+                 f, n, g_w, g_h, dead);
         mgpu::diag::info(l);
         for (unsigned a = 0; a < n && a < 24u; ++a)
         {
@@ -235,46 +189,6 @@ namespace
                      e.handle, e.w, e.h, e.fmt, e.usage, e.born, e.last_frame, e.barriers,
                      e.to_uav, e.uav_to_srv, e.to_rt, e.rt_to_srv);
             mgpu::diag::info(l);
-        }
-        // R304: the formats that are alive, by count - one line, every live entry,
-        // so the 24-line cut above cannot hide which formats this title uses.
-        {
-            unsigned fmts[64] = {}, cnts[64] = {}, nf = 0, other = 0;
-            for (unsigned a = 0; a < n; ++a)
-            {
-                unsigned k = 0;
-                while (k < nf && fmts[k] != copy[a].fmt) ++k;
-                if (k == nf) { if (nf < 64u) { fmts[nf] = copy[a].fmt; ++nf; } else { ++other; continue; } }
-                ++cnts[k];
-            }
-            int at = snprintf(l, sizeof l, "[MGPU][R304] live by format (fmt x count):");
-            for (unsigned k = 0; k < nf && at > 0 && at < (int)sizeof l - 16; ++k)
-                at += snprintf(l + at, sizeof l - (size_t)at, " %u x%u", fmts[k], cnts[k]);
-            if (other != 0 && at > 0 && at < (int)sizeof l - 24) snprintf(l + at, sizeof l - (size_t)at, " | +%u in more formats", other);
-            mgpu::diag::info(l);
-        }
-        // R304: every live TWO-CHANNEL texture in the band (R32G32 15-18, R16G16
-        // 33-38, R8G8 48-52, integer formats included), whatever its activity
-        // rank. A velocity buffer is one of these, and on Far Cry 6 the R258
-        // candidates were not among the 24 most active. Up to 48 lines.
-        {
-            unsigned shown = 0, total2 = 0;
-            for (unsigned a = 0; a < n; ++a) if (two_ch_bpp(copy[a].fmt) != 0) ++total2;
-            snprintf(l, sizeof l, "[MGPU][R304] TWO-CHANNEL textures alive: %u (listed below, most active first, %u at most; "
-                                  "'top24' marks one already listed above).", total2, 48u);
-            mgpu::diag::info(l);
-            for (unsigned a = 0; a < n && shown < 48u; ++a)
-            {
-                const entry &e = copy[a];
-                if (two_ch_bpp(e.fmt) == 0) continue;
-                ++shown;
-                snprintf(l, sizeof l,
-                         "[MGPU][R304]   0x%llx %ux%u fmt=%u usage=0x%x%s | born f=%llu, last barrier f=%llu | barriers=%llu "
-                         "toUAV=%llu UAV->SRV=%llu toRT=%llu RT->SRV=%llu",
-                         e.handle, e.w, e.h, e.fmt, e.usage, (a < 24u) ? " top24" : "", e.born, e.last_frame, e.barriers,
-                         e.to_uav, e.uav_to_srv, e.to_rt, e.rt_to_srv);
-                mgpu::diag::info(l);
-            }
         }
     }
 
@@ -477,7 +391,7 @@ namespace
         {
             if (g_api_dev == nullptr) g_api_dev = sc->get_device();
             if (g_peek_due != 0 && f >= g_peek_due) { g_peek_due = 0; peek_read(); ++g_peeks; }
-            else if (!g_hotkey && g_peek_due == 0 && g_arm.load() == 0 && g_peeks < 3u && (f == 1500ull || f == 3300ull || f == 6600ull)) peek_copy(q, f);   // R303: not in hotkey mode
+            else if (g_peek_due == 0 && g_arm.load() == 0 && g_peeks < 3u && (f == 1500ull || f == 3300ull || f == 6600ull)) peek_copy(q, f);
             else if (g_arm.load() != 0 && f > g_arm_frame + 600ull)
             {   // R279c: armed, but the engine never transitioned it RT -> SRV in 600 frames
                 g_arm.store(0);
@@ -490,107 +404,24 @@ namespace
         if ((f == 1200ull && g_reported == 0) || (f == 3000ull && g_reported == 1) || (f == 6000ull && g_reported == 2))
         {
             ++g_reported;
-            report(f, "fixed");
-        }
-        // R303: periodic. Only after the three fixed reports, so the two
-        // schedules never land on the same frame.
-        if (g_every != 0 && g_reported >= 3u && g_every_done < EVERY_MAX && f > 6000ull &&
-            ((f - 6000ull) % g_every) == 0ull)
-        {
-            ++g_every_done;
-            char why[64];
-            snprintf(why, sizeof why, "periodic %u/%u", g_every_done, EVERY_MAX);
-            report(f, why);
-        }
-        // R303: hotkey. Polled here, on the press edge, only while a window of
-        // this process is in front - the same shape as R218's CropKey. Polling
-        // rather than RegisterHotKey keeps the instrument inside its own two
-        // files, as the removal note in tex_census.hpp requires.
-        if (g_hotkey)
-        {
-            const HWND fg = GetForegroundWindow();
-            DWORD fpid = 0;
-            if (fg != nullptr) (void)GetWindowThreadProcessId(fg, &fpid);
-            const bool front = (fg != nullptr && fpid == GetCurrentProcessId());
-            const bool down = front &&
-                              (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 &&
-                              (GetAsyncKeyState(VK_MENU) & 0x8000) != 0 &&
-                              (GetAsyncKeyState(VK_END) & 0x8000) != 0;   // R308: END, not F5 (FC6 photo mode)
-            if (down && !g_hk_down)
-            {
-                if (g_hk_reports < HOTKEY_MAX)
-                {
-                    ++g_hk_reports;
-                    char why[64];
-                    snprintf(why, sizeof why, "hotkey %u/%u", g_hk_reports, HOTKEY_MAX);
-                    report(f, why);
-                    if (g_peek.load(std::memory_order_relaxed) && q != nullptr)
-                    {
-                        if (g_api_dev == nullptr) g_api_dev = sc->get_device();
-                        if (g_peek_due == 0 && g_arm.load() == 0 && g_peeks < 3u) peek_copy(q, f);
-                        else
-                        {
-                            char l[220];
-                            snprintf(l, sizeof l, "[MGPU][R303] hotkey: no peek on this press - %s.",
-                                     g_peeks >= 3u ? "all 3 peeks are used" : "the previous peek has not finished");
-                            mgpu::diag::info(l);
-                        }
-                    }
-                }
-                else if (!g_hk_cap_logged)
-                {
-                    g_hk_cap_logged = true;
-                    char l[160];
-                    snprintf(l, sizeof l, "[MGPU][R303] hotkey: %u reports made, the cap - further presses are ignored.", HOTKEY_MAX);
-                    mgpu::diag::info(l);
-                }
-            }
-            g_hk_down = down;
+            report(f);
         }
     }
 }   // namespace
 
 void init(void *game_device, unsigned screen_w, unsigned screen_h)
 {
-    // R303: a second D3D12 chain must not change the scene size. On Far Cry 6
-    // the bridge's own 1280x720 chain came through here 90 ms after the game's
-    // and every report then said 1280x720 and missed every 2560x1440 target.
-    // dllmain now calls this for the game's chain only; this check stays so a
-    // future caller cannot reintroduce it. Same device = the game's own resize.
-    if (g_on.load()) { if (game_device == g_dev) { g_w = screen_w; g_h = screen_h; } return; }
+    if (g_on.load()) { g_w = screen_w; g_h = screen_h; return; }
     if (mgpu::gpu1::ui_ini_read("TexCensus", 0) != 1) return;
     g_dev = game_device; g_w = screen_w; g_h = screen_h;
     g_peek.store(mgpu::gpu1::ui_ini_read("TexPeek", 0) == 1);   // R279b
     g_peek_fmt.store(mgpu::gpu1::ui_ini_read("TexPeekFormat", 0)); // R279d: 0 = the velocity usage signature
-    // R303: the report modes.
-    const int ev = mgpu::gpu1::ui_ini_read("TexCensusEvery", 0);
-    g_every = (ev >= 600) ? (unsigned)ev : 0u;
-    g_hotkey = (mgpu::gpu1::ui_ini_read("TexCensusHotkey", 0) == 1);
-    g_every_done = 0; g_hk_reports = 0; g_hk_down = false; g_hk_cap_logged = false;
-    g_dropped.store(0);
     char l[300];
     snprintf(l, sizeof l, "[MGPU][R279] TEX CENSUS ON (TexCensus=1): observe-only. Every 2D texture between half and full "
                           "scene size (%ux%u) on the game's D3D12 device, any format, with its barrier transitions. "
                           "Reports at game frames 1200, 3000, 6000. An instrument: TexCensus=0 or absent turns it off.",
              screen_w, screen_h);
     mgpu::diag::info(l);
-    {   // R303: which report modes are on, by key
-        char m[600];
-        char every[96];
-        if (g_every != 0) snprintf(every, sizeof every, "ON, every %u game frames after 6000, at most %u (TexCensusEvery=%u)", g_every, EVERY_MAX, g_every);
-        else if (ev != 0) snprintf(every, sizeof every, "off - TexCensusEvery=%d ignored, the minimum is 600", ev);
-        else snprintf(every, sizeof every, "off (TexCensusEvery absent or 0)");
-        snprintf(m, sizeof m,
-                 "[MGPU][R303] TEX CENSUS MODES: fixed reports at frames 1200/3000/6000 = ON (TexCensus=1) | periodic = %s | "
-                 "hotkey CTRL+ALT+END = %s | peek = %s.",
-                 every,
-                 g_hotkey ? "ON, a report per press, at most 40, while the game is in front (TexCensusHotkey=1)"
-                          : "off (TexCensusHotkey absent or 0)",
-                 !g_peek.load() ? "off (TexPeek absent or 0)"
-                                : (g_hotkey ? "ON, armed by the hotkey press, 3 at most (fixed peek frames not used)"
-                                            : "ON, at frames 1500/3300/6600"));
-        mgpu::diag::info(m);
-    }
     reshade::register_event<reshade::addon_event::init_resource>(on_init_resource);
     reshade::register_event<reshade::addon_event::destroy_resource>(on_destroy_resource);
     reshade::register_event<reshade::addon_event::barrier>(on_barrier);

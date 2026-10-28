@@ -1,0 +1,32 @@
+<WindowsPerformanceRecorder Version="1.0">
+  <Profiles>
+    <EventCollector Id="Source_Events" Name="MGPU source attribution pilot">
+      <BufferSize Value="256" />
+      <Buffers Value="256" />
+    </EventCollector>
+    <EventProvider Id="Source_DxgKrnl" Name="802ec45a-1e99-4b83-9920-87c98277ba9d" NonPagedMemory="true" Strict="true" Level="5">
+      <Keywords><Keyword Value="0x04008a77" /></Keywords>
+      <CaptureStateOnStart Timeout="5"><Keyword Value="0x04008a77" /></CaptureStateOnStart>
+      <CaptureStateOnSave Timeout="5"><Keyword Value="0x04008a77" /></CaptureStateOnSave>
+    </EventProvider>
+    <EventProvider Id="Source_D3D12" Name="5d8087dd-3a9b-4f56-90df-49196cdc4f11" Level="5">
+      <Keywords><Keyword Value="0x83" /></Keywords>
+      <CaptureStateOnStart Timeout="5"><Keyword Value="0x83" /></CaptureStateOnStart>
+      <CaptureStateOnSave Timeout="5"><Keyword Value="0x83" /></CaptureStateOnSave>
+    </EventProvider>
+    <EventProvider Id="Source_DXGI" Name="ca11c036-0102-4a2d-a6ad-f03cfed5d3c9" Level="5">
+      <Keywords><Keyword Value="0xf" /></Keywords>
+    </EventProvider>
+    <Profile Id="MGPUFrame.Verbose.Memory" Name="MGPUFrame" Description="Source queue/adapter/scheduler coverage pilot without resource or CPU scheduling flood" LoggingMode="Memory" DetailLevel="Verbose">
+      <Collectors>
+        <EventCollectorId Value="Source_Events">
+          <EventProviders>
+            <EventProviderId Value="Source_DxgKrnl" />
+            <EventProviderId Value="Source_D3D12" />
+            <EventProviderId Value="Source_DXGI" />
+          </EventProviders>
+        </EventCollectorId>
+      </Collectors>
+    </Profile>
+  </Profiles>
+</WindowsPerformanceRecorder>

@@ -1,0 +1,156 @@
+Internal ctest changing into directory: <archived-M364-build>
+Test project <archived-M364-build>
+      Start  1: mgpu_continuous_trace_test
+ 1/75 Test  #1: mgpu_continuous_trace_test .........................   Passed    0.35 sec
+      Start  2: mgpu_continuous_measurement_test
+ 2/75 Test  #2: mgpu_continuous_measurement_test ...................   Passed    6.27 sec
+      Start  3: mgpu_incomplete_measurement_rejected_test
+ 3/75 Test  #3: mgpu_incomplete_measurement_rejected_test ..........   Passed    0.05 sec
+      Start  4: mgpu_legacy_continuous_transition_rejected_test
+ 4/75 Test  #4: mgpu_legacy_continuous_transition_rejected_test ....   Passed    0.01 sec
+      Start  5: mgpu_continuous_game_work_warp_test
+ 5/75 Test  #5: mgpu_continuous_game_work_warp_test ................   Passed    0.55 sec
+      Start  6: mgpu_nonblocking_recording_warp_test
+ 6/75 Test  #6: mgpu_nonblocking_recording_warp_test ...............   Passed    3.78 sec
+      Start  7: mgpu_nonblocking_fine_capacity_warp_test
+ 7/75 Test  #7: mgpu_nonblocking_fine_capacity_warp_test ...........   Passed    3.72 sec
+      Start  8: mgpu_nonblocking_unsubmitted_test
+ 8/75 Test  #8: mgpu_nonblocking_unsubmitted_test ..................   Passed    5.18 sec
+      Start  9: mgpu_nonblocking_replay_test
+ 9/75 Test  #9: mgpu_nonblocking_replay_test .......................   Passed    0.16 sec
+      Start 10: mgpu_nonblocking_queue-limit_test
+10/75 Test #10: mgpu_nonblocking_queue-limit_test ..................   Passed    0.16 sec
+      Start 11: mgpu_nonblocking_delayed-retirement_test
+11/75 Test #11: mgpu_nonblocking_delayed-retirement_test ...........   Passed    0.29 sec
+      Start 12: mgpu_nonblocking_stop-during-scope_test
+12/75 Test #12: mgpu_nonblocking_stop-during-scope_test ............   Passed    0.16 sec
+      Start 13: mgpu_official_capacity_test
+13/75 Test #13: mgpu_official_capacity_test ........................   Passed    0.03 sec
+      Start 14: mgpu_official_capacity_old_rejected
+14/75 Test #14: mgpu_official_capacity_old_rejected ................   Passed    0.02 sec
+      Start 15: mgpu_game_work_policy_test
+15/75 Test #15: mgpu_game_work_policy_test .........................   Passed    0.02 sec
+      Start 16: mgpu_game_work_trace_warp_test
+16/75 Test #16: mgpu_game_work_trace_warp_test .....................   Passed    2.97 sec
+      Start 17: mgpu_game_work_trace_stress_warp_test
+17/75 Test #17: mgpu_game_work_trace_stress_warp_test ..............   Passed    2.95 sec
+      Start 18: mgpu_native_work_policy_test
+18/75 Test #18: mgpu_native_work_policy_test .......................   Passed    0.02 sec
+      Start 19: mgpu_native_work_abi_test
+19/75 Test #19: mgpu_native_work_abi_test ..........................   Passed    0.02 sec
+      Start 20: mgpu_native_work_warp_test
+20/75 Test #20: mgpu_native_work_warp_test .........................   Passed    3.00 sec
+      Start 21: mgpu_native_work_stop_warp_test
+21/75 Test #21: mgpu_native_work_stop_warp_test ....................   Passed    0.05 sec
+      Start 22: mgpu_native_work_capacity_warp_test
+22/75 Test #22: mgpu_native_work_capacity_warp_test ................   Passed    2.90 sec
+      Start 23: mgpu_trace_log_parts_test
+23/75 Test #23: mgpu_trace_log_parts_test ..........................   Passed    0.03 sec
+      Start 24: mgpu_game_work_native_boundary_warp_test
+24/75 Test #24: mgpu_game_work_native_boundary_warp_test ...........   Passed    3.79 sec
+      Start 25: mgpu_game_work_native_reset_after_stop_warp_test
+25/75 Test #25: mgpu_game_work_native_reset_after_stop_warp_test ...   Passed    2.91 sec
+      Start 26: mgpu_frame_measurement_test
+26/75 Test #26: mgpu_frame_measurement_test ........................   Passed    0.04 sec
+      Start 27: mgpu_worker_dispatch_test
+27/75 Test #27: mgpu_worker_dispatch_test ..........................   Passed    0.01 sec
+      Start 28: mgpu_worker_dispatch_m358_control
+28/75 Test #28: mgpu_worker_dispatch_m358_control ..................   Passed    0.01 sec
+      Start 29: mgpu_aligned_prefetch_test
+29/75 Test #29: mgpu_aligned_prefetch_test .........................   Passed    0.02 sec
+      Start 30: mgpu_neural_poll_test
+30/75 Test #30: mgpu_neural_poll_test ..............................   Passed    0.02 sec
+      Start 31: mgpu_neural_poll_old_return_is_rejected
+31/75 Test #31: mgpu_neural_poll_old_return_is_rejected ............   Passed    0.02 sec
+      Start 32: mgpu_pipeline_timing_test
+32/75 Test #32: mgpu_pipeline_timing_test ..........................   Passed    0.02 sec
+      Start 33: mgpu_queue_clock_cache_test
+33/75 Test #33: mgpu_queue_clock_cache_test ........................   Passed    0.03 sec
+      Start 34: mgpu_producer_copy_warp_test
+34/75 Test #34: mgpu_producer_copy_warp_test .......................   Passed    0.17 sec
+      Start 35: mgpu_color_copy_overlap_warp_test
+35/75 Test #35: mgpu_color_copy_overlap_warp_test ..................   Passed    0.74 sec
+      Start 36: mgpu_guide_copy_overlap_warp_test
+36/75 Test #36: mgpu_guide_copy_overlap_warp_test ..................   Passed    0.93 sec
+      Start 37: mgpu_neural_history_test
+37/75 Test #37: mgpu_neural_history_test ...........................   Passed    0.03 sec
+      Start 38: mgpu_neural_snapshots_warp_test
+38/75 Test #38: mgpu_neural_snapshots_warp_test ....................   Passed    0.16 sec
+      Start 39: mgpu_async_consumer_test
+39/75 Test #39: mgpu_async_consumer_test ...........................   Passed    0.10 sec
+      Start 40: mgpu_presentation_freshness_test
+40/75 Test #40: mgpu_presentation_freshness_test ...................   Passed    0.02 sec
+      Start 41: mgpu_presentation_feedback_warp_test
+41/75 Test #41: mgpu_presentation_feedback_warp_test ...............   Passed    0.10 sec
+      Start 42: mgpu_secondary_fg_pipeline_test
+42/75 Test #42: mgpu_secondary_fg_pipeline_test ....................   Passed    0.02 sec
+      Start 43: mgpu_secondary_fg_retirement_test
+43/75 Test #43: mgpu_secondary_fg_retirement_test ..................   Passed    0.44 sec
+      Start 44: mgpu_fg_presentation_old_defect_is_rejected
+44/75 Test #44: mgpu_fg_presentation_old_defect_is_rejected ........   Passed    0.04 sec
+      Start 45: mgpu_fg_partial_progress_old_defect_is_rejected
+45/75 Test #45: mgpu_fg_partial_progress_old_defect_is_rejected ....   Passed    0.44 sec
+      Start 46: mgpu_secondary_fg_contract_test
+46/75 Test #46: mgpu_secondary_fg_contract_test ....................   Passed    0.02 sec
+      Start 47: mgpu_secondary_fg_api_test
+47/75 Test #47: mgpu_secondary_fg_api_test .........................   Passed    0.03 sec
+      Start 48: mgpu_secondary_fg_stage_warp_test
+48/75 Test #48: mgpu_secondary_fg_stage_warp_test ..................   Passed    0.19 sec
+      Start 49: mgpu_streamline_constants_test
+49/75 Test #49: mgpu_streamline_constants_test .....................   Passed    0.03 sec
+      Start 50: mgpu_neural_pipeline_test
+50/75 Test #50: mgpu_neural_pipeline_test ..........................   Passed    0.02 sec
+      Start 51: mgpu_depth_plane_policy_test
+51/75 Test #51: mgpu_depth_plane_policy_test .......................   Passed    0.03 sec
+      Start 52: mgpu_depth_normalizer_warp_test
+52/75 Test #52: mgpu_depth_normalizer_warp_test ....................   Passed    0.17 sec
+      Start 53: mgpu_d3d12_device_identity_test
+53/75 Test #53: mgpu_d3d12_device_identity_test ....................   Passed    0.03 sec
+      Start 54: mgpu_aligned_texture_policy_test
+54/75 Test #54: mgpu_aligned_texture_policy_test ...................   Passed    0.03 sec
+      Start 55: mgpu_aligned_frame_policy_test
+55/75 Test #55: mgpu_aligned_frame_policy_test .....................   Passed    0.02 sec
+      Start 56: mgpu_calibration_policy_test
+56/75 Test #56: mgpu_calibration_policy_test .......................   Passed    0.02 sec
+      Start 57: mgpu_native_reflex_request_test
+57/75 Test #57: mgpu_native_reflex_request_test ....................   Passed    0.03 sec
+      Start 58: mgpu_aligned_queue_abi_test
+58/75 Test #58: mgpu_aligned_queue_abi_test ........................   Passed    0.02 sec
+      Start 59: mgpu_aligned_submission_test
+59/75 Test #59: mgpu_aligned_submission_test .......................   Passed    0.03 sec
+      Start 60: mgpu_fenced_pipeline_warp_test
+60/75 Test #60: mgpu_fenced_pipeline_warp_test .....................   Passed    0.15 sec
+      Start 61: mgpu_source_ready_dispatch_warp_test
+61/75 Test #61: mgpu_source_ready_dispatch_warp_test ...............   Passed    0.25 sec
+      Start 62: mgpu_motion_frame_packet_test
+62/75 Test #62: mgpu_motion_frame_packet_test ......................   Passed    0.02 sec
+      Start 63: mgpu_present_read_retirement_test
+63/75 Test #63: mgpu_present_read_retirement_test ..................   Passed    0.03 sec
+      Start 64: mgpu_tagged_motion_policy_test
+64/75 Test #64: mgpu_tagged_motion_policy_test .....................   Passed    0.02 sec
+      Start 65: mgpu_streamline_tag_reader_test
+65/75 Test #65: mgpu_streamline_tag_reader_test ....................   Passed    0.02 sec
+      Start 66: mgpu_streamline_route_audit_test
+66/75 Test #66: mgpu_streamline_route_audit_test ...................   Passed    0.02 sec
+      Start 67: mgpu_motion_source_audit_test
+67/75 Test #67: mgpu_motion_source_audit_test ......................   Passed    0.02 sec
+      Start 68: mgpu_fg_present_evidence_test
+68/75 Test #68: mgpu_fg_present_evidence_test ......................   Passed    0.02 sec
+      Start 69: mgpu_adapter_selection_test
+69/75 Test #69: mgpu_adapter_selection_test ........................   Passed    0.03 sec
+      Start 70: mgpu_temporal_diag_test
+70/75 Test #70: mgpu_temporal_diag_test ............................   Passed    0.02 sec
+      Start 71: mgpu_perf_diag_test
+71/75 Test #71: mgpu_perf_diag_test ................................   Passed    0.03 sec
+      Start 72: mgpu_feature_diag_test
+72/75 Test #72: mgpu_feature_diag_test .............................   Passed    0.02 sec
+      Start 73: mgpu_producer_diag_test
+73/75 Test #73: mgpu_producer_diag_test ............................   Passed    0.02 sec
+      Start 74: mgpu_queue_dependency_trace_warp_test
+74/75 Test #74: mgpu_queue_dependency_trace_warp_test ..............   Passed    0.13 sec
+      Start 75: mgpu_queue_dependency_trace_overflow_test
+75/75 Test #75: mgpu_queue_dependency_trace_overflow_test ..........   Passed    0.45 sec
+
+100% tests passed, 0 tests failed out of 75
+
+Total Test time (real) =  44.79 sec

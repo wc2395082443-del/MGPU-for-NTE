@@ -1,6 +1,12 @@
 # CI-fetched ReShade headers — created at build time by .github/workflows/build.yml
 # from crosire/reshade at the pinned SHA recorded in VENDOR_LOCK.md. Never committed.
 ext/
+!ext/
+ext/*
+!ext/streamline/
+ext/streamline/*
+!ext/streamline/*.h
+!ext/streamline/LICENSE.txt
 
 # CMake build output
 build/
@@ -9,3 +15,18 @@ build/
 # the workspace rather than /tmp: MSYS path translation on Windows runners
 # makes /tmp unreliable for curl/tar arguments.
 _dl/
+_build/
+dist/
+*.zip
+*.etl
+*.dmp
+*.log
+__pycache__/
+*.pyc
+.vs/
+*.addon64
+*.dll
+*.exe
+*.lib
+*.obj
+*.bak*

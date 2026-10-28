@@ -43,6 +43,8 @@
 #include <atomic>     // R138: the present counter and the said-once flags.
 #include <chrono>     // T1.1 FrameCap (FrameCap line present only)
 #include <thread>     // T1.1 FrameCap
+#include "game_work_trace.hpp"
+#include "queue_dependency_trace.hpp"
 
 // ---- R141: BUILD IDENTITY, SAID ONCE, FIRST ----
 //
@@ -66,7 +68,7 @@
 // misidentifying a build. Caught by a control run rather than by a reader,
 // which is the only reason it is not in somebody's issue thread.
 // R141: the log must say which build wrote it. 0.2.5 + R210 + R208 (FP16, off).
-#define MGPU_VERSION_STR "0.4.0"
+#define MGPU_VERSION_STR "0.3.1-t1-M364-rollback-M358"
 
 
 // ---- P6.4: the overlay panel ----
@@ -107,10 +109,8 @@
 #include "diag.hpp"
 #include "gpu1_context.hpp"
 #include "nr16.hpp"       // R219-2: the panel reads the 16-bit keys with nr16's reader
-#include "residual.hpp"   // R319a: one relaxed load, to word the x2 line
 #include "discovery.hpp"  // D1 (0.3.0 R&D): the discovery calibrator, off unless Discovery=1
 #include "live_panel.hpp"     // PanelOverPicture (N01950): own file, off unless PanelOverPicture=1
-#include "panel_simple.hpp"   // the player-facing panel; its layout is panel_simple.txt
 #include "latency_probe.hpp"  // D1.5a (0.3.0 R&D): read-only latency probe, off unless LatencyProbe=1
 #include "journal.hpp"        // D2.0: what / when / why journal, off unless Journal=1
 #include "stall_watch.hpp"    // D2.0: stall watch, off unless StallWatch=N
@@ -127,7 +127,6 @@
 #include "sl_probe.hpp"   // SL1
 #include "sl_tags.hpp"    // R300c/R300d (Dom's R220/R221): the Streamline-tagged vectors
 #include "t119_keys.hpp"  // R300 (T1.19): Dom's keys, every one absent = off
-#include "startup_trace.hpp" // R313
 #include "worker.hpp"
 
 extern "C" __declspec(dllexport) const char *NAME = "MGPU Bridge";
@@ -226,9 +225,12 @@ static void mgpu_mvec_transport_hook(void *cmd_list_native, unsigned long long r
 // R300d (Dom's R221, T1.5). SLT1 callback: capture while the game's ResourceTag is valid. Installed only
 // with SLTagsCapture=1|2 (on_init_swapchain, after the ini is read).
 static void mgpu_tagged_mvec_capture_hook(void *cmd_list_native, unsigned long long resource,
-                                          unsigned declared_state, int lifecycle)
+                                          unsigned declared_state, int lifecycle, unsigned top,
+                                          unsigned left, unsigned width, unsigned height,
+                                          mgpu::motion_packet::identity engine)
 {
-    mgpu::gpu1::stream_mvec_copy_tagged(cmd_list_native, resource, declared_state, lifecycle);
+    mgpu::gpu1::stream_mvec_copy_tagged(cmd_list_native, resource, declared_state, lifecycle,
+                                      top, left, width, height, engine);
 }
 // R232: the D3D11 twin - the game's context and its DLSS MotionVectors go to
 // the DX11 producer, which hops them. Inert unless DX11=1 (one load).
@@ -248,7 +250,6 @@ static void note_game_fullscreen(reshade::api::swapchain *swapchain, const char 
     if (sc == nullptr) return;
     BOOL fs = FALSE;
     if (FAILED(sc->GetFullscreenState(&fs, nullptr))) return;
-    if (mgpu::strace::on()) mgpu::strace::ev(mgpu::strace::R_GT_SWAP, "game-fullscreen-state", fs ? "EXCLUSIVE" : "windowed/borderless");   // R313
     char l[640];
     if (fs)
     {
@@ -356,15 +357,6 @@ static void on_init_swapchain(reshade::api::swapchain *swapchain, bool resize)
     // on the game's render thread or under s.cs (Requiem, C6 14:42:19-25:
     // our lines took 0.4-1.4 s each to write; DEFECT E).
     mgpu::lq::start();
-    // R313: StartupTrace / DcompSafeMode keys, read once here (the same place the
-    // journal and the stall watch read theirs - never in DllMain). Key absent:
-    // one ini read, then every trace point is one relaxed load.
-    mgpu::strace::init();
-    const double r313_t_enter = mgpu::strace::now_ms();
-    // The bridge's own chain raises this event on the bridge thread: the role follows the thread.
-    const mgpu::strace::role r313_role = mgpu::strace::is_bridge_thread() ? mgpu::strace::R_BT : mgpu::strace::R_GT_SWAP;
-    if (mgpu::strace::on())
-        mgpu::strace::ev(r313_role, "init_swapchain-enter", resize ? "resize" : "init");
     mgpu::journal::init(MGPU_VERSION_STR " built " __DATE__ " " __TIME__);
     mgpu::gpu1::set_build_string(MGPU_VERSION_STR);   // R267
     mgpu::stallwatch::init();
@@ -432,9 +424,7 @@ static void on_init_swapchain(reshade::api::swapchain *swapchain, bool resize)
                 {   // R279: the texture census instrument, off unless TexCensus=1
                     const reshade::api::resource bb12 = swapchain->get_back_buffer(0);
                     const reshade::api::resource_desc bd12 = pd->get_resource_desc(bb12);
-                    // R303: tex_census::init moved below, behind r280_game_chain. Called here
-                    // for every D3D12 chain, the bridge's own 1280x720 one reset the census's
-                    // scene size on Far Cry 6 (every report said 1280x720).
+                    mgpu::tex_census::init(reinterpret_cast<void *>(static_cast<uintptr_t>(pd->get_native())), bd12.texture.width, bd12.texture.height);
                     // R280: the virtual velocity target - off on MVecExtractOff=1 / MVecLearned=99, inert on a contract
                     // R280f: only on the GAME's D3D12 chain. SK-R1: on Skyrim (D3D11) the bridge's own
                     // D3D12 swapchain on GPU 1 (1280x720) armed it. A chain whose adapter is not the
@@ -451,10 +441,7 @@ static void on_init_swapchain(reshade::api::swapchain *swapchain, bool resize)
                             }
                     }
                     if (r280_game_chain)
-                    {
-                        mgpu::tex_census::init(reinterpret_cast<void *>(static_cast<uintptr_t>(pd->get_native())), bd12.texture.width, bd12.texture.height);   // R279/R303
                         mgpu::mvec_extract::init(reinterpret_cast<void *>(static_cast<uintptr_t>(pd->get_native())), bd12.texture.width, bd12.texture.height);
-                    }
                     else
                     {   // R280g: never silent - a wrong provisional LUID would otherwise read as a title with no source
                         char l280[200];
@@ -549,10 +536,6 @@ static void on_init_swapchain(reshade::api::swapchain *swapchain, bool resize)
                         }
                         mgpu::stallwatch::note_game_chain(gch);
                         mgpu::journal::note_game_chain(gch);
-                        mgpu::strace::note_game_device(sd12);   // R313: a store; read only by the record
-                        mgpu::strace::note_game_chain(gch);     // R313: so on_present counts the GAME's presents only
-                        if (mgpu::strace::on())
-                            mgpu::strace::ev(mgpu::strace::R_GT_SWAP, "game-chain-proved", resize ? "resize" : "init");
                     }
                 }
             }
@@ -610,7 +593,15 @@ static void on_init_swapchain(reshade::api::swapchain *swapchain, bool resize)
 
             mgpu::probe::set_mode(mgpu::probe::mode_from_ini());
             if (mgpu::t119::sltags_capture() != 0)   // R300d: key absent = SLT1 stays observer-only
+            {
+                mgpu::aligned::enable();
+                if (mgpu::aligned::enabled())
+                {
+                    mgpu::sltags::set_resource_capture(&mgpu::aligned::capture);
+                    mgpu::sltags::set_constants_capture(&mgpu::aligned::capture_constants);
+                }
                 mgpu::sltags::set_mvec_capture(&mgpu_tagged_mvec_capture_hook);
+            }
 
             // ---- R101: THE NGX TAP, INSTALLED ON THE SAME ONE-SHOT ----
             //
@@ -633,12 +624,6 @@ static void on_init_swapchain(reshade::api::swapchain *swapchain, bool resize)
             mgpu::calibrator::set_eval_copy(mgpu::probe::eval_copy_mode());
             mgpu::calibrator::set_sf_path(mgpu::probe::sf_path_mode());   // R180
         }
-    }
-    if (mgpu::strace::on())   // R313
-    {
-        char r313d[96];
-        snprintf(r313d, sizeof r313d, "%.2f ms inside the handler", mgpu::strace::now_ms() - r313_t_enter);
-        mgpu::strace::ev(r313_role, "init_swapchain-exit", r313d);
     }
 }
 
@@ -1128,18 +1113,27 @@ static void draw_mgpu_overlay(reshade::api::effect_runtime *)
     // a menu that does nothing.
     mgpu::gpu1::ui_panel_drawn();
 
-    // The simple mode REPLACES the panel instead of greying parts of it out. `Advanced >>` at
-    // its bottom, the checkbox in the editor section, and CTRL+ALT+F4 all switch back. Every
-    // control it draws calls the same setter the full panel does - same state, less on screen.
-    if (mgpu::psimple::enabled())
-    {
-        mgpu::psimple::draw_simple_panel();
-        return;
-    }
-
-
     mgpu::gpu1::ui_state st;
     mgpu::gpu1::ui_read(st);
+
+    if (st.fg_official_route)
+    {
+        ImGui::SeparatorText("5080 OFFICIAL OUTPUT");
+        if (st.fg_rates_valid)
+        {
+            ImGui::Text("NR source: %.1f FPS", st.fg_real_fps);
+            ImGui::Text("SDK output: %.1f frames/s", st.fg_sdk_fps);
+            ImGui::Text("Observed: %.2fx | Requested: %ux", st.fg_effective_multiplier, st.fg_multiplier);
+            if (st.fg_source_age_ms >= 0) ImGui::Text("Source age to Present: %.1f ms", st.fg_source_age_ms);
+            if (st.fg_rates_last_visible)
+                ImGui::TextDisabled("Last foreground sample: %.1f s ago", double(st.fg_rates_age_ms) / 1000.0);
+            else ImGui::TextDisabled("Live foreground sample");
+        }
+        else ImGui::TextDisabled("Official output FPS: unavailable or stale");
+        ImGui::TextDisabled("Screen FPS: not measured");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("SDK output includes generated frames. Screen refresh and input-to-photon latency require external measurement.");
+    }
 
     if (mgpu::t119::panel_stats())   // T1.17 (PanelStats=1): measured from game-swapchain present events
     {
@@ -1306,13 +1300,7 @@ static void draw_mgpu_overlay(reshade::api::effect_runtime *)
     // ONE line, and it goes red when the setting it warns about is active. The
     // panel used to carry six lines of explanation here; a warning nobody
     // finishes reading is not a warning. The reasoning is in mgpu.ini.
-    // R319a: with the residual 2nd pass armed (Light / Medium) the second pass is
-    // lighter, so the line says what is true for it; Full keeps the original line.
-    if (passes >= 2 && mgpu::residual::active())
-        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f),
-                           "x2 adds a lighter second pass on the second GPU. "
-                           "It uses more power than x1.");
-    else if (passes >= 2)
+    if (passes >= 2)
         ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f),
                            "x2 is free to the game but holds the second GPU near its power "
                            "limit. x1 recommended.");
@@ -1391,91 +1379,6 @@ static void draw_mgpu_overlay(reshade::api::effect_runtime *)
                 ImGui::TextColored(ImVec4(1.0f, 0.92f, 0.23f, 1.0f),
                                    "Restart the game once to apply.");
 
-            // ---- R319: which 2nd pass x2 runs (R316 residual module keys) ----
-            // Light  = ResidualPass=2, ResidualScale=0.75, ResidualRender=1 (the game's render
-            //          size; on DLAA or without the NGX table it runs as Medium, R316b)
-            // Medium = ResidualPass=2, ResidualScale=0.75, ResidualRender=0
-            // Full   = ResidualPass=0 (the module stays off: the native 2nd pass, as before)
-            // Read at arm, so a change needs a restart. The file decides what is selected:
-            // no ResidualPass line selects Full, which is what such a file runs.
-            {
-                static bool rsd_loaded = false;
-                static int rsd_file = 2, rsd_want = 2;   // 0 Light, 1 Medium, 2 Full
-                if (!rsd_loaded)
-                {
-                    rsd_loaded = true;
-                    const int rp = mgpu::gpu1::ui_ini_read("ResidualPass", -1);
-                    const int rr = mgpu::gpu1::ui_ini_read("ResidualRender", 0);
-                    rsd_file = (rp == 2) ? ((rr == 1) ? 0 : 1) : 2;
-                    rsd_want = rsd_file;
-                }
-                ImGui::SeparatorText("2nd pass (x2)");
-                int pick = rsd_want;
-                bool changed = false;
-                // R319b: Medium first - it is the default 2nd pass (Marcelo 14:11).
-                if (ImGui::RadioButton("Medium##rsd", &pick, 1)) changed = true;
-                ImGui::SameLine();
-                if (ImGui::RadioButton("Light##rsd", &pick, 0)) changed = true;
-                ImGui::SameLine();
-                if (ImGui::RadioButton("Full##rsd", &pick, 2)) changed = true;
-                if (changed && pick != rsd_want)
-                {
-                    bool ok = true;
-                    if (pick == 2)
-                        ok = mgpu::gpu1::ui_ini_write("ResidualPass", 0);
-                    else
-                    {
-                        ok = mgpu::gpu1::ui_ini_write("ResidualPass", 2) &&
-                             mgpu::gpu1::ui_ini_write_float("ResidualScale", 0.75f) &&
-                             mgpu::gpu1::ui_ini_write("ResidualRender", (pick == 0) ? 1 : 0);
-                    }
-                    if (ok) rsd_want = pick;
-                }
-                ImGui::TextDisabled("Light follows the game's DLSS mode at game start.");
-                if (rsd_want != rsd_file)
-                    ImGui::TextColored(ImVec4(1.0f, 0.92f, 0.23f, 1.0f),
-                                       "Restart the game once to apply.");
-            }
-
-            // ---- R321: Pass 1 scale (NRS, N01950's R299 path) - Option A, one residual at a time ----
-            // On  = NRScale=0.75 + NRScaleResolveDepth=0 (C5: N01950's default + Dom's fix).
-            // Off = NRScale=0 (no key-removal writer; R299 needs a scale above 0.05 to turn on, so 0
-            //       is off, as an absent line is). While it is on, the residual 2nd pass stays off
-            //       (R316) and x2 runs the full native 2nd pass. Read at arm: restart.
-            {
-                static bool nrs_loaded = false;
-                static bool nrs_file = false, nrs_want = false;
-                if (!nrs_loaded)
-                {
-                    nrs_loaded = true;
-                    char v[32] = {};
-                    mgpu::gpu1::ui_ini_read_word("NRScale", v, sizeof v);
-                    nrs_file = (v[0] != 0 && atof(v) > 0.05);
-                    nrs_want = nrs_file;
-                }
-                ImGui::SeparatorText("Pass 1 scale (NRS)");
-                int pick = nrs_want ? 1 : 0;
-                bool changed = false;
-                if (ImGui::RadioButton("Off##nrs1", &pick, 0)) changed = true;
-                ImGui::SameLine();
-                if (ImGui::RadioButton("On##nrs1", &pick, 1)) changed = true;
-                if (changed && (pick == 1) != nrs_want)
-                {
-                    bool ok = true;
-                    if (pick == 1)
-                        ok = mgpu::gpu1::ui_ini_write_float("NRScale", 0.75f) &&
-                             mgpu::gpu1::ui_ini_write("NRScaleResolveDepth", 0);
-                    else
-                        ok = mgpu::gpu1::ui_ini_write_float("NRScale", 0.0f);
-                    if (ok) nrs_want = (pick == 1);
-                }
-                ImGui::TextDisabled("Pass 1 runs at 0.75 and adds its detail back at full size.");
-                ImGui::TextDisabled("While it is on, x2 runs the full 2nd pass.");
-                if (nrs_want != nrs_file)
-                    ImGui::TextColored(ImVec4(1.0f, 0.92f, 0.23f, 1.0f),
-                                       "Restart the game once to apply.");
-            }
-
             // ---- R219-2: 16-bit colour (R208, NRInput16 / NRInput16Power) ----
             // Read at arm like crop. nr16 is on only for NRInput16=4 and takes a
             // power of 1.0-3.0, else 2.2. The slider writes when it is let go,
@@ -1548,13 +1451,70 @@ static void draw_mgpu_overlay(reshade::api::effect_runtime *)
             unsigned long long reused = 0, thinned = 0;
             mgpu::fgmap::ui_counters(fg_now, reused, thinned);
             char fl[200];
-            snprintf(fl, sizeof fl, "frame generation %s   reused %llu   thinned %llu",
-                     fg_now ? "ACTIVE" : "not seen", reused, thinned);
+            snprintf(fl, sizeof fl, "captured FG output %s   reused %llu   thinned %llu",
+                     fg_now ? "verified" : "unconfirmed", reused, thinned);
             ImGui::TextUnformatted(fl);
             ImGui::TextDisabled("fix: one presented step of motion on every frame; a frame without a");
             ImGui::TextDisabled("fresh vector binds the kept one. thin: evaluate 1 generated frame in N.");
             if (st.mvec_mode != 3)
                 ImGui::TextDisabled("Needs MVec=3 (the game's own vectors). This run is not.");
+
+            ImGui::SeparatorText("Secondary DLSS FG (GPU1)");
+            static bool secondary_fg_loaded = false;
+            static bool secondary_fg_file = false;
+            static int secondary_fg_multiplier = 2;
+            if (!secondary_fg_loaded)
+            {
+                secondary_fg_loaded = true;
+                secondary_fg_file = mgpu::gpu1::ui_ini_read("SecondaryFG", 0) != 0;
+                secondary_fg_multiplier = mgpu::gpu1::ui_ini_read("FGMultiplier", 2);
+                if (secondary_fg_multiplier < 2 || secondary_fg_multiplier > 6)
+                    secondary_fg_multiplier = 2;
+            }
+            bool secondary_fg = secondary_fg_file;
+            if (ImGui::Checkbox("5080 DLSS frame generation", &secondary_fg))
+            {
+                if (mgpu::gpu1::ui_ini_write("SecondaryFG", secondary_fg ? 1 : 0))
+                    secondary_fg_file = secondary_fg;
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("GPU1; game FG stays off");
+            ImGui::TextUnformatted("Multiplier");
+            int requested_multiplier = secondary_fg_multiplier;
+            for (int multiplier = 2; multiplier <= 6; ++multiplier)
+            {
+                if (multiplier > 2) ImGui::SameLine();
+                const bool unsupported = st.fg_runtime_max_multiplier != 0u &&
+                    unsigned(multiplier) > st.fg_runtime_max_multiplier;
+                ImGui::BeginDisabled(unsupported);
+                char label[8];
+                snprintf(label, sizeof label, "%dx", multiplier);
+                if (ImGui::RadioButton(label, &requested_multiplier, multiplier))
+                {
+                    if (mgpu::gpu1::ui_ini_write("FGMultiplier", multiplier))
+                        secondary_fg_multiplier = multiplier;
+                }
+                ImGui::EndDisabled();
+            }
+            ImGui::TextDisabled("2x = 1 generated frame; 6x = 5. Takes effect after restart.");
+            if (st.armed && (st.fg_requested != secondary_fg_file ||
+                             (st.fg_requested && st.fg_multiplier != (unsigned)secondary_fg_multiplier)))
+                ImGui::TextColored(ImVec4(1.0f, 0.92f, 0.23f, 1.0f),
+                                   "Restart the game once to apply Secondary DLSS FG.");
+            if (st.fg_requested)
+            {
+                if (st.fg_runtime_max_multiplier != 0u)
+                    ImGui::Text("Runtime limit: %ux (%s)", st.fg_runtime_max_multiplier,
+                        st.fg_capability_reported ? "reported" : "MFG unconfirmed");
+                if (st.fg_runtime_max_multiplier != 0u && st.fg_multiplier > st.fg_runtime_max_multiplier)
+                    ImGui::TextUnformatted("Requested multiplier unsupported; NR remains active.");
+                char fg_status[220];
+                snprintf(fg_status, sizeof fg_status,
+                         "GPU1 FG: %s | %ux | generated %llu | real %llu",
+                         st.fg_ready ? "ready" : "waiting", st.fg_multiplier,
+                         st.fg_generated_presents, st.fg_real_presents);
+                ImGui::TextUnformatted(fg_status);
+            }
         }
     }
 
@@ -1570,8 +1530,6 @@ static void draw_mgpu_overlay(reshade::api::effect_runtime *)
     float all = st.intensity[0];
     if (ImGui::SliderFloat("all passes", &all, 0.0f, 2.0f, "%.2f"))
         mgpu::gpu1::ui_set_intensity(0, all);
-    if (ImGui::IsItemDeactivatedAfterEdit())   // R300n: persist once, on release
-        mgpu::gpu1::ui_persist_intensity(0, all);
     for (unsigned i = 0; i < st.passes && i < st.max_passes; ++i)
     {
         char lab[24];
@@ -1579,8 +1537,6 @@ static void draw_mgpu_overlay(reshade::api::effect_runtime *)
         float v = st.intensity[i];
         if (ImGui::SliderFloat(lab, &v, 0.0f, 2.0f, "%.2f"))
             mgpu::gpu1::ui_set_intensity(i + 1, v);
-        if (ImGui::IsItemDeactivatedAfterEdit())   // R300n
-            mgpu::gpu1::ui_persist_intensity(i + 1, v);
     }
     if (st.passes == 1)
         ImGui::TextDisabled("At x1 the three shapes are identical - there is one pass to shape.");
@@ -1596,8 +1552,6 @@ static void draw_mgpu_overlay(reshade::api::effect_runtime *)
     float sp = st.split_pos;
     if (ImGui::SliderFloat("seam", &sp, 0.0f, 1.0f, "%.2f"))
         mgpu::gpu1::ui_set_split_pos(sp);
-    if (ImGui::IsItemDeactivatedAfterEdit())   // R300n
-        mgpu::gpu1::ui_persist_split_pos(sp);
     ImGui::TextDisabled("Split: input left of the seam, output right, same frame.");
     ImGui::TextDisabled("CTRL+ALT+LEFT/RIGHT move it with no overlay open (SHIFT = coarse).");
 
@@ -2770,8 +2724,6 @@ static void draw_mgpu_overlay(reshade::api::effect_runtime *)
         }
     }
 
-    mgpu::psimple::draw_editor();   // toggle, open panel_simple.txt, export the row list
-
     ImGui::Separator();
     ImGui::TextDisabled("Do not change resolution, DLSS mode or presets while armed - disarm first.");
     ImGui::TextDisabled("Frame generation is untested. Changes here make this a tuning run.");
@@ -3045,7 +2997,6 @@ static bool on_reshade_open_overlay(reshade::api::effect_runtime *runtime, bool 
                             mgpu::diag::info(l);
                         }
                     }
-                    if (mgpu::strace::on()) mgpu::strace::ev(mgpu::strace::R_GT_OVERLAY, "overlay-toggle", open ? "open (visual unroots)" : "close (visual roots)");   // R313
                     mgpu::gpu1::dcomp_set_visible(!open);
                     return false;
                 }
@@ -3074,7 +3025,6 @@ static bool on_reshade_open_overlay(reshade::api::effect_runtime *runtime, bool 
             }
             return false;
         }
-        if (mgpu::strace::on()) mgpu::strace::ev(mgpu::strace::R_GT_OVERLAY, "overlay-toggle", open ? "open (visual unroots)" : "close (visual roots)");   // R313
         mgpu::gpu1::dcomp_set_visible(!open);
         return false;   // dcomp mode has no window to disagree with
     }
@@ -3119,12 +3069,15 @@ static bool on_reshade_open_overlay(reshade::api::effect_runtime *runtime, bool 
 
 // D2.0: after the game's Present returns; anchor=finish sleeps here. Off
 // (one load each) unless StallWatch / OwnReflex are set.
-static void on_finish_present(reshade::api::command_queue *, reshade::api::swapchain *swapchain)
+static void on_finish_present(reshade::api::command_queue *queue, reshade::api::swapchain *swapchain)
 {
     mgpu::stallwatch::scope sw(mgpu::stallwatch::S_FINISH_CB);
     if (swapchain != nullptr)
         mgpu::own_reflex::on_finish_present(
             reinterpret_cast<void *>(static_cast<uintptr_t>(swapchain->get_native())));
+    if (swapchain != nullptr && queue != nullptr)
+        mgpu::gpu1::stream_finish_present(
+            reinterpret_cast<void *>(static_cast<uintptr_t>(queue->get_native())));
 }
 
 static void on_present(reshade::api::command_queue *queue,
@@ -3136,11 +3089,6 @@ static void on_present(reshade::api::command_queue *queue,
     mgpu::stallwatch::scope sw_cb(mgpu::stallwatch::S_PRESENT_CB);
     if (swapchain != nullptr)
         mgpu::stallwatch::on_present(
-            reinterpret_cast<void *>(static_cast<uintptr_t>(swapchain->get_native())));
-    // R313: the game's present cadence - one relaxed load (key absent) or one
-    // relaxed increment (key on) when this is the GAME's chain. Nothing else.
-    if (swapchain != nullptr)
-        mgpu::strace::note_game_present(
             reinterpret_cast<void *>(static_cast<uintptr_t>(swapchain->get_native())));
     // DX11 probe: one load when off. The immediate context and the current
     // back buffer, as natives; the module holds no ReShade type.
@@ -3551,73 +3499,6 @@ static void on_reshade_finish_effects(reshade::api::effect_runtime *runtime,
                                 mgpu::probe::set_mvec_override(ct.mvec);
                         }
                     }
-                    // R315 (MVecBarrierSource=1 only): the probe's fire count to gpu1 for its [R315] line.
-                    if (mgpu::probe::mvec_barrier_source() != 0)
-                        mgpu::gpu1::r315_note(mgpu::probe::mvec_barrier_source(), mgpu::probe::mvec_barrier_source_fires());
-                    // ---- R312 (DepthTransport >= 2): push the tap's geometry, once per launch ----
-                    //
-                    // The tap's .fx reads MGPU_DEPTH_FORMAT / _WIDTH / _HEIGHT with defaults equal to
-                    // today's (R32F at BUFFER size). 2: the format alone, pushed on the first game frame.
-                    // 3 / 4: the render size, pushed once the calibrator's table carries it (the game's
-                    // own DLSS has run). ReShade reloads the effect once; the arm holds for depth until
-                    // the tap's resource is the pushed geometry (gpu1_context, r312_set_target).
-                    // Key absent (1): this block is three loads and nothing else.
-                    {
-                        static bool r312_done = false;
-                        const int r312 = r312_done ? 1 : mgpu::gpu1::depth_transport();
-                        if (r312 >= 2)
-                        {
-                            const bool want_size = (r312 >= 3);
-                            const bool want_half = (r312 == 2 || r312 == 4);
-                            unsigned rw = 0, rh = 0;
-                            bool ready = !want_size;
-                            if (want_size)
-                            {
-                                mgpu::calibrator::table rt_t;
-                                if (mgpu::calibrator::read(rt_t) && rt_t.render_w != 0u && rt_t.render_h != 0u)
-                                { rw = rt_t.render_w; rh = rt_t.render_h; ready = true; }
-                                else if (mgpu::calibrator::read(rt_t) && rt_t.sub_w != 0u && rt_t.sub_h != 0u)
-                                { rw = rt_t.sub_w; rh = rt_t.sub_h; ready = true; }
-                                // R327 (E13): KCD2 fills Width/Height and OutWidth/OutHeight the other way round
-                                // (2560x1440 / 1485x835). A render size LARGER than the output is not a thing an
-                                // upscaler means, so in that one case the vector subrect (what the game rendered
-                                // into) is the render size. Every other table (equal, below, dynamic resolution,
-                                // DLAA, FG) reads exactly as before.
-                                if (ready && rt_t.display_w != 0u && rt_t.display_h != 0u &&
-                                    rw > rt_t.display_w && rh > rt_t.display_h &&
-                                    rt_t.sub_w != 0u && rt_t.sub_h != 0u && rt_t.sub_w <= rt_t.display_w && rt_t.sub_h <= rt_t.display_h)
-                                {
-                                    char sw[220];
-                                    snprintf(sw, sizeof sw, "[MGPU][R327] the table's render size %ux%u is larger than its output %ux%u (swapped fields): "
-                                                            "the vector subrect %ux%u is taken as the render size.", rw, rh, rt_t.display_w, rt_t.display_h, rt_t.sub_w, rt_t.sub_h);
-                                    mgpu::diag::info(sw);
-                                    rw = rt_t.sub_w; rh = rt_t.sub_h;
-                                }
-                            }
-                            if (ready)
-                            {
-                                r312_done = true;
-                                char wv[16], hv[16];
-                                if (want_half) runtime->set_preprocessor_definition_for_effect("mgpu_depth_tap.fx", "MGPU_DEPTH_FORMAT", "R16F");
-                                if (want_size)
-                                {
-                                    snprintf(wv, sizeof wv, "%u", rw); snprintf(hv, sizeof hv, "%u", rh);
-                                    runtime->set_preprocessor_definition_for_effect("mgpu_depth_tap.fx", "MGPU_DEPTH_WIDTH", wv);
-                                    runtime->set_preprocessor_definition_for_effect("mgpu_depth_tap.fx", "MGPU_DEPTH_HEIGHT", hv);
-                                }
-                                mgpu::gpu1::r312_set_target(want_size ? rw : 0u, want_size ? rh : 0u,
-                                                            want_half ? (unsigned)DXGI_FORMAT_R16_FLOAT : 0u);
-                                char r312l[360];
-                                snprintf(r312l, sizeof r312l,
-                                         "[MGPU][R312] DEPTH LANE: DepthTransport=%d - pushed %s%s%s into mgpu_depth_tap.fx (the effect "
-                                         "reloads once). The arm holds for depth until the tap's resource matches.",
-                                         r312, want_half ? "MGPU_DEPTH_FORMAT=R16F" : "",
-                                         (want_half && want_size) ? ", " : "",
-                                         want_size ? "the render size (MGPU_DEPTH_WIDTH/HEIGHT from the game's own DLSS table)" : "");
-                                mgpu::diag::info(r312l);
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -3875,8 +3756,9 @@ static void on_reshade_finish_effects(reshade::api::effect_runtime *runtime,
     // D3D12 title with an NGX contract, copies not made by the tap that landed are the
     // title's own vectors arriving. Latched like R280o. Titles without a contract
     // (no DLSS, non-NVIDIA game card) keep the tap exactly as in 0.3.0.
-    const int r289_route = (rt_is_game && tap_mode != 0 && !g_r280o_eval_yield) ? mgpu::gpu1::own_route_delivered() : 0;
-    if (rt_is_game && tap_mode != 0 && (g_r280o_eval_yield || r289_route != 0))
+    const bool explicit_tap = g_mvec_tap12 != 0;
+    const int r289_route = (rt_is_game && tap_mode != 0 && !explicit_tap && !g_r280o_eval_yield) ? mgpu::gpu1::own_route_delivered() : 0;
+    if (rt_is_game && tap_mode != 0 && !explicit_tap && (g_r280o_eval_yield || r289_route != 0))
     {
         if (!g_r280o_eval_yield)
         {
@@ -3902,40 +3784,6 @@ static void on_reshade_finish_effects(reshade::api::effect_runtime *runtime,
         mgpu::probe::mvec_pick_lock(mgpu::gpu1::stream_producing());   // R278f-r
         const int req = mgpu::gpu1::mvec_candidate_request();
         if (req >= 0 && req != mgpu::probe::mvec_pick_index()) mgpu::probe::mvec_pick_live(req);
-    }
-
-    // R315b (MVecBarrierSource=2 only): the tail copy of the published vector buffer, before the
-    // seal. WINDOW: beside the transition copy, for the judge. TAIL: the delivery; the probe's
-    // transition match is told to stop. TRANSITION: nothing. Key absent / 1: two loads.
-    // R315b fix 2 / R323: did the game's own DLSS evaluate for this frame? The calibrator's evaluate
-    // count moved since the last game frame. Read once here, for the tail copy (MVecBarrierSource=2)
-    // and for the history gate (HistoryGate=1); -1 while the title has no table. Neither key: no read.
-    const bool r315_two = rt_is_game && mgpu::probe::mvec_barrier_source() == 2 && mgpu::gpu1::stream_producing();
-    const bool gate_on  = rt_is_game && mgpu::gpu1::history_gate() != 0;
-    bool r315_evaluated = false;
-    if (r315_two || gate_on)
-    {
-        static unsigned long long r315_evals_seen = 0ull;
-        mgpu::calibrator::table r315_t;   // the tracked SCENE feature's count (feature_evaluates() counts every handle, FG included)
-        const bool have_t = mgpu::calibrator::read(r315_t);
-        const unsigned long long r315_evals_now = have_t ? r315_t.evals : r315_evals_seen;
-        r315_evaluated = (r315_evals_now != r315_evals_seen);
-        r315_evals_seen = r315_evals_now;
-        if (gate_on) mgpu::gpu1::note_game_dlss(!have_t ? -1 : (r315_evaluated ? 1 : 0));   // R323
-    }
-    if (r315_two)
-    {
-        const int ph = mgpu::gpu1::r315_phase();
-        mgpu::probe::r315_set_transition(false);   // R315b fix 3: value 2 never uses the transition route (value 1 does)
-        // R315b fix 2: the tail copy only on a frame where the game evaluated DLSS. A menu, a loading
-        // screen or a cutscene without DLSS records no barriers and delivers nothing - the seal goes
-        // out without vectors, exactly as the transition route behaves there.
-        if (ph != 2 && r315_evaluated)
-        {
-            mgpu::gpu1::r315_tail_scope(true);
-            mgpu::probe::r315_tail_copy(cmd_list);
-            mgpu::gpu1::r315_tail_scope(false);
-        }
     }
 
     mgpu::gpu1::stream_on_finish_effects(
@@ -4002,7 +3850,6 @@ static void on_destroy_device(reshade::api::device *device)
         mgpu::gpu1::stream_shutdown();
         mgpu::worker::stop();
         mgpu::journal::on_game_device_destroyed();
-        mgpu::strace::mark_clean_exit();   // R313
         mgpu::stallwatch::signal_stop();
         mgpu::dx11producer::shutdown();
         mgpu::mvec_census::shutdown();   // R253: unregisters its events; nothing of its own on the device
@@ -4052,7 +3899,6 @@ static void on_destroy_device(reshade::api::device *device)
                 // first), so none of them is inside this image if ReShade
                 // unloads the add-on next. A new game device re-arms them.
                 mgpu::journal::on_game_device_destroyed();
-                mgpu::strace::mark_clean_exit();   // R313
                 mgpu::stallwatch::signal_stop();
                 mgpu::tex_census::shutdown();    // R279: the instrument's events, if on (D3D12 game device)
                 mgpu::mvec_extract::shutdown();  // R280 (D3D12 game device)
@@ -4060,6 +3906,191 @@ static void on_destroy_device(reshade::api::device *device)
             }
         }
     }
+}
+
+static void on_aligned_execute(reshade::api::command_queue *queue, reshade::api::command_list *)
+{
+    if (mgpu::aligned::enabled() && queue != nullptr &&
+        queue->get_device()->get_api() == reshade::api::device_api::d3d12)
+    {
+        mgpu::aligned::observe_queue(reinterpret_cast<ID3D12CommandQueue *>(queue->get_native()));
+        mgpu::queue_trace::observe_queue(reinterpret_cast<ID3D12CommandQueue *>(queue->get_native()));
+    }
+}
+
+static void on_trace_queue(reshade::api::command_queue *queue)
+{
+    on_aligned_execute(queue, nullptr);
+}
+
+static void on_aligned_reset(reshade::api::command_list *command)
+{
+    if (mgpu::aligned::enabled() && command != nullptr &&
+        command->get_device()->get_api() == reshade::api::device_api::d3d12)
+    {
+        mgpu::game_work::observe_native_list(reinterpret_cast<ID3D12GraphicsCommandList *>(command->get_native()));
+        mgpu::game_work::reset(reinterpret_cast<ID3D12GraphicsCommandList *>(command->get_native()));
+        mgpu::aligned::reset_command(reinterpret_cast<ID3D12GraphicsCommandList *>(command->get_native()));
+    }
+}
+
+static ID3D12GraphicsCommandList *work_command(reshade::api::command_list *command)
+{
+    if (!mgpu::game_work::active() || command == nullptr ||
+        command->get_device()->get_api() != reshade::api::device_api::d3d12) return nullptr;
+    auto *native=reinterpret_cast<ID3D12GraphicsCommandList *>(command->get_native());
+    mgpu::game_work::observe_native_list(native);
+    return native;
+}
+
+static void on_work_close(reshade::api::command_list *command)
+{
+    if (command != nullptr && command->get_device()->get_api() == reshade::api::device_api::d3d12)
+        mgpu::game_work::close(reinterpret_cast<ID3D12GraphicsCommandList *>(command->get_native()));
+}
+
+static void on_work_destroy(reshade::api::command_list *command)
+{
+    if (command != nullptr && command->get_device()->get_api() == reshade::api::device_api::d3d12)
+        mgpu::game_work::destroy(reinterpret_cast<ID3D12GraphicsCommandList *>(command->get_native()));
+}
+
+static void on_work_pipeline(reshade::api::command_list *command, reshade::api::pipeline_stage stages,
+    reshade::api::pipeline pipeline)
+{
+    if (auto *native = work_command(command))
+        mgpu::game_work::marker(native, stages == reshade::api::pipeline_stage::compute_shader ?
+            mgpu::game_work::phase::compute : mgpu::game_work::phase::graphics, pipeline.handle);
+}
+
+static void on_work_targets(reshade::api::command_list *command, uint32_t count,
+    const reshade::api::resource_view *targets, reshade::api::resource_view depth)
+{
+    auto *native = work_command(command);
+    if (native == nullptr) return;
+    auto *device = command->get_device();
+    const auto view = count != 0 && targets != nullptr ? targets[0] : depth;
+    if (view.handle == 0) return;
+    const auto description = device->get_resource_desc(device->get_resource_from_view(view));
+    if (description.type == reshade::api::resource_type::texture_2d)
+        mgpu::game_work::marker(native, mgpu::game_work::phase::target_change, view.handle,
+            description.texture.width, description.texture.height);
+}
+
+static bool on_work_draw(reshade::api::command_list *command, uint32_t, uint32_t, uint32_t, uint32_t)
+{
+    if (auto *native = work_command(command)) mgpu::game_work::marker(native, mgpu::game_work::phase::graphics);
+    return false;
+}
+
+static bool on_work_draw_indexed(reshade::api::command_list *command, uint32_t, uint32_t, uint32_t, int32_t, uint32_t)
+{
+    if (auto *native = work_command(command)) mgpu::game_work::marker(native, mgpu::game_work::phase::graphics);
+    return false;
+}
+
+static bool on_work_dispatch(reshade::api::command_list *command, uint32_t, uint32_t, uint32_t)
+{
+    if (auto *native = work_command(command)) mgpu::game_work::marker(native, mgpu::game_work::phase::compute);
+    return false;
+}
+
+static bool on_work_begin_pass(reshade::api::command_list *command, uint32_t count,
+    const reshade::api::render_pass_render_target_desc *targets,
+    const reshade::api::render_pass_depth_stencil_desc *depth, reshade::api::render_pass_flags)
+{
+    const reshade::api::resource_view target = count && targets ? targets[0].view : reshade::api::resource_view{};
+    on_work_targets(command, target.handle ? 1 : 0, &target,
+        depth ? depth->view : reshade::api::resource_view{});
+    return false;
+}
+
+static bool on_work_copy(reshade::api::command_list *command, reshade::api::resource, reshade::api::resource)
+{
+    if (auto *native = work_command(command)) mgpu::game_work::marker(native, mgpu::game_work::phase::copy);
+    return false;
+}
+
+static bool on_work_copy_buffer(reshade::api::command_list *command, reshade::api::resource, uint64_t,
+    reshade::api::resource, uint64_t, uint64_t)
+{
+    if (auto *native = work_command(command)) mgpu::game_work::marker(native, mgpu::game_work::phase::copy);
+    return false;
+}
+
+static bool on_work_copy_texture(reshade::api::command_list *command, reshade::api::resource, uint32_t,
+    const reshade::api::subresource_box *, reshade::api::resource, uint32_t,
+    const reshade::api::subresource_box *, reshade::api::filter_mode)
+{
+    if (auto *native = work_command(command)) mgpu::game_work::marker(native, mgpu::game_work::phase::copy);
+    return false;
+}
+
+static bool on_work_clear_target(reshade::api::command_list *command, reshade::api::resource_view target,
+    const float *, uint32_t, const reshade::api::rect *)
+{
+    on_work_targets(command, 1, &target, {});
+    return false;
+}
+
+static bool on_work_clear_depth(reshade::api::command_list *command, reshade::api::resource_view depth,
+    const float *, const uint8_t *, uint32_t, const reshade::api::rect *)
+{
+    on_work_targets(command, 0, nullptr, depth);
+    return false;
+}
+
+static bool on_work_indirect(reshade::api::command_list *command, reshade::api::indirect_command,
+    reshade::api::resource, uint64_t, uint32_t, uint32_t)
+{
+    if (auto *native = work_command(command)) mgpu::game_work::marker(native, mgpu::game_work::phase::indirect);
+    return false;
+}
+
+static bool on_work_rays(reshade::api::command_list *command,
+    reshade::api::resource, uint64_t, uint64_t,
+    reshade::api::resource, uint64_t, uint64_t, uint64_t,
+    reshade::api::resource, uint64_t, uint64_t, uint64_t,
+    reshade::api::resource, uint64_t, uint64_t, uint64_t,
+    uint32_t width, uint32_t height, uint32_t)
+{
+    if (auto *native = work_command(command))
+        mgpu::game_work::marker(native,mgpu::game_work::phase::raytrace,0,width,height);
+    return false;
+}
+
+static bool on_work_mesh(reshade::api::command_list *command,uint32_t,uint32_t,uint32_t)
+{
+    if (auto *native = work_command(command)) mgpu::game_work::marker(native,mgpu::game_work::phase::graphics);
+    return false;
+}
+
+static bool on_work_acceleration_build(reshade::api::command_list *command,
+    reshade::api::acceleration_structure_type,reshade::api::acceleration_structure_build_flags,
+    uint32_t,const reshade::api::acceleration_structure_build_input *,reshade::api::resource,uint64_t,
+    reshade::api::resource_view,reshade::api::resource_view,reshade::api::acceleration_structure_build_mode)
+{
+    if (auto *native = work_command(command)) mgpu::game_work::callback_marker(native,mgpu::game_work::unclassified_callback::acceleration_build);
+    return false;
+}
+
+static bool on_work_uav_uint(reshade::api::command_list *command,reshade::api::resource_view,
+    const uint32_t *,uint32_t,const reshade::api::rect *)
+{
+    if (auto *native = work_command(command)) mgpu::game_work::callback_marker(native,mgpu::game_work::unclassified_callback::uav_uint);
+    return false;
+}
+
+static bool on_work_uav_float(reshade::api::command_list *command,reshade::api::resource_view,
+    const float *,uint32_t,const reshade::api::rect *)
+{
+    if (auto *native = work_command(command)) mgpu::game_work::callback_marker(native,mgpu::game_work::unclassified_callback::uav_float);
+    return false;
+}
+
+static void on_work_bundle(reshade::api::command_list *command,reshade::api::command_list *)
+{
+    if (auto *native = work_command(command)) mgpu::game_work::callback_marker(native,mgpu::game_work::unclassified_callback::bundle);
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID lpReserved)
@@ -4102,13 +4133,33 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID lpReserved)
             mgpu::diag::info(v);
         }
         reshade::register_event<reshade::addon_event::init_device>(on_init_device);
+        reshade::register_event<reshade::addon_event::init_command_queue>(on_trace_queue);
+        reshade::register_event<reshade::addon_event::execute_command_list>(on_aligned_execute);
+        reshade::register_event<reshade::addon_event::reset_command_list>(on_aligned_reset);
+        reshade::register_event<reshade::addon_event::close_command_list>(on_work_close);
+        reshade::register_event<reshade::addon_event::destroy_command_list>(on_work_destroy);
+        reshade::register_event<reshade::addon_event::bind_pipeline>(on_work_pipeline);
+        reshade::register_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(on_work_targets);
+        reshade::register_event<reshade::addon_event::draw>(on_work_draw);
+        reshade::register_event<reshade::addon_event::draw_indexed>(on_work_draw_indexed);
+        reshade::register_event<reshade::addon_event::dispatch>(on_work_dispatch);
+        reshade::register_event<reshade::addon_event::dispatch_rays>(on_work_rays);
+        reshade::register_event<reshade::addon_event::dispatch_mesh>(on_work_mesh);
+        reshade::register_event<reshade::addon_event::build_acceleration_structure>(on_work_acceleration_build);
+        reshade::register_event<reshade::addon_event::clear_unordered_access_view_uint>(on_work_uav_uint);
+        reshade::register_event<reshade::addon_event::clear_unordered_access_view_float>(on_work_uav_float);
+        reshade::register_event<reshade::addon_event::execute_secondary_command_list>(on_work_bundle);
+        reshade::register_event<reshade::addon_event::begin_render_pass>(on_work_begin_pass);
+        reshade::register_event<reshade::addon_event::copy_resource>(on_work_copy);
+        reshade::register_event<reshade::addon_event::copy_buffer_region>(on_work_copy_buffer);
+        reshade::register_event<reshade::addon_event::copy_texture_region>(on_work_copy_texture);
+        reshade::register_event<reshade::addon_event::clear_render_target_view>(on_work_clear_target);
+        reshade::register_event<reshade::addon_event::clear_depth_stencil_view>(on_work_clear_depth);
+        reshade::register_event<reshade::addon_event::draw_or_dispatch_indirect>(on_work_indirect);
         reshade::register_event<reshade::addon_event::init_swapchain>(on_init_swapchain);
         // PanelOverPicture (N01950): reads its key once and registers its
         // reshade_overlay event only when PanelOverPicture=1 (live_panel.cpp).
         mgpu::live_panel::attach(hModule);
-        // The simple panel's layout file lives beside the add-on. init() only remembers the
-        // directory (R330, F2: no file read here); panel_simple.txt is read on the first panel draw.
-        mgpu::psimple::init(hModule);
         reshade::register_event<reshade::addon_event::destroy_swapchain>(on_destroy_swapchain);   // D1
         reshade::register_event<reshade::addon_event::set_fullscreen_state>(on_set_fullscreen_state);   // R241d observe / R242 refuse
         reshade::register_event<reshade::addon_event::create_swapchain>(on_create_swapchain);           // R242
@@ -4233,7 +4284,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID lpReserved)
         mgpu::lq::stop(lpReserved != nullptr);
         mgpu::journal::session_close_direct(lpReserved != nullptr ? "DLL_PROCESS_DETACH, process exit"
                                                                   : "DLL_PROCESS_DETACH, FreeLibrary unload");
-        mgpu::strace::mark_clean_detach(lpReserved != nullptr);   // R313a: file only; one relaxed load when the trace is off
         reshade::unregister_addon(hModule);
         break;
     }

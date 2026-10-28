@@ -1,11 +1,19 @@
 // MGPU Bridge - SLT1: the Streamline tag tap. See sl_tags.hpp.
 //
 // Self-contained like probe.cpp, calibrator.cpp, screen.cpp and sl_probe.cpp:
-// no ReShade type, no gpu1_context type, no Streamline header and no link
-// library. Every Streamline structure is read by byte offset, and every one
-// of those offsets is quoted from the public header beside it.
+// no ReShade type, no gpu1_context type and no Streamline link
+// library. Resource tag offsets are quoted from the public header beside them.
+// FrameToken uses its documented SDK conversion, never a guessed vtable offset.
 #include "sl_tags.hpp"
+#include "game_work_trace.hpp"
+#include "frame_measurement.hpp"
 #include "diag.hpp"
+#include "tagged_motion_policy.hpp"
+#include "source_marker_slot.hpp"
+#include "streamline_frame_identity.hpp"
+#include "native_reflex.hpp"
+#include "../experimental/official_fg/official_bridge.hpp"
+#include "../ext/streamline/sl_core_api.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -76,6 +84,9 @@ namespace
     const unsigned char GUID_RESOURCE_TAG[16] = {
         0xAD,0x5A,0x6A,0x4C, 0x45,0xB4, 0x6C,0x49,
         0x87,0xFF,0x1A,0xF3,0x84,0x5B,0xE6,0x53 };
+    const unsigned char GUID_RESOURCE[16] = {
+        0xCF,0x70,0x9D,0x3A, 0x18,0x24, 0x72,0x4B,
+        0x83,0x91,0x13,0xF8,0x72,0x1C,0x72,0x61 };
 
     // sl_core_types.h constants. Only the ones this instrument names.
     const unsigned BT_DEPTH          = 0u;
@@ -125,7 +136,29 @@ namespace
 
     pf_set_tag_for_frame g_real_stff = nullptr;
     pf_set_tag           g_real_st   = nullptr;
+    using pf_set_constants = int (*)(const void *, const void *, const void *);
+    pf_set_constants g_real_constants = nullptr;
+    std::atomic<constants_capture_fn> g_constants_capture{nullptr};
     HMODULE g_self = nullptr;
+    struct cached_slot { void **slot = nullptr; void *original = nullptr; void *hook = nullptr; };
+    cached_slot g_cached_slots[9];
+    using pf_get_feature_function = decltype(&slGetFeatureFunction);
+    using pf_source_sleep = sl::Result (*)(const sl::FrameToken &);
+    using pf_source_marker = sl::Result (*)(unsigned, const sl::FrameToken &);
+    pf_get_feature_function g_real_get_feature_function = nullptr;
+    std::atomic<pf_source_sleep> g_real_source_sleep{nullptr};
+    std::atomic<pf_source_marker> g_real_source_marker{nullptr}, g_real_source_legacy_marker{nullptr};
+    std::atomic<unsigned> g_changed_logs{0};
+    using pf_evaluate_feature = decltype(&slEvaluateFeature);
+    using pf_get_frame_token = decltype(&slGetNewFrameToken);
+    pf_evaluate_feature g_real_evaluate_feature = nullptr;
+    pf_get_frame_token g_real_get_frame_token = nullptr;
+    std::atomic<unsigned long long> g_stff_calls{0}, g_st_calls{0};
+    std::atomic<unsigned long long> g_empty_arrays{0}, g_null_arrays{0}, g_tag_errors{0};
+    std::atomic<unsigned long long> g_constants_calls{0}, g_constants_valid{0}, g_constants_errors{0};
+    std::atomic<unsigned long long> g_evaluate_calls{0}, g_evaluate_errors{0};
+    std::atomic<unsigned long long> g_token_calls{0}, g_token_errors{0};
+    std::atomic<unsigned> g_last_feature{0};
 
     std::atomic<unsigned long long> g_calls{0};
     std::atomic<unsigned long long> g_tags_read{0};
@@ -136,6 +169,7 @@ namespace
     std::atomic<unsigned long long> g_h_mvec{0};
     std::atomic<unsigned long long> g_h_hudless{0};
     std::atomic<unsigned long long> g_h_scale_in{0};
+    std::atomic<resource_capture_fn> g_resource_capture{nullptr};
     std::atomic<mvec_capture_fn> g_mvec_capture{nullptr};       // R300d
     std::atomic<unsigned long long> g_mvec_capture_calls{0};    // R300d
 
@@ -191,21 +225,51 @@ namespace
         int      life;
         unsigned long long native;
         unsigned state, w, h, fmt;
+        unsigned top, left, extent_w, extent_h;
+        size_t tag_version, resource_version;
+        unsigned long long resource_next;
+        unsigned resource_type;
+        bool zero_resource_header;
+        unsigned char resource_guid[16];
+        const char *reason;
     };
 
     bool read_fields(const void *tag, tag_fields &out)
     {
-        out.type = 0xFFFFFFFFu; out.life = -1; out.native = 0;
-        out.state = 0; out.w = 0; out.h = 0; out.fmt = 0;
+        out = {};
+        out.type = 0xFFFFFFFFu;
+        out.life = -1;
+        out.resource_type = 0xFFFFFFFFu;
+        out.reason = "read_fault";
         __try
         {
             const unsigned char *t = (const unsigned char *)tag;
+            if (!is_tag(tag)) { out.reason = "tag_guid"; return false; }
+            out.tag_version = *(const size_t *)(t + 24u);
+            if (out.tag_version < 1u) { out.reason = "tag_version_zero"; return false; }
             out.type = *(const unsigned *)(t + TAG_TYPE);
             out.life = *(const int *)(t + TAG_LIFECYCLE);
+            out.top = *(const unsigned *)(t + 48u);
+            out.left = *(const unsigned *)(t + 52u);
+            out.extent_w = *(const unsigned *)(t + 56u);
+            out.extent_h = *(const unsigned *)(t + 60u);
             const void *res = *(const void *const *)(t + TAG_RESOURCE);
             if (res != nullptr)
             {
                 const unsigned char *r = (const unsigned char *)res;
+                out.resource_next = *(const unsigned long long *)r;
+                memcpy(out.resource_guid, r + OFF_TYPE, 16u);
+                out.resource_version = *(const size_t *)(r + 24u);
+                out.resource_type = r[32u];
+                const unsigned char zero_header[BASE_SIZE] = {};
+                out.zero_resource_header = out.tag_version == 1u && out.resource_type == 0u &&
+                    memcmp(r, zero_header, BASE_SIZE) == 0;
+                if (!out.zero_resource_header && memcmp(out.resource_guid, GUID_RESOURCE, 16u) != 0)
+                { out.reason = "resource_guid"; return false; }
+                if (!out.zero_resource_header && out.resource_version < 1u)
+                { out.reason = "resource_version_zero"; return false; }
+                if (out.resource_type != 0u && out.resource_type != 8u)
+                { out.reason = "resource_type"; return false; }
                 out.native = (unsigned long long)(uintptr_t)
                              *(const void *const *)(r + RES_NATIVE);
                 out.state = *(const unsigned *)(r + RES_STATE);
@@ -213,23 +277,56 @@ namespace
                 out.h   = *(const unsigned *)(r + RES_HEIGHT);
                 out.fmt = *(const unsigned *)(r + RES_FORMAT);
             }
+            out.reason = "ok";
             return true;
         }
         __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
     }
 
-    void read_one(const void *tag, void *cmd)
+    void read_one(const void *tag, void *cmd, motion_packet::identity engine = {})
     {
         tag_fields f{};
         if (!read_fields(tag, f))
         {
             g_skipped.fetch_add(1, std::memory_order_relaxed);
+            static std::atomic<unsigned> failures_logged{0};
+            if (failures_logged.fetch_add(1, std::memory_order_relaxed) < 4u)
+            {
+                char line[400];
+                snprintf(line, sizeof line,
+                         "[MGPU][R319-TAG-REJECT] reason=%s tag_version=%zu buffer_type=%u "
+                         "resource_version=%zu resource_type=%u resource_next=0x%llx resource_guid_bytes="
+                         "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                         f.reason, f.tag_version, f.type, f.resource_version, f.resource_type, f.resource_next,
+                         f.resource_guid[0], f.resource_guid[1], f.resource_guid[2], f.resource_guid[3],
+                         f.resource_guid[4], f.resource_guid[5], f.resource_guid[6], f.resource_guid[7],
+                         f.resource_guid[8], f.resource_guid[9], f.resource_guid[10], f.resource_guid[11],
+                         f.resource_guid[12], f.resource_guid[13], f.resource_guid[14], f.resource_guid[15]);
+                mgpu::diag::warn(line);
+            }
             return;
         }
         const unsigned type = f.type;
         const int life = f.life;
         const unsigned long long native = f.native;
         const unsigned w = f.w, h = f.h, fmt = f.fmt;
+        if (const auto callback = g_resource_capture.load(std::memory_order_acquire); callback != nullptr)
+            callback(cmd, type, {native, f.state, life, f.top, f.left, f.extent_w, f.extent_h}, engine);
+        if (type == BT_MVEC)
+        {
+            static std::atomic<unsigned> motion_headers_logged{0};
+            if (motion_headers_logged.fetch_add(1, std::memory_order_relaxed) < 4u)
+            {
+                char line[320];
+                snprintf(line, sizeof line,
+                         "[MGPU][R319-TAG-HEADER] tag_version=%zu resource_version=%zu resource_type=%u header=%s "
+                         "source=0x%llx cmd=%p state=0x%X lifecycle=%d extent=(%u,%u,%u,%u)",
+                         f.tag_version, f.resource_version, f.resource_type,
+                         f.zero_resource_header ? "zero-prefix" : "typed", native, cmd, f.state,
+                         life, f.top, f.left, f.extent_w, f.extent_h);
+                mgpu::diag::info(line);
+            }
+        }
 
         // R300d (SLTagsCapture only: the callback is installed by dllmain only with the key). The Streamline
         // call is the one point where identity, declared D3D12 state, lifetime and the command list coexist.
@@ -238,7 +335,7 @@ namespace
             const mvec_capture_fn cb = g_mvec_capture.load(std::memory_order_acquire);
             if (cb != nullptr)
             {
-                cb(cmd, native, f.state, life);
+                cb(cmd, native, f.state, life, f.top, f.left, f.extent_w, f.extent_h, engine);
                 g_mvec_capture_calls.fetch_add(1, std::memory_order_relaxed);
             }
         }
@@ -263,6 +360,8 @@ namespace
             g_last[slot] = native;
         }
         if (!say) return;
+        if (g_mode.load(std::memory_order_relaxed) == 3 &&
+            g_changed_logs.fetch_add(1, std::memory_order_relaxed) >= 24u) return;
 
         char line[900];
         snprintf(line, sizeof line,
@@ -280,7 +379,7 @@ namespace
         mgpu::diag::info(line);
     }
 
-    void read_array(const void *tags, unsigned n, void *cmd)
+    void read_array(const void *tags, unsigned n, void *cmd, motion_packet::identity engine = {})
     {
         if (tags == nullptr || n == 0u) return;
         g_calls.fetch_add(1, std::memory_order_relaxed);
@@ -302,7 +401,7 @@ namespace
             return;
         }
 
-        read_one(tags, cmd);
+        read_one(tags, cmd, engine);
         if (n == 1u) return;
 
         unsigned stride = (unsigned)g_stride.load(std::memory_order_relaxed);
@@ -332,7 +431,7 @@ namespace
         {
             const void *e = p + (size_t)i * stride;
             if (!is_tag(e)) { g_skipped.fetch_add(1, std::memory_order_relaxed); break; }
-            read_one(e, cmd);
+            read_one(e, cmd, engine);
         }
     }
 
@@ -343,15 +442,139 @@ namespace
     int hook_stff(const void *frame, const void *viewport,
                   const void *tags, unsigned n, void *cmd)
     {
-        read_array(tags, n, cmd);
-        return (g_real_stff != nullptr)
+        g_stff_calls.fetch_add(1, std::memory_order_relaxed);
+        if (n == 0u) g_empty_arrays.fetch_add(1, std::memory_order_relaxed);
+        if (tags == nullptr) g_null_arrays.fetch_add(1, std::memory_order_relaxed);
+        read_array(tags, n, cmd, read_identity(frame, viewport));
+        const int result = (g_real_stff != nullptr)
                    ? g_real_stff(frame, viewport, tags, n, cmd) : 0;
+        if (result != 0) g_tag_errors.fetch_add(1, std::memory_order_relaxed);
+        return result;
     }
 
     int hook_st(const void *viewport, const void *tags, unsigned n, void *cmd)
     {
-        read_array(tags, n, cmd);
-        return (g_real_st != nullptr) ? g_real_st(viewport, tags, n, cmd) : 0;
+        g_st_calls.fetch_add(1, std::memory_order_relaxed);
+        if (n == 0u) g_empty_arrays.fetch_add(1, std::memory_order_relaxed);
+        if (tags == nullptr) g_null_arrays.fetch_add(1, std::memory_order_relaxed);
+        read_array(tags, n, cmd, read_identity(nullptr, viewport));
+        const int result = (g_real_st != nullptr) ? g_real_st(viewport, tags, n, cmd) : 0;
+        if (result != 0) g_tag_errors.fetch_add(1, std::memory_order_relaxed);
+        return result;
+    }
+
+    int hook_constants(const void *values, const void *frame, const void *viewport)
+    {
+        g_constants_calls.fetch_add(1, std::memory_order_relaxed);
+        const auto constants = read_constants(values, read_identity(frame, viewport));
+        const int result = g_real_constants(values, frame, viewport);
+        if (result != 0) g_constants_errors.fetch_add(1, std::memory_order_relaxed);
+        if (result == 0 && constants.valid) g_constants_valid.fetch_add(1, std::memory_order_relaxed);
+        if (result == 0 && constants.valid && constants.camera.valid && mgpu::measurement::continuous() && mgpu::measurement::session())
+        {
+            char line[1500];
+            const auto &camera = constants.camera;
+            std::snprintf(line, sizeof line,
+                "[MGPU][M360] kind=camera session=%llu engine_frame=%u viewport=%u capture_ns=%llu observed_qpc=%llu "
+                "forward=%.9g,%.9g,%.9g position=%.9g,%.9g,%.9g reset=%u",
+                mgpu::measurement::session(), constants.key.frame, constants.key.viewport, camera.capture_ns,
+                mgpu::timing::cpu_ticks(), camera.forward[0], camera.forward[1], camera.forward[2],
+                camera.position[0], camera.position[1], camera.position[2], unsigned(constants.reset));
+            mgpu::measurement::emit(line);
+        }
+        if (result == 0)
+            if (const auto callback = g_constants_capture.load(std::memory_order_acquire); callback != nullptr)
+                callback(constants);
+        return result;
+    }
+
+    sl::Result hook_evaluate_feature(sl::Feature feature, const sl::FrameToken &frame,
+        const sl::BaseStructure **inputs, uint32_t count, sl::CommandBuffer *command)
+    {
+        g_evaluate_calls.fetch_add(1, std::memory_order_relaxed);
+        g_last_feature.store(feature, std::memory_order_relaxed);
+        if (feature == sl::kFeatureDLSS)
+            mgpu::game_work::marker(reinterpret_cast<ID3D12GraphicsCommandList *>(command),
+                mgpu::game_work::phase::sl_sr_begin);
+        const auto result = g_real_evaluate_feature(feature, frame, inputs, count, command);
+        if (feature == sl::kFeatureDLSS)
+            mgpu::game_work::marker(reinterpret_cast<ID3D12GraphicsCommandList *>(command),
+                mgpu::game_work::phase::sl_sr_end);
+        if (result != sl::Result::eOk) g_evaluate_errors.fetch_add(1, std::memory_order_relaxed);
+        return result;
+    }
+
+    sl::Result hook_source_sleep(const sl::FrameToken &frame)
+    {
+        const auto original = g_real_source_sleep.load(std::memory_order_acquire);
+        if (original == nullptr) return sl::Result::eErrorNotInitialized;
+        mgpu::native_reflex::on_source_sleep();
+        const bool observe = mgpu::official_bridge::selected();
+        const auto begin_ns = observe ? mgpu::official_bridge::source_clock_ns() : 0;
+        const auto result = original(frame);
+        const auto end_ns = observe ? mgpu::official_bridge::source_clock_ns() : 0;
+        const auto identity = read_identity(&frame, nullptr);
+        if (result == sl::Result::eOk && identity.frame_known)
+            mgpu::official_bridge::source_sleep(identity.frame, begin_ns, end_ns);
+        return result;
+    }
+
+    sl::Result hook_source_marker(unsigned marker, const sl::FrameToken &frame)
+    {
+        const auto original = g_real_source_marker.load(std::memory_order_acquire);
+        if (original == nullptr) return sl::Result::eErrorNotInitialized;
+        const bool observe = mgpu::official_bridge::selected() && mgpu::official_fg::source_marker_supported(marker);
+        const auto begin_ns = observe ? mgpu::official_bridge::source_clock_ns() : 0;
+        const auto result = original(marker, frame);
+        const auto end_ns = observe ? mgpu::official_bridge::source_clock_ns() : 0;
+        const auto identity = read_identity(&frame, nullptr);
+        if (result == sl::Result::eOk && identity.frame_known && mgpu::official_fg::source_marker_supported(marker))
+            mgpu::official_bridge::source_marker(identity.frame, marker, begin_ns, end_ns);
+        return result;
+    }
+
+    sl::Result hook_source_legacy_marker(unsigned marker, const sl::FrameToken &frame)
+    {
+        const auto original = g_real_source_legacy_marker.load(std::memory_order_acquire);
+        if (original == nullptr) return sl::Result::eErrorNotInitialized;
+        const bool observe = mgpu::official_bridge::selected() && mgpu::official_fg::source_marker_supported(marker);
+        const auto begin_ns = observe ? mgpu::official_bridge::source_clock_ns() : 0;
+        const auto result = original(marker, frame);
+        const auto end_ns = observe ? mgpu::official_bridge::source_clock_ns() : 0;
+        const auto identity = read_identity(&frame, nullptr);
+        if (result == sl::Result::eOk && identity.frame_known && mgpu::official_fg::source_marker_supported(marker))
+            mgpu::official_bridge::source_marker(identity.frame, marker, begin_ns, end_ns);
+        return result;
+    }
+
+    sl::Result hook_get_feature_function(sl::Feature feature, const char *name, void *&function)
+    {
+        const auto result = g_real_get_feature_function(feature, name, function);
+        if (result != sl::Result::eOk || name == nullptr || function == nullptr) return result;
+        if (feature == sl::kFeatureReflex && std::strcmp(name, "slReflexSleep") == 0)
+        {
+            g_real_source_sleep.store(reinterpret_cast<pf_source_sleep>(function), std::memory_order_release);
+            function = reinterpret_cast<void *>(&hook_source_sleep);
+        }
+        else if (feature == sl::kFeaturePCL && std::strcmp(name, "slPCLSetMarker") == 0)
+        {
+            g_real_source_marker.store(reinterpret_cast<pf_source_marker>(function), std::memory_order_release);
+            function = reinterpret_cast<void *>(&hook_source_marker);
+        }
+        else if (feature == sl::kFeatureReflex && std::strcmp(name, "slReflexSetMarker") == 0)
+        {
+            g_real_source_legacy_marker.store(reinterpret_cast<pf_source_marker>(function), std::memory_order_release);
+            function = reinterpret_cast<void *>(&hook_source_legacy_marker);
+        }
+        return result;
+    }
+
+    sl::Result hook_get_frame_token(sl::FrameToken *&token, const uint32_t *index)
+    {
+        g_token_calls.fetch_add(1, std::memory_order_relaxed);
+        const auto result = g_real_get_frame_token(token, index);
+        if (result != sl::Result::eOk) g_token_errors.fetch_add(1, std::memory_order_relaxed);
+        return result;
     }
 
     // ---- THE IMPORT SWAP ----
@@ -423,6 +646,90 @@ namespace
         return hits;
     }
 
+    bool find_main_slots(void *target, mgpu::tagged_motion::pointer_matches &matches)
+    {
+        __try
+        {
+            auto *base = reinterpret_cast<unsigned char *>(GetModuleHandleW(nullptr));
+            if (base == nullptr) return false;
+            const auto *dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(base);
+            if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+            const auto *nt = reinterpret_cast<const IMAGE_NT_HEADERS64 *>(base + dos->e_lfanew);
+            if (nt->Signature != IMAGE_NT_SIGNATURE ||
+                nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return false;
+            const auto *sections = IMAGE_FIRST_SECTION(nt);
+            size_t remaining = 32u * 1024u * 1024u;
+            for (unsigned index = 0; index < nt->FileHeader.NumberOfSections; ++index)
+            {
+                const auto &section = sections[index];
+                if ((section.Characteristics & IMAGE_SCN_MEM_WRITE) == 0 ||
+                    (section.Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0) continue;
+                if (section.VirtualAddress > nt->OptionalHeader.SizeOfImage ||
+                    section.Misc.VirtualSize > nt->OptionalHeader.SizeOfImage - section.VirtualAddress ||
+                    section.Misc.VirtualSize > remaining) return false;
+                remaining -= section.Misc.VirtualSize;
+                matches.scan(base + section.VirtualAddress, section.Misc.VirtualSize, target);
+            }
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    }
+
+    void **verified_pcl_marker_slot(void *target)
+    {
+        __try
+        {
+            auto *base = reinterpret_cast<unsigned char *>(GetModuleHandleW(nullptr));
+            if (base == nullptr || target == nullptr) return nullptr;
+            const auto *dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(base);
+            if (dos->e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
+            const auto *image = reinterpret_cast<const IMAGE_NT_HEADERS64 *>(base + dos->e_lfanew);
+            if (image->Signature != IMAGE_NT_SIGNATURE ||
+                image->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
+                image->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+                image->OptionalHeader.SizeOfImage != 0x10d43000) return nullptr;
+            using namespace mgpu::tagged_motion;
+            if (!pcl_marker_route_matches(image->FileHeader.TimeDateStamp, image->OptionalHeader.SizeOfImage,
+                                         base + pcl_resolver_rva, base + pcl_caller_rva)) return nullptr;
+            const auto *sections = IMAGE_FIRST_SECTION(image);
+            for (unsigned index = 0; index < image->FileHeader.NumberOfSections; ++index)
+            {
+                const auto &section = sections[index];
+                if ((section.Characteristics & IMAGE_SCN_MEM_WRITE) == 0 ||
+                    (section.Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0 ||
+                    pcl_cache_rva < section.VirtualAddress) continue;
+                const auto offset = pcl_cache_rva - section.VirtualAddress;
+                if (offset > section.Misc.VirtualSize ||
+                    sizeof(void *) > section.Misc.VirtualSize - offset) continue;
+                auto **slot = reinterpret_cast<void **>(base + pcl_cache_rva);
+                return *slot == target ? slot : nullptr;
+            }
+            return nullptr;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    }
+
+    unsigned install_cached_slot(unsigned index, void *target, void *hook, const char *name)
+    {
+        mgpu::tagged_motion::pointer_matches matches;
+        const bool scanned = target != nullptr && find_main_slots(target, matches);
+        void **verified = scanned && index == 7 ? verified_pcl_marker_slot(target) : nullptr;
+        void **slot = scanned ? mgpu::tagged_motion::select_cached_slot(matches.unique_slot(), verified, target) : nullptr;
+        bool installed = false;
+        if (slot != nullptr && InterlockedCompareExchangePointer(slot, hook, target) == target)
+        {
+            g_cached_slots[index] = {slot, target, hook};
+            installed = true;
+        }
+        char line[320];
+        snprintf(line, sizeof line,
+                 "[MGPU][R317-SL-CACHE] %s scan_ok=%u matches=%u installed=%u slot=%p verified_pcl_route=%u; "
+                 "main executable writable data only, exact atomic pointer swap, no code/protection changes",
+                 name, scanned ? 1u : 0u, matches.count, installed ? 1u : 0u, slot, verified ? 1u : 0u);
+        mgpu::diag::info(line);
+        return installed ? 1u : 0u;
+    }
+
     void install_now()
     {
         HMODULE sl = GetModuleHandleW(L"sl.interposer.dll");
@@ -439,6 +746,14 @@ namespace
 
         g_real_stff = (pf_set_tag_for_frame)GetProcAddress(sl, "slSetTagForFrame");
         g_real_st   = (pf_set_tag)GetProcAddress(sl, "slSetTag");
+        if (g_mode.load(std::memory_order_relaxed) == 3)
+        {
+            g_real_evaluate_feature = reinterpret_cast<pf_evaluate_feature>(GetProcAddress(sl, "slEvaluateFeature"));
+            g_real_get_frame_token = reinterpret_cast<pf_get_frame_token>(GetProcAddress(sl, "slGetNewFrameToken"));
+            g_real_get_feature_function = reinterpret_cast<pf_get_feature_function>(GetProcAddress(sl, "slGetFeatureFunction"));
+        }
+        if (g_constants_capture.load(std::memory_order_acquire) != nullptr)
+            g_real_constants = reinterpret_cast<pf_set_constants>(GetProcAddress(sl, "slSetConstants"));
 
         mgpu::diag::info(
             "[MGPU][SLT1] TAP step 1/2 BEGIN: swapping import slots for slSetTagForFrame. "
@@ -451,9 +766,56 @@ namespace
             "[MGPU][SLT1] TAP step 2/2 BEGIN: the same for the deprecated slSetTag. IF THIS "
             "IS THE LAST SLT1 LINE, IT DIED HERE.");
         const unsigned b = swap_everywhere((void *)g_real_st, (void *)&hook_st);
+        const unsigned constants_slots = g_real_constants != nullptr
+            ? swap_everywhere((void *)g_real_constants, (void *)&hook_constants) : 0;
+        const unsigned route_slots =
+            swap_everywhere((void *)g_real_evaluate_feature, (void *)&hook_evaluate_feature) +
+            swap_everywhere((void *)g_real_get_frame_token, (void *)&hook_get_frame_token);
 
-        g_slots.store(a + b, std::memory_order_relaxed);
-        g_installed.store((a + b) != 0u, std::memory_order_relaxed);
+        unsigned cached = 0;
+        if (g_mode.load(std::memory_order_relaxed) == 3)
+        {
+            cached += install_cached_slot(0, (void *)g_real_stff, (void *)&hook_stff, "slSetTagForFrame");
+            cached += install_cached_slot(1, (void *)g_real_st, (void *)&hook_st, "slSetTag");
+            if (g_real_constants != nullptr)
+                cached += install_cached_slot(2, (void *)g_real_constants, (void *)&hook_constants, "slSetConstants");
+            cached += install_cached_slot(3, (void *)g_real_evaluate_feature,
+                (void *)&hook_evaluate_feature, "slEvaluateFeature");
+            cached += install_cached_slot(4, (void *)g_real_get_frame_token,
+                (void *)&hook_get_frame_token, "slGetNewFrameToken");
+            HMODULE source_pin = nullptr;
+            if (g_real_get_feature_function != nullptr && GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                reinterpret_cast<LPCWSTR>(&hook_source_sleep), &source_pin))
+            {
+                void *sleep = nullptr, *marker = nullptr, *legacy_marker = nullptr;
+                if (g_real_get_feature_function(sl::kFeatureReflex, "slReflexSleep", sleep) == sl::Result::eOk && sleep)
+                {
+                    g_real_source_sleep.store(reinterpret_cast<pf_source_sleep>(sleep), std::memory_order_release);
+                    cached += install_cached_slot(6, sleep, (void *)&hook_source_sleep, "slReflexSleep");
+                    if (mgpu::official_bridge::selected()) mgpu::native_reflex::prepare();
+                }
+                if (g_real_get_feature_function(sl::kFeaturePCL, "slPCLSetMarker", marker) == sl::Result::eOk && marker)
+                {
+                    g_real_source_marker.store(reinterpret_cast<pf_source_marker>(marker), std::memory_order_release);
+                    cached += install_cached_slot(7, marker, (void *)&hook_source_marker, "slPCLSetMarker");
+                }
+                if (g_real_get_feature_function(sl::kFeatureReflex, "slReflexSetMarker", legacy_marker) == sl::Result::eOk && legacy_marker && legacy_marker != marker)
+                {
+                    g_real_source_legacy_marker.store(reinterpret_cast<pf_source_marker>(legacy_marker), std::memory_order_release);
+                    cached += install_cached_slot(8, legacy_marker, (void *)&hook_source_legacy_marker, "slReflexSetMarker");
+                }
+                cached += swap_everywhere((void *)g_real_get_feature_function, (void *)&hook_get_feature_function);
+                cached += install_cached_slot(5, (void *)g_real_get_feature_function,
+                    (void *)&hook_get_feature_function, "slGetFeatureFunction");
+                mgpu::diag::info("[MGPU][M349-SOURCE] source Reflex/PCL routes installed where uniquely identified; originals retained, game Present markers are not forwarded");
+            }
+        }
+        g_slots.store(a + b + cached + constants_slots + route_slots, std::memory_order_relaxed);
+        g_installed.store((a + b + cached + constants_slots + route_slots) != 0u, std::memory_order_relaxed);
+        mgpu::diag::info("[MGPU][R336-INPUT] raw API ingress audit active; nonempty tag arrays are not all calls. "
+            "No new resource capture, GPU commands, NGX retry or driver-plugin pointer scan added.");
+        if (g_mode.load(std::memory_order_relaxed) == 3) return;
 
         char line[1100];
         snprintf(line, sizeof line,
@@ -509,14 +871,31 @@ void report()
 {
     if (!g_installed.load(std::memory_order_relaxed)) return;
 
+    char ingress[1200];
+    snprintf(ingress, sizeof ingress,
+        "[MGPU][R336-INPUT] raw_stff=%llu raw_st=%llu empty_arrays=%llu null_arrays=%llu "
+        "tag_errors=%llu nonempty_arrays=%llu tags_read=%llu constants_calls=%llu "
+        "constants_usable=%llu constants_errors=%llu evaluate_calls=%llu evaluate_errors=%llu "
+        "last_feature=%u token_calls=%llu token_errors=%llu. Raw ingress is counted before decoding. "
+        "Zero ingress means no calls observed at installed slots, not proof that the game disabled DLSS. "
+        "Empty arrays name no resources; nonzero counters alone do not prove complete same-frame input or neural output.",
+        g_stff_calls.load(std::memory_order_relaxed), g_st_calls.load(std::memory_order_relaxed),
+        g_empty_arrays.load(std::memory_order_relaxed), g_null_arrays.load(std::memory_order_relaxed),
+        g_tag_errors.load(std::memory_order_relaxed), g_calls.load(std::memory_order_relaxed),
+        g_tags_read.load(std::memory_order_relaxed), g_constants_calls.load(std::memory_order_relaxed),
+        g_constants_valid.load(std::memory_order_relaxed), g_constants_errors.load(std::memory_order_relaxed),
+        g_evaluate_calls.load(std::memory_order_relaxed), g_evaluate_errors.load(std::memory_order_relaxed),
+        g_last_feature.load(std::memory_order_relaxed), g_token_calls.load(std::memory_order_relaxed),
+        g_token_errors.load(std::memory_order_relaxed));
+    mgpu::diag::info(ingress);
+
     char line[1000];
     snprintf(line, sizeof line,
         "[MGPU][SLT1] TAGS mode=%d slots=%llu | tagging calls seen=%llu | tags read=%llu | "
         "elements skipped=%llu | measured stride=%llu | MVEC=0x%llx HUDLessColor=0x%llx "
-        "ScalingInputColor=0x%llx. HOW TO READ IT. calls=0 with slots non-zero means the "
-        "slots we swapped are not the ones this title calls through - the same shape as the "
-        "calibrator's slots=44 resolved=0 on Plague Tale, and it means the caller cached the "
-        "pointer before we arrived. MVEC non-zero is the authoritative motion vector address "
+        "ScalingInputColor=0x%llx. This call counter covers NONEMPTY arrays only; consult R336-INPUT "
+        "for raw calls, empty declarations and return errors. Neither zero counter establishes "
+        "which unobserved caller is active. MVEC non-zero is the authoritative motion vector address "
         "and should be compared against the R71 TRANSPORT SOURCE: if they differ, the ranked "
         "pick was wrong and this is the correction. skipped counts elements that failed the "
         "structType check or faulted while being read - a non-zero number there is the guard "
@@ -542,6 +921,8 @@ void report()
 
 unsigned long long mvec_handle()          { return g_h_mvec.load(std::memory_order_relaxed); }
 void set_mvec_capture(mvec_capture_fn fn) { g_mvec_capture.store(fn, std::memory_order_release); }   // R300d
+void set_resource_capture(resource_capture_fn fn) { g_resource_capture.store(fn, std::memory_order_release); }
+void set_constants_capture(constants_capture_fn fn) { g_constants_capture.store(fn, std::memory_order_release); }
 unsigned long long hudless_handle()       { return g_h_hudless.load(std::memory_order_relaxed); }
 unsigned long long scaling_input_handle() { return g_h_scale_in.load(std::memory_order_relaxed); }
 
@@ -551,6 +932,20 @@ void uninstall()
     if (!g_installed.load(std::memory_order_relaxed)) return;
     swap_everywhere((void *)&hook_stff, (void *)g_real_stff);
     swap_everywhere((void *)&hook_st,   (void *)g_real_st);
+    if (g_real_constants != nullptr)
+        swap_everywhere((void *)&hook_constants, (void *)g_real_constants);
+    if (g_real_evaluate_feature != nullptr)
+        swap_everywhere((void *)&hook_evaluate_feature, (void *)g_real_evaluate_feature);
+    if (g_real_get_frame_token != nullptr)
+        swap_everywhere((void *)&hook_get_frame_token, (void *)g_real_get_frame_token);
+    if (g_real_get_feature_function != nullptr)
+        swap_everywhere((void *)&hook_get_feature_function, (void *)g_real_get_feature_function);
+    for (auto &entry : g_cached_slots)
+    {
+        if (entry.slot != nullptr)
+            InterlockedCompareExchangePointer(entry.slot, entry.original, entry.hook);
+        entry = {};
+    }
     g_installed.store(false, std::memory_order_relaxed);
     mgpu::diag::info("[MGPU][SLT1] TAP REMOVED. Import slots restored.");
 }
