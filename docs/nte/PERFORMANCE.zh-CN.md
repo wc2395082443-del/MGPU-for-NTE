@@ -1,5 +1,7 @@
 # 性能证据与口径
 
+当前preview.2采用4080S源FG Off、5080 NR后官方FG最多六倍的分工。前台源SDK Off、标签/NR/helper输出已有记录；新GPU图的helper可见状态为0、每源帧SDK1，因此58.17%的COPY/DIRECT查询交集尚不能证明前台六倍性能收益。最新测量条件见[源端FG关闭版](SOURCE-FG-OFF.zh-CN.md)，以下28→34及160+仍为各自历史条件的记录。
+
 测试主角色：4080 SUPER渲染游戏，RTX 5080运行NR。历史COPY记录使用4K颜色、2562×1441引导、单次NR、强度/结构/肤色/色调2、风格1、AutoMask及游戏DLSS Quality。各日期的场景和负载分别记录。
 
 ## 历史吞吐和COPY优化

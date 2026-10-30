@@ -84,6 +84,7 @@ add_library(mgpu_bridge SHARED
     src/stall_watch.cpp
     src/own_reflex.cpp
     src/native_reflex.cpp
+    src/source_fg_guard.cpp
     # D2.0 NR step one: read-only frame-gen vector map, OFF unless NRFrameFilter=1.
     src/fg_map.cpp
     # DX11 transport-hop probe (DX11_CONTRACT_LEDGER.md). OFF unless Dx11Probe=1.
@@ -493,6 +494,10 @@ if(MGPU_BUILD_TESTS)
     add_test(NAME mgpu_calibration_policy_test COMMAND mgpu_calibration_policy_test)
     add_executable(mgpu_native_reflex_request_test tests/native_reflex_request_test.cpp)
     add_test(NAME mgpu_native_reflex_request_test COMMAND mgpu_native_reflex_request_test)
+    add_executable(mgpu_source_fg_options_test tests/source_fg_options_test.cpp)
+    add_test(NAME mgpu_source_fg_options_test COMMAND mgpu_source_fg_options_test)
+    add_executable(mgpu_source_fg_guard_test tests/source_fg_guard_test.cpp)
+    add_test(NAME mgpu_source_fg_guard_test COMMAND mgpu_source_fg_guard_test)
     add_executable(mgpu_aligned_queue_abi_test tests/aligned_queue_abi_test.cpp)
     add_test(NAME mgpu_aligned_queue_abi_test COMMAND mgpu_aligned_queue_abi_test)
     add_executable(mgpu_aligned_submission_test tests/aligned_submission_test.cpp src/depth_normalizer.cpp src/frame_measurement.cpp tests/frame_measurement_log_stub.cpp tests/game_work_poll_stub.cpp)
@@ -516,9 +521,9 @@ if(MGPU_BUILD_TESTS)
     add_test(NAME mgpu_present_read_retirement_test COMMAND mgpu_present_read_retirement_test)
     add_executable(mgpu_tagged_motion_policy_test tests/tagged_motion_policy_test.cpp)
     add_test(NAME mgpu_tagged_motion_policy_test COMMAND mgpu_tagged_motion_policy_test)
-    add_executable(mgpu_streamline_tag_reader_test tests/streamline_tag_reader_test.cpp tests/game_work_poll_stub.cpp tests/official_source_stub.cpp src/native_reflex.cpp)
+    add_executable(mgpu_streamline_tag_reader_test tests/streamline_tag_reader_test.cpp tests/game_work_poll_stub.cpp tests/official_source_stub.cpp src/native_reflex.cpp src/source_fg_guard.cpp)
     add_test(NAME mgpu_streamline_tag_reader_test COMMAND mgpu_streamline_tag_reader_test)
-    add_executable(mgpu_streamline_route_audit_test tests/streamline_route_audit_test.cpp tests/game_work_poll_stub.cpp tests/official_source_stub.cpp src/native_reflex.cpp)
+    add_executable(mgpu_streamline_route_audit_test tests/streamline_route_audit_test.cpp tests/game_work_poll_stub.cpp tests/official_source_stub.cpp src/native_reflex.cpp tests/source_fg_guard_stub.cpp)
     add_test(NAME mgpu_streamline_route_audit_test COMMAND mgpu_streamline_route_audit_test)
     enable_testing()
     add_executable(mgpu_motion_source_audit_test tests/motion_source_audit_test.cpp)

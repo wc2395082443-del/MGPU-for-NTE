@@ -6,6 +6,10 @@ An experimental Neverness to Everness adaptation of [Neural Coprocessor](https:/
 
 The RTX 4080 SUPER renders the game and runs its game-side DLSS super resolution. The RTX 5080 receives matched color/depth/motion/camera inputs, runs neural rendering, and uses an independent Streamline/Reflex/PCL process for frame generation and presentation. This release targets the tested NTE build and **GeForce RTX 5080 helper**.
 
+The current [source-FG-off preview](https://github.com/wc2395082443-del/MGPU-for-NTE/releases/tag/nte-source-fg-off-preview.2) uses main `20CF7B73` and helper `118BBCBA`. **The RTX 4080 SUPER's game-process frame generation is switched off; the RTX 5080 runs NVIDIA official frame generation after NR, with up to a sixfold request.** The separate [RTX 50-series compatibility candidate](docs/nte/RTX50-COMPAT.zh-CN.md) is not included; this helper accepts RTX 5080.
+
+The source SDK was observed Off in the foreground while NR and helper output continued. A new GPU window showed COPY/DIRECT query overlap, but its helper visibility was zero and SDK count was one per source frame. Foreground sixfold GPU/performance acceptance is still pending. See [implementation and validation](docs/nte/SOURCE-FG-OFF.zh-CN.md); historical FPS figures below retain their original scope.
+
 **Sixfold frame generation uses NVIDIA's official DLSS Frame Generation runtime through Streamline/DLSS-G, rather than Lossless Scaling. The user's latest feedback describes the visual result as excellent.** This project connects the NR image and guides to that runtime and manages the output window.
 
 ## Performance: single GPU, dual-GPU optimization, then sixfold generation
@@ -59,7 +63,7 @@ Historical unique neural completions increased from **26.699/s to 33.451/s (~25.
 
 Sixfold requests up to five generated frames per real frame. Visible pacing and latency remain areas for improvement. Post-generation buffering of six completed images is planned. M365 was withdrawn; M366/M367 experiments remain separate.
 
-Publication checks passed locally (75 main + 20 helper cases). Two GitHub-hosted runs each passed 74/75 main cases: the fine-capacity recording stress fixture timed out during asynchronous drain, stopping the job before helper tests. The cause remains under investigation. See [CI](https://github.com/wc2395082443-del/MGPU-for-NTE/actions/runs/40768218148).
+This revision passed 77 main + 20 helper cases locally. The original release's two GitHub-hosted runs each passed 74/75 main cases: the fine-capacity recording stress fixture timed out during asynchronous drain, stopping the job before helper tests. The cause remains under investigation. See [historical CI](https://github.com/wc2395082443-del/MGPU-for-NTE/actions/runs/40768218148); new CI results are recorded separately.
 
 ![Before and after, five measured cycles on one scale](docs/nte/figures/five-frame-comparison.svg)
 

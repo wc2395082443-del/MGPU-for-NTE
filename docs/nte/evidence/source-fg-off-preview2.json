@@ -1,0 +1,52 @@
+{
+  "revision": "nte-source-fg-off-preview.2",
+  "date": "2026-10-31",
+  "binaries": {
+    "main_sha256": "20CF7B73A4014DB20A7139A0ECBA84D58606E42B8DE16F103F27DAA617DDEDD4",
+    "helper_sha256": "118BBCBAA15A76B9F1208489BF2EDE9B7EA3685D574FF557DCD4FC6EC6A33162"
+  },
+  "gpu_roles": {
+    "RTX_4080_SUPER": "Game rendering and DLSS SR/RR; guarded game-process DLSS-G mode Off",
+    "RTX_5080": "NR followed by official NVIDIA Streamline DLSS-G; up to sixfold dynamic MFG, target 200"
+  },
+  "local_tests": {"main_passed": 77, "main_total": 77, "helper_passed": 20, "helper_total": 20},
+  "foreground_source_sdk_check": {
+    "game_foreground": true,
+    "viewport": 1,
+    "struct_version": 4,
+    "requested_mode": "Off",
+    "options_hook_installed": true,
+    "on_request_rewritten_to_off_sdk_result": "eOk",
+    "nr_and_resource_tags_continue": true
+  },
+  "pre_capture_existing_telemetry": {
+    "seconds": 15.500262,
+    "foreground_samples": 16,
+    "total_samples": 16,
+    "source_per_second": 29.61240268067727,
+    "sdk_count_per_second": 175.9970250825438,
+    "heavy_capture_active": false,
+    "matched_old_scene_ab": false
+  },
+  "gpu_window": {
+    "seconds": 8,
+    "frames": 245,
+    "helper_visible": 0,
+    "sdk_reported_per_source": 1,
+    "source_per_second": 30.625,
+    "copy_bracket_ms": 7.758844897959183,
+    "copy_main_direct_query_intersection_ms": 4.513276734693878,
+    "copy_main_direct_query_intersection_percent": 58.169441380133904,
+    "nr_ms": 14.653679019942576,
+    "main_records_lost": 1,
+    "fine_jobs_truncated": 7,
+    "etl_events_lost": 0,
+    "input_observer_aligned": false,
+    "controller_error": "Input observer BEGIN arrived after sealed internal GPU/helper streams ended; original late input excluded",
+    "foreground_sixfold_gpu_acceptance": false,
+    "complete_pipeline_verified": false
+  },
+  "proxy_swapchain_rebuild_implemented": false,
+  "fixed_fps_gain_claimed": false,
+  "source_menu_fg_state": "User confirmed Off; internal source SDK On was independently observed before the fix"
+}

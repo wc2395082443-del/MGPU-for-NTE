@@ -161,7 +161,7 @@ void official_runtime::configure(unsigned multiplier)
     sl::DLSSGOptions options{};
     options.mode = requested_mode == fg_mode::dynamic ? sl::DLSSGMode::eDynamic : sl::DLSSGMode::eOn;
     options.numFramesToGenerate = multiplier - 1;
-    options.dynamicTargetFrameRate = 0.0f;
+    options.dynamicTargetFrameRate = 200.0f;
     options.numBackBuffers = 3;
     require_sl(options_(viewport_, options), "official FG options");
     if (configured_multiplier_ != multiplier || configured_mode_ != requested_mode) {
@@ -170,6 +170,7 @@ void official_runtime::configure(unsigned multiplier)
             options.numFramesToGenerate, dynamic_mfg_supported_ ? 1u : 0u);
         configured_multiplier_ = multiplier;
         configured_mode_ = requested_mode;
+        std::printf("[CONTROL-ROLLBACK] official dynamic target=200 FPS; SDK pacing retained\n");
     }
 }
 

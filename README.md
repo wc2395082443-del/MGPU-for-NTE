@@ -6,7 +6,9 @@
 
 4080 SUPER 负责游戏渲染及游戏自己的 DLSS 超分；RTX 5080 接收同帧颜色、深度、运动矢量和相机数据，执行 DLSS Neural Rendering（本文简称 NR），再由独立 helper 接入官方 Streamline 帧生成和呈现。
 
-首发为 **M364 主模块＋M363 helper**，已测试4080S＋5080及本文记录的异环构建。helper 当前仅支持 **GeForce RTX 5080**。源码保留上游 MIT 许可和署名。
+当前预览版为 **2026-10-31 源端FG关闭版**，采用已安装的主模块`20CF7B73`＋helper`118BBCBA`。**4080S关闭游戏进程里的源端帧生成，5080在NR之后运行NVIDIA官方帧生成，最多请求六倍。** helper当前支持GeForce RTX 5080，源码保留上游MIT许可和署名。
+
+[新版改动与验证记录](docs/nte/SOURCE-FG-OFF.zh-CN.md)：游戏菜单FG关闭时，曾测到4080S仍执行源DLSS-G任务并阻塞主DIRECT。本版在游戏原线程将源SDK模式转为Off，保留资源标签、NR引导和5080六倍。前台源SDK已读到Off，NR与helper输出持续；前台六倍的完整GPU流水线与性能增益仍待验证。其他50系副卡保留为[独立兼容候选](docs/nte/RTX50-COMPAT.zh-CN.md)，未合入本发布。
 
 **六倍帧生成使用 NVIDIA 官方 DLSS 多帧生成，通过官方 Streamline／DLSS-G 在5080上运行，并非 Lossless Scaling（小黄鸭）插帧。用户最新体验反馈：画面效果非常好。** 本项目负责NR画面与引导交接、官方SDK接线和输出窗口。
 
@@ -50,6 +52,7 @@
 | 画面稳定 | 同帧引导和身份校验、自有输入/输出快照、按 fence 退休；修复跳帧后环槽身份错位，保留 ForceTagging 资源入口 | M340/M341 实测后，用户确认走动、转镜头时画面稳定 |
 | 双卡吞吐 | 专用 COPY 队列、颜色先行接收、深度/运动矢量分阶段交接、保留输入完整性和反向资源保护 | 历史 NR 完成节奏 26.70→33.45/s；跨卡整段传输 7.073→6.013→5.502ms，详情见下方 |
 | 帧生成 | 5080 独立进程运行官方 Streamline DLSS-G/Reflex/PCL，最多请求六倍；M362 输入队列解耦、M363 分层鼠标穿透 | 官方六倍配置和隐藏呈现测试通过；显示均匀性与真实输入延迟仍存在限制 |
+| 源端FG停用 | 拦截游戏源`slDLSSGSetOptions`，在构建和实时ForceTagging保护下仅将mode转为Off；5080 helper入口不变 | 前台源SDK Off与NR输出已核对；旧约7ms区间未在新后台窗口记录到，前台六倍GPU对照仍待完成 |
 
 ## helper负责什么，六倍是否影响基础帧
 
@@ -100,7 +103,7 @@ M352也记录到33.1真实帧/s、SDK195.2/s，但显示节奏变差，用户反
 
 ## 下载与安装
 
-从本 fork 的 Releases 下载 `MGPU-for-NTE-M364-M363-preview.zip`，按 [安装步骤](docs/nte/INSTALL.zh-CN.md)执行。包包含我们的主模块、helper、配置模板、深度 shader、校验清单和可回退安装脚本。
+从 [最新预览发布](https://github.com/wc2395082443-del/MGPU-for-NTE/releases/tag/nte-source-fg-off-preview.2)下载`MGPU-for-NTE-source-fg-off-preview.2.zip`，按[安装步骤](docs/nte/INSTALL.zh-CN.md)执行。包包含本次主模块和helper、配置模板、深度shader、校验清单和可回退安装脚本。旧M364＋M363首发保留在原Release。
 
 NVIDIA NR 模型、NGX/Streamline 运行库、ReShade、游戏文件不打进安装包。通过 `Import-Runtime.ps1` 从用户自己的安装导入匹配运行库，避免错版本混装；文件缺失时明确报错，不假装装完即可工作。
 
@@ -108,21 +111,21 @@ NVIDIA NR 模型、NGX/Streamline 运行库、ReShade、游戏文件不打进安
 
 - 已知异环 EXE SHA256：`032EB661CE65E0669FB643A2E87E727D5574BBA832CD6FE34FF0AB1D134CD788`。部分原生接口有版本校验，游戏更新需重新适配。
 - 本分支通过 ReShade 加载，并创建 5080 输出覆盖层。兼容性和反作弊策略由游戏决定；本项目不绕过或禁用反作弊。
-- 游戏菜单插帧关闭是测试基线；源SDK曾出现与菜单不一致的内部请求。M366/M367源端停用实验单独保留。
+- 游戏菜单插帧关闭是测试基线；本版处理与菜单不一致的源SDK请求，保留5080 helper官方六倍。源SDK关闭后，已有代理swapchain仍可能保留离屏复制/同步，尚未重建游戏swapchain。
 - 游戏主DIRECT与COPY之间仍有队列依赖，是后续调度优化的方向。
 - 官方 SDK 管理生成帧呈现；**FG 后缓存六帧再均匀输出尚未实现**。已撤回的 M365 入口前等待不包含在发布版。
 - M366 有更流畅的用户反馈，随后又收到程序异常报告并回退；根因未证实。M367 仅软件候选，首发均不包含。
-- 发布源码在本地通过75项主工程＋20项helper测试；[GitHub托管环境两次验证](https://github.com/wc2395082443-del/MGPU-for-NTE/actions/runs/40768218148)均为主工程74/75，一项采集压力测试异步排空超时。问题尚未归因，不标成全绿，也不修改选定的发布二进制来掩盖它。
+- 本次源码在本地通过77项主工程＋20项helper测试。旧首发的[GitHub托管环境两次验证](https://github.com/wc2395082443-del/MGPU-for-NTE/actions/runs/40768218148)均为主工程74/75，一项采集压力测试异步排空超时；新版云端结果单独记录。
 
 ## 开发与来源
 
 发布二进制 SHA256：
 
 ```text
-M364 nvngx.dll_mgpu_bridge.addon64
-3A6C8FF99FD5D1361A07A9D5D91CE8164326BEDF5521B5151CE886F53BC73D59
-M363 mgpu-official/mgpu_official_host.exe
-21B70B40195D264E2679D652B0F14A1C0E005F2E95EAF9334F339BE4309B1264
+source-fg-off-20261031 nvngx.dll_mgpu_bridge.addon64
+20CF7B73A4014DB20A7139A0ECBA84D58606E42B8DE16F103F27DAA617DDEDD4
+official-target200 mgpu-official/mgpu_official_host.exe
+118BBCBAA15A76B9F1208489BF2EDE9B7EA3685D574FF557DCD4FC6EC6A33162
 ```
 
 [构建与验证](docs/nte/BUILD.md) · [发布来源](docs/nte/PROVENANCE.md) · [第三方依赖](docs/nte/DEPENDENCIES.md) · [上游原 README](docs/nte/UPSTREAM_README.md)

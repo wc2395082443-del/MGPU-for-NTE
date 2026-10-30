@@ -1,4 +1,8 @@
-# MGPU for NTE — M364 + M363 preview
+# Current release: Source FG Off Preview 2
+
+2026-10-31：**4080S关闭源端FG，5080在NR后执行NVIDIA官方FG，最多请求六倍。** 当前主模块20CF7B73＋helper118BBCBA。完整当前说明见[SOURCE-FG-OFF-NOTES.md](SOURCE-FG-OFF-NOTES.md)；以下为旧首发历史，旧tag和文件保持原样。
+
+# Historical: MGPU for NTE — M364 + M363 preview
 
 First NTE adaptation release: same-frame stability fixes, staged multi-GPU COPY transport, RTX 5080 official Streamline frame generation, and isolated mouse-passthrough output helper.
 

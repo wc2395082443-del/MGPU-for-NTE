@@ -23,3 +23,5 @@ NVIDIA runtime/model binaries are excluded from both Git and this release, follo
 ## Hardware/build restrictions
 
 M363 currently requires `NVIDIA GeForce RTX 5080` as its neural/output adapter. The tested primary GPU is RTX 4080 SUPER. Other GPU combinations need adaptation and testing. Some hooks validate the game build, so game updates may also require changes.
+
+The [RTX 50-series compatibility candidate](RTX50-COMPAT.zh-CN.md) is archived separately and is not included in preview.2 source or binaries. Preview.2 uses main20CF7B73/helper118BBCBA with the same pinned NVIDIA runtime requirements, RTX 5080 helper check and game-build restrictions.

@@ -1,5 +1,7 @@
 # 架构与三类改进
 
+preview.2：**4080S源端FG关闭，5080在NR后运行官方FG**。主模块只在原游戏线程的源选项入口改modeOff，保留标签、Reflex、同帧引导和所有资源fence；helper动态MFG最多六倍、目标200 FPS。详见[实现与验收](SOURCE-FG-OFF.zh-CN.md)。
+
 ```mermaid
 flowchart LR
   A[4080S 游戏渲染与游戏DLSS超分] --> B[同帧颜色/深度/MV/相机快照]

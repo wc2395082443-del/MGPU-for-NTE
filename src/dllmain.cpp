@@ -68,7 +68,7 @@
 // misidentifying a build. Caught by a control run rather than by a reader,
 // which is the only reason it is not in somebody's issue thread.
 // R141: the log must say which build wrote it. 0.2.5 + R210 + R208 (FP16, off).
-#define MGPU_VERSION_STR "0.3.1-t1-M364-rollback-M358"
+#define MGPU_VERSION_STR "0.3.1-t1-source-fg-off-20261031"
 
 
 // ---- P6.4: the overlay panel ----

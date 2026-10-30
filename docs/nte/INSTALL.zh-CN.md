@@ -1,4 +1,6 @@
-# 安装 M364＋M363 首发预览
+# 安装源端FG关闭版 preview.2
+
+下载`MGPU-for-NTE-source-fg-off-preview.2.zip`。本版使用主模块20CF7B73＋helper118BBCBA：**4080S关闭源端FG，5080在NR后运行官方FG，最多请求六倍**。其他50系副卡见独立[兼容候选说明](RTX50-COMPAT.zh-CN.md)，本版helper仍限定RTX 5080。旧首发包保留。
 
 ## 准备
 
@@ -43,9 +45,15 @@ r.OneFrameThreadLag=1
 
 ForceTagging保留原生资源标签入口，Reflex用于当前集成，`OneFrameThreadLag`采用测试配置值。安装脚本保留游戏设置和此文件的现有属性；请手动合并这些键，并在启动日志中核对生效情况。保留文件内其他游戏数据。
 
+本版不再使用插件主动设置原生Reflex CVar，游戏仍可依据自己的设置启用Reflex。源端FG包装不改变Reflex选项。helper六倍在`mgpu.ini`中对应`SecondaryFG=1`、`FGMultiplier=6`；输出选`Present=nr`，也可进入场景后用Ctrl＋Alt＋F7切换。已有配置由安装器保留，需要自行核对。
+
+游戏原生FG保持关闭；无需开启4080S原生插帧来给5080提供引导。源端保护校验要求ForceTagging生效，且只对本次支持的游戏构建启用。具体见[源端FG关闭说明](SOURCE-FG-OFF.zh-CN.md)。
+
 ## 启动核对
 
-从原启动器进入场景。日志应出现M364版本、正确的游戏/神经adapter、颜色/深度/MV标签、NR输出和helper初始化。`color_overlap=1`/`guide_overlap=1`表示分阶段COPY路径已启用，0表示回退路径；部分日志使用M341前缀。
+从原启动器进入场景。日志应出现`source-fg-off-20261031`版本、正确的游戏/神经adapter、颜色/深度/MV标签、NR输出和helper初始化。源`slDLSSGSetOptions`应`installed=1`，`SOURCE-FG-OFF`中On请求对应`action=2 result=0`。只有实际调用与源SDK Off持续成立，才能确认该入口已生效；原生CVar仍On不代表SDK仍On。`color_overlap=1`/`guide_overlap=1`表示分阶段COPY路径启用。
+
+helper仍请求官方六倍动态MFG，目标200 FPS；这是SDK输出目标，实际比例随负载/可见状态变化。确认helper输出可见及SDK正常，后台每源帧报告1张不能当成六倍成功或失败的前台证据。
 
 - Ctrl＋Alt＋F7切换input/output，对比NR；Home为ReShade面板。
 - helper使用独立输出覆盖层，输入仍属于原游戏。按钮/滚轮/转视角和Alt＋Tab都应核对。

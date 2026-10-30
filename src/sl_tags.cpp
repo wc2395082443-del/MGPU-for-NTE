@@ -11,7 +11,8 @@
 #include "tagged_motion_policy.hpp"
 #include "source_marker_slot.hpp"
 #include "streamline_frame_identity.hpp"
-#include "native_reflex.hpp"
+#include "source_fg_guard.hpp"
+#include "source_fg_options.hpp"
 #include "../experimental/official_fg/official_bridge.hpp"
 #include "../ext/streamline/sl_core_api.h"
 
@@ -141,13 +142,16 @@ namespace
     std::atomic<constants_capture_fn> g_constants_capture{nullptr};
     HMODULE g_self = nullptr;
     struct cached_slot { void **slot = nullptr; void *original = nullptr; void *hook = nullptr; };
-    cached_slot g_cached_slots[9];
+    cached_slot g_cached_slots[10];
     using pf_get_feature_function = decltype(&slGetFeatureFunction);
     using pf_source_sleep = sl::Result (*)(const sl::FrameToken &);
     using pf_source_marker = sl::Result (*)(unsigned, const sl::FrameToken &);
     pf_get_feature_function g_real_get_feature_function = nullptr;
     std::atomic<pf_source_sleep> g_real_source_sleep{nullptr};
     std::atomic<pf_source_marker> g_real_source_marker{nullptr}, g_real_source_legacy_marker{nullptr};
+    using pf_source_fg_options = PFun_slDLSSGSetOptions *;
+    std::atomic<pf_source_fg_options> g_real_source_fg_options{nullptr};
+    std::atomic<unsigned long long> g_source_fg_calls{0}, g_source_fg_rewritten{0}, g_source_fg_failures{0};
     std::atomic<unsigned> g_changed_logs{0};
     using pf_evaluate_feature = decltype(&slEvaluateFeature);
     using pf_get_frame_token = decltype(&slGetNewFrameToken);
@@ -508,7 +512,6 @@ namespace
     {
         const auto original = g_real_source_sleep.load(std::memory_order_acquire);
         if (original == nullptr) return sl::Result::eErrorNotInitialized;
-        mgpu::native_reflex::on_source_sleep();
         const bool observe = mgpu::official_bridge::selected();
         const auto begin_ns = observe ? mgpu::official_bridge::source_clock_ns() : 0;
         const auto result = original(frame);
@@ -547,11 +550,42 @@ namespace
         return result;
     }
 
+    sl::Result hook_source_fg_options(const sl::ViewportHandle &viewport, const sl::DLSSGOptions &options)
+    {
+        const auto original = g_real_source_fg_options.load(std::memory_order_acquire);
+        if (!original) return sl::Result::eErrorNotInitialized;
+        mgpu::source_fg_options::action action{};
+        const auto result = mgpu::source_fg_options::forward(original, viewport, options,
+            mgpu::source_fg_guard::ready(), action);
+        const auto calls = g_source_fg_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (action == mgpu::source_fg_options::action::rewritten)
+            g_source_fg_rewritten.fetch_add(1, std::memory_order_relaxed);
+        if (result != sl::Result::eOk) g_source_fg_failures.fetch_add(1, std::memory_order_relaxed);
+        if (calls <= 3 || calls % 1200 == 0) {
+            char line[512];
+            snprintf(line, sizeof line,
+                "[MGPU][SOURCE-FG-OFF] calls=%llu viewport=%u version=%llu requested_mode=%u action=%u result=%d rewritten=%llu failures=%llu thread=%lu; engine-owned call, only source mode changes",
+                calls, static_cast<uint32_t>(viewport), static_cast<unsigned long long>(options.structVersion),
+                static_cast<unsigned>(options.mode), static_cast<unsigned>(action), static_cast<int>(result),
+                g_source_fg_rewritten.load(std::memory_order_relaxed),
+                g_source_fg_failures.load(std::memory_order_relaxed), GetCurrentThreadId());
+            mgpu::diag::info(line);
+        }
+        return result;
+    }
+
     sl::Result hook_get_feature_function(sl::Feature feature, const char *name, void *&function)
     {
         const auto result = g_real_get_feature_function(feature, name, function);
         if (result != sl::Result::eOk || name == nullptr || function == nullptr) return result;
-        if (feature == sl::kFeatureReflex && std::strcmp(name, "slReflexSleep") == 0)
+        if (feature == sl::kFeatureDLSS_G && std::strcmp(name, "slDLSSGSetOptions") == 0)
+        {
+            if (function != reinterpret_cast<void *>(&hook_source_fg_options)) {
+                g_real_source_fg_options.store(reinterpret_cast<pf_source_fg_options>(function), std::memory_order_release);
+                function = reinterpret_cast<void *>(&hook_source_fg_options);
+            }
+        }
+        else if (feature == sl::kFeatureReflex && std::strcmp(name, "slReflexSleep") == 0)
         {
             g_real_source_sleep.store(reinterpret_cast<pf_source_sleep>(function), std::memory_order_release);
             function = reinterpret_cast<void *>(&hook_source_sleep);
@@ -788,12 +822,19 @@ namespace
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
                 reinterpret_cast<LPCWSTR>(&hook_source_sleep), &source_pin))
             {
+                mgpu::source_fg_guard::prepare();
                 void *sleep = nullptr, *marker = nullptr, *legacy_marker = nullptr;
                 if (g_real_get_feature_function(sl::kFeatureReflex, "slReflexSleep", sleep) == sl::Result::eOk && sleep)
                 {
                     g_real_source_sleep.store(reinterpret_cast<pf_source_sleep>(sleep), std::memory_order_release);
                     cached += install_cached_slot(6, sleep, (void *)&hook_source_sleep, "slReflexSleep");
-                    if (mgpu::official_bridge::selected()) mgpu::native_reflex::prepare();
+                }
+                void *source_fg_options = nullptr;
+                if (g_real_get_feature_function(sl::kFeatureDLSS_G, "slDLSSGSetOptions", source_fg_options) == sl::Result::eOk && source_fg_options &&
+                    source_fg_options != reinterpret_cast<void *>(&hook_source_fg_options))
+                {
+                    g_real_source_fg_options.store(reinterpret_cast<pf_source_fg_options>(source_fg_options), std::memory_order_release);
+                    cached += install_cached_slot(9, source_fg_options, reinterpret_cast<void *>(&hook_source_fg_options), "slDLSSGSetOptions");
                 }
                 if (g_real_get_feature_function(sl::kFeaturePCL, "slPCLSetMarker", marker) == sl::Result::eOk && marker)
                 {

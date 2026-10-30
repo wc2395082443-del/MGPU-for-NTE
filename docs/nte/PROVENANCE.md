@@ -1,5 +1,20 @@
 # Release provenance
 
+## Current preview.2 — 2026-10-31
+
+The current source follows the installed source-FG-off main module (`20CF7B73`) and target-200 helper (`118BBCBA`). The main starts from the M364 control-rollback baseline, retains M361 measurement hooks and M363 input isolation/passthrough, and adds guarded source `slDLSSGSetOptions` mode-Off forwarding. It reuses the previously uninstalled M367 option policy, with a new read-only build/tagging guard, and excludes M366's one-shot native CVar setter and M359's plugin CVar takeover. The helper retains the RTX 5080 check and sets official dynamic MFG target 200.
+
+| Current artifact | SHA256 |
+| --- | --- |
+| `nvngx.dll_mgpu_bridge.addon64` | `20CF7B73A4014DB20A7139A0ECBA84D58606E42B8DE16F103F27DAA617DDEDD4` |
+| `mgpu_official_host.exe` | `118BBCBAA15A76B9F1208489BF2EDE9B7EA3685D574FF557DCD4FC6EC6A33162` |
+
+Production sources match the archived, locally built candidate; repository-only negative-control include paths use `baseline/`. New source and guard tests passed within 77 main + 20 helper local cases. Source SDK Off was read in foreground; NR/helper output continued. The new GPU overlap window was not a foreground sixfold acceptance run. See [revision validation](SOURCE-FG-OFF.zh-CN.md).
+
+The separate RTX 50-series recognition candidate is not merged. Original preview.1 tag and binaries remain unchanged. The sections below describe that historical first release, rather than the current default-branch implementation.
+
+## Original preview.1 lineage
+
 Upstream: https://github.com/maohgad-web/Neural-coprocessor
 
 Fork base: `671e1a935d9db7ecad3627f36199504fc0437527` (main, CN Panel). The NTE work used archived upstream-derived source snapshots, imported into this fork with their source and binary identities.
