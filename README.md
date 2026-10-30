@@ -115,7 +115,7 @@ NVIDIA NR 模型、NGX/Streamline 运行库、ReShade、游戏文件不打进安
 - 游戏主DIRECT与COPY之间仍有队列依赖，是后续调度优化的方向。
 - 官方 SDK 管理生成帧呈现；**FG 后缓存六帧再均匀输出尚未实现**。已撤回的 M365 入口前等待不包含在发布版。
 - M366 有更流畅的用户反馈，随后又收到程序异常报告并回退；根因未证实。M367 仅软件候选，首发均不包含。
-- 本次源码在本地通过77项主工程＋20项helper测试。旧首发的[GitHub托管环境两次验证](https://github.com/wc2395082443-del/MGPU-for-NTE/actions/runs/40768218148)均为主工程74/75，一项采集压力测试异步排空超时；新版云端结果单独记录。
+- 本次源码本地77项主工程＋20项helper通过；[新版云端构建](https://github.com/wc2395082443-del/MGPU-for-NTE/actions/runs/41129943140)编译成功、主工程76/77通过，既有采集压力测试`mgpu_nonblocking_fine_capacity_warp_test`异步GPU排空超时，helper云端测试未执行。新增源FG选项、保护和接线测试通过；预览版保留此已知限制。
 
 ## 开发与来源
 

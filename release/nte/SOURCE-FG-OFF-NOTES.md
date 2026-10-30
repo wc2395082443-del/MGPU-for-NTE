@@ -23,7 +23,7 @@ NVIDIA runtime/model binaries、ReShade和游戏文件不随包分发。仍需�
 - 新8秒GPU窗口出现COPY/DIRECT查询交集约58.17%，但该窗口helper visible0、SDK每源帧1张；输入观察器迟到、main丢1条和7个任务细分截断均保留。**前台六倍完整GPU及性能对照仍待完成。**
 - The source-Off foreground check and GPU window are separate observations. The latter does not establish foreground sixfold performance gains. Existing proxy-swapchain copies/synchronization may remain after source FG is disabled.
 - Historical 28→34 base FPS and 160+ displayed-FPS user observations remain historical, rather than new measurements of this revision. No fixed FPS uplift is promised.
-- The original preview.1 hosted CI had a known asynchronous GPU-drain stress timeout (74/75 main tests); new CI status is recorded separately in the repository.
+- [Preview.2 hosted CI](https://github.com/wc2395082443-del/MGPU-for-NTE/actions/runs/41129943140) compiled successfully and passed **76/77 main tests**. The existing fine-capacity WARP stress fixture hit its asynchronous GPU-drain timeout, stopping before helper tests. New source-FG option/guard/route cases passed. Local results remain 77 main + 20 helper; the preview keeps this known limitation without weakening tests.
 
 [安装说明 / Install](https://github.com/wc2395082443-del/MGPU-for-NTE/blob/mgpu-for-nte/docs/nte/INSTALL.zh-CN.md) · [新版实现与证据](https://github.com/wc2395082443-del/MGPU-for-NTE/blob/mgpu-for-nte/docs/nte/SOURCE-FG-OFF.zh-CN.md)
 

@@ -13,6 +13,8 @@ The build script configures the main add-on and `experimental/official_fg`, then
 
 The 2026-10-31 candidate build passed **77/77 main + 20/20 helper** tests locally. Source-option coverage includes repeated On-to-Off requests, original-thread/once-only forwarding, return-code and caller-memory preservation, bounded structure-version prefixes and live guard failures. Runtime foreground sixfold GPU acceptance is still pending; see [revision details](SOURCE-FG-OFF.zh-CN.md).
 
+[Preview.2 GitHub run 41129943140](https://github.com/wc2395082443-del/MGPU-for-NTE/actions/runs/41129943140) compiled successfully and passed **76/77 main tests**. The existing fine-capacity WARP stress case hit its asynchronous GPU-drain timeout; helper build/tests were not reached. The new source-FG option/guard and Streamline route cases passed. The failure is retained without reducing assertions or repeatedly rerunning until green. This does not replace the separate local 77+20 result.
+
 ```powershell
 .\scripts\Build.ps1 -BuildDirectory _build/nte
 ```

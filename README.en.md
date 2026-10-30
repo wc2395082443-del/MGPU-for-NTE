@@ -63,7 +63,7 @@ Historical unique neural completions increased from **26.699/s to 33.451/s (~25.
 
 Sixfold requests up to five generated frames per real frame. Visible pacing and latency remain areas for improvement. Post-generation buffering of six completed images is planned. M365 was withdrawn; M366/M367 experiments remain separate.
 
-This revision passed 77 main + 20 helper cases locally. The original release's two GitHub-hosted runs each passed 74/75 main cases: the fine-capacity recording stress fixture timed out during asynchronous drain, stopping the job before helper tests. The cause remains under investigation. See [historical CI](https://github.com/wc2395082443-del/MGPU-for-NTE/actions/runs/40768218148); new CI results are recorded separately.
+This revision passed 77 main + 20 helper cases locally. [Preview.2 hosted CI](https://github.com/wc2395082443-del/MGPU-for-NTE/actions/runs/41129943140) compiled successfully and passed 76/77 main cases; the existing `mgpu_nonblocking_fine_capacity_warp_test` hit its asynchronous GPU-drain timeout, stopping before helper tests. New source-FG option, guard and wiring cases passed. The preview retains this known limitation without weakening the stress test.
 
 ![Before and after, five measured cycles on one scale](docs/nte/figures/five-frame-comparison.svg)
 
