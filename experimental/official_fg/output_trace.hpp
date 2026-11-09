@@ -13,6 +13,7 @@
 #include "reflex_contract.hpp"
 #include "shared_frame_contract.hpp"
 #include "../../src/continuous_trace.hpp"
+#include "helper_measurement_policy.hpp"
 
 namespace mgpu::official_fg
 {
@@ -34,6 +35,7 @@ struct output_frame_trace
     std::uint64_t sdk_reported = 0, sdk_status = 0, present_count = 0, present_result = 0;
     void mark(output_stage stage)
     {
+        if constexpr (!helper_measurements) return;
         LARGE_INTEGER now{};
         QueryPerformanceCounter(&now);
         ticks[static_cast<unsigned>(stage)] = now.QuadPart;
@@ -60,8 +62,9 @@ public:
         return L"Local\\MGPU-OutputPipeline-" + std::to_wstring(GetCurrentProcessId());
     }
     explicit output_trace(const std::filesystem::path &path)
-        : frames_(std::make_unique<std::array<output_frame_trace, capacity>>())
+        : frames_(helper_measurements ? std::make_unique<std::array<output_frame_trace, capacity>>() : nullptr)
     {
+        if constexpr (!helper_measurements) return;
         pipeline_path_ = path.wstring() + L".pipeline.bin";
         pipeline_trigger_ = CreateEventW(nullptr, TRUE, FALSE, pipeline_trigger_name().c_str());
         trigger_ = CreateEventW(nullptr, FALSE, FALSE, trigger_name().c_str());
@@ -111,6 +114,7 @@ public:
     }
     void poll()
     {
+        if constexpr (!helper_measurements) return;
         if (pipeline_capturing_ && (WaitForSingleObject(pipeline_trigger_, 0) != WAIT_OBJECT_0 ||
             GetTickCount64() >= pipeline_deadline_))
         {
@@ -120,10 +124,12 @@ public:
     }
     bool pipeline_requested() const
     {
+        if constexpr (!helper_measurements) return false;
         return pipeline_capturing_ || (pipeline_trigger_ && WaitForSingleObject(pipeline_trigger_, 0) == WAIT_OBJECT_0);
     }
     bool record(const output_frame_trace &frame)
     {
+        if constexpr (!helper_measurements) return false;
         if (!frame.ordered()) return false;
         if (!pipeline_attempted_ && pipeline_trigger_ && WaitForSingleObject(pipeline_trigger_, 0) == WAIT_OBJECT_0)
         {

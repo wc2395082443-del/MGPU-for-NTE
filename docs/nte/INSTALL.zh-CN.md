@@ -1,12 +1,12 @@
-# 安装源端FG关闭版 preview.2
+# 安装并行流水线与低延迟版 preview.3
 
-下载`MGPU-for-NTE-source-fg-off-preview.2.zip`。本版使用主模块20CF7B73＋helper118BBCBA：**4080S关闭源端FG，5080在NR后运行官方FG，最多请求六倍**。其他50系副卡见独立[兼容候选说明](RTX50-COMPAT.zh-CN.md)，本版helper仍限定RTX 5080。旧首发包保留。
+下载`MGPU-for-NTE-pipeline-preview.3.zip`。本版使用主模块8ADEAA05＋helper446FD260：**4080S关闭源端FG，5080在NR后运行官方FG，最多请求六倍**。其他50系副卡见独立[兼容候选说明](RTX50-COMPAT.zh-CN.md)，本版helper仍限定RTX 5080。旧首发包保留。
 
 ## 准备
 
 1. 正常退出异环及helper。从原启动器运行游戏，不更改或禁用反作弊。
 2. 需要双卡、兼容NVIDIA驱动、Windows x64、VC++ x64运行库。当前helper只接受**RTX 5080**；已测组合为4080 SUPER游戏渲染＋5080神经输出。显示器/Windows GPU选择应使两卡角色正确，启动后查看日志中的实际adapter，不能只按编号猜测。
-3. 在异环真实`HTGame.exe`目录安装支持add-on API20的ReShade。已测历史EXE SHA256为`032EB661CE65E0669FB643A2E87E727D5574BBA832CD6FE34FF0AB1D134CD788`，更新版兼容性未验证。
+3. 在异环真实`HTGame.exe`目录安装支持add-on API20的ReShade。本次支持的EXE SHA256为`E72655E227E17796D13EDF00F827DDFEBDE9859B3D758858F0FFC82765D84EFE`，其他构建需重新适配，安装器拒绝未知EXE。
 4. 按上游文档准备自己的NR运行库/模型，`nvngx_dlssnr.dll`放在exe旁的`mgpu/`子目录，**不要放exe同级**。
 
 ## 安装本包
@@ -51,7 +51,7 @@ ForceTagging保留原生资源标签入口，Reflex用于当前集成，`OneFram
 
 ## 启动核对
 
-从原启动器进入场景。日志应出现`source-fg-off-20261031`版本、正确的游戏/神经adapter、颜色/深度/MV标签、NR输出和helper初始化。源`slDLSSGSetOptions`应`installed=1`，`SOURCE-FG-OFF`中On请求对应`action=2 result=0`。只有实际调用与源SDK Off持续成立，才能确认该入口已生效；原生CVar仍On不代表SDK仍On。`color_overlap=1`/`guide_overlap=1`表示分阶段COPY路径启用。
+从原启动器进入场景。发布身份以本包SHA256为准；内部版本字符串仍沿用`source-fg-off-20261031`。日志应出现正确的游戏/神经adapter、颜色/深度/MV标签、NR输出和helper初始化。源`slDLSSGSetOptions`应`installed=1`，`SOURCE-FG-OFF`中On请求对应`action=2 result=0`。只有实际调用与源SDK Off持续成立，才能确认该入口已生效；原生CVar仍On不代表SDK仍On。`color_overlap=1`/`guide_overlap=1`表示分阶段COPY路径启用。
 
 helper仍请求官方六倍动态MFG，目标200 FPS；这是SDK输出目标，实际比例随负载/可见状态变化。确认helper输出可见及SDK正常，后台每源帧报告1张不能当成六倍成功或失败的前台证据。
 
@@ -61,6 +61,8 @@ helper仍请求官方六倍动态MFG，目标200 FPS；这是SDK输出目标，�
 - 六倍只是官方SDK请求上限，检查真实源帧率与显示节奏，不以浮层数字独立判断画质/延迟。
 
 出现启动异常、画面闪烁、缺失引导或无法正常输入时，退出后回退，保留日志；不要通过删fence或禁用保护继续运行。
+
+当前关闭GPU计时、NR纯诊断像素、主模块详细CPU／队列采集及helper可选追踪／纯速率统计；面板部分字段停止更新。MetaProbe、PresentAudit、PanelStats和部分状态计数／日志仍保留。确认实际输出与输入，RTSS可只监控helper。详见[更新说明](PIPELINE-UPDATE.zh-CN.md)。
 
 ## 回退
 

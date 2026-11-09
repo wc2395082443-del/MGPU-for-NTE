@@ -80,7 +80,7 @@ public:
         mgpu::queue_trace::observe_fence(fence_.Get());
 
         D3D12_FEATURE_DATA_D3D12_OPTIONS3 support{};
-        if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3, &support, sizeof support)) &&
+        if (mgpu::gpu_measurement::timestamps && SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3, &support, sizeof support)) &&
             support.CopyQueueTimestampQueriesSupported && SUCCEEDED(queue_->GetTimestampFrequency(&frequency_)) && frequency_ != 0)
         {
             D3D12_QUERY_HEAP_DESC query_desc{};

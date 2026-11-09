@@ -7,7 +7,7 @@
 // and swapchain arrive with T4/T5.
 #pragma once
 
-namespace mgpu::gpu1 { void sync_official_output_visibility(); }
+namespace mgpu::gpu1 { void sync_official_output_visibility(bool after_present = false); }
 #include "motion_frame_packet.hpp"
 
 #include <windows.h>

@@ -5,6 +5,8 @@
 #include <thread>
 #include <stdexcept>
 #include <cstdio>
+#include <cstdint>
+#include <limits>
 
 namespace mgpu::official_fg
 {
@@ -32,9 +34,10 @@ public:
     }
     HWND handle() const { return window_.load(std::memory_order_acquire); }
     unsigned long long pulse() const { return pulse_.load(); }
-    void update(HWND parent, bool visible)
+    void update(HWND parent, bool visible, std::uint64_t expires_ms = std::numeric_limits<std::uint64_t>::max())
     {
         if (parent != parent_ || failure_.load()) throw std::runtime_error("output UI no longer available");
+        expires_ms_.store(expires_ms);
         if (visible_.exchange(visible) != visible) SetEvent(wake_);
     }
     void stop()
@@ -103,7 +106,8 @@ private:
                     SWP_NOACTIVATE | SWP_NOOWNERZORDER)) {
                     failure_.store(true); break;
                 }
-            const bool wanted = visible_.load() && IsWindowVisible(parent_) && !IsIconic(parent_) &&
+            const bool wanted = visible_.load() && GetTickCount64() <= expires_ms_.load() &&
+                IsWindowVisible(parent_) && !IsIconic(parent_) &&
                 GetForegroundWindow() == GetAncestor(parent_, GA_ROOT);
             if ((IsWindowVisible(window) != FALSE) != wanted)
                 ShowWindow(window, wanted ? SW_SHOWNOACTIVATE : SW_HIDE);
@@ -123,6 +127,7 @@ private:
     std::atomic<HWND> window_{nullptr};
     HANDLE stop_ = nullptr, ready_ = nullptr, wake_ = nullptr;
     std::atomic<bool> visible_{false}, failure_{false};
+    std::atomic<std::uint64_t> expires_ms_{std::numeric_limits<std::uint64_t>::max()};
     std::atomic<unsigned long long> pulse_{0};
     std::thread thread_;
 };

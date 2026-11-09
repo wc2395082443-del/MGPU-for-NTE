@@ -60,12 +60,14 @@
 #include "../experimental/secondary_fg/dlss_fg_stage.hpp"
 #include "../experimental/official_fg/official_bridge.hpp"
 #include "../experimental/official_fg/output_visibility.hpp"
+#include "../experimental/official_fg/output_liveness.hpp"
 #include "../experimental/secondary_fg/camera_contract.hpp"
 #include "motion_source_audit.hpp"
 #include "tagged_motion_policy.hpp"
 #include "tagged_resource_validation.hpp"
 #include "present_read_retirement.hpp"
 #include "aligned_input.hpp"
+#include "gpu_measurement_policy.hpp"
 #include "neural_pipeline.hpp"
 #include "neural_snapshots.hpp"
 #include "../experimental/secondary_fg/aligned_camera.hpp"
@@ -73,10 +75,12 @@
 #include "presentation_feedback.hpp"
 #include <memory>
 #include "neural_difference.hpp"
+#include "nr_audit_policy.hpp"
 #include "calibration_policy.hpp"
 #include "gpu_timestamp_span.hpp"
 #include "frame_measurement.hpp"
 #include "queue_dependency_trace.hpp"
+#include "present_backpressure.hpp"
 
 // R111. DXGI_STATUS_OCCLUDED comes from dxgi.h by way of <dxgi1_4.h> above.
 // Guarded because it is a SUCCESS code and a build where it went missing
@@ -508,6 +512,8 @@ static void *g_dcomp_d3d11  = nullptr;
 static std::atomic<bool> g_dcomp_rooted{false};
 static std::atomic<bool> g_output_overlay_closed{true}, g_output_peek_hidden{false};
 static std::atomic<unsigned> g_output_view_mode{0};
+static std::atomic<bool> g_output_root_pending{false};
+namespace { bool stream_output_fresh(); }
 
 // The game's HWND, pushed from dllmain's on_init_swapchain once the swapchain
 // has been confirmed to be the GAME's by LUID. Authoritative: it is the window
@@ -625,16 +631,19 @@ void dcomp_set_visible(bool on)
     (void)dcomp_set_rooted(on && !mgpu::official_bridge::inspect().presenting, on ? "overlay closed" : "overlay open");
 }
 
-void sync_official_output_visibility()
+void sync_official_output_visibility(bool after_present)
 {
     if (!mgpu::official_bridge::selected()) return;
     const auto state = mgpu::official_bridge::inspect();
     bool shown = false;
     { auto &state = st(); std::lock_guard<std::mutex> lock(state.cs); shown = state.neural_shown; }
+    shown = shown && stream_output_fresh();
     const auto routes = mgpu::official_fg::choose_visible_routes(g_output_overlay_closed.load(),
         g_output_peek_hidden.load(), g_output_view_mode.load(), shown, state.presenting);
     mgpu::official_bridge::set_visible(routes.helper);
-    (void)dcomp_set_rooted(routes.fallback, "official/view/overlay visibility owner");
+    g_output_root_pending.store(routes.fallback && !g_dcomp_rooted.load());
+    if (!routes.fallback || after_present)
+        (void)dcomp_set_rooted(routes.fallback, "official/view/overlay visibility owner");
 }
 
 // V52. CTRL+ALT+F6. Returns whether the bridge is on screen AFTER the call.
@@ -2253,6 +2262,8 @@ bool present_frame(float r, float g, float b)
     }
     stream_secondary_fg_presented(fence, fence_value,
         hr == S_OK && nsrc != nullptr && nfmt == bbfmt && bbfmt != DXGI_FORMAT_UNKNOWN && nw != 0 && nh != 0);
+    if (source_copied && hr == S_OK && g_output_root_pending.load())
+        sync_official_output_visibility(true);
     return true;
 }
 
@@ -9971,6 +9982,7 @@ namespace
                        *nr_final = nullptr, *nr_read = nullptr;
         unsigned long long nr_final_frame = 0;
         mgpu::neural_pipeline::schedule pipeline;
+        mgpu::official_fg::output_liveness output_health;
         mgpu::neural_history::history neural_settings_history;
         mgpu::neural_pipeline::snapshots snapshots;
         struct pipeline_readback
@@ -9979,8 +9991,16 @@ namespace
             unsigned evaluation_count = 0;
             std::array<unsigned, EV_MAX> evaluation_roles{};
             mgpu::neural_pipeline::difference_audit difference;
+            bool nr_audit = false;
+            bool nr_audit_pixels = false;
+            std::uint64_t nr_audit_token = 0;
+            unsigned predecessor_frame = 0;
+            bool predecessor_valid = false, gap_reset = false, engine_reset = false, first_reset = false;
         };
         std::array<pipeline_readback, PIPELINE_SLOTS> pipeline_readbacks;
+        mgpu::nr_audit::budget nr_audit_budget;
+        std::uint64_t nr_audit_poll_ms = 0;
+        bool nr_audit_was_active = false;
         bool async_neural = false;
         unsigned long long async_finished = 0, async_gap_resets = 0, async_engine_resets = 0;
         unsigned long long async_submitted = 0, async_submitted_while_pending = 0;
@@ -10470,6 +10490,25 @@ namespace
         return s;
     }
 
+    bool stream_output_fresh()
+    {
+        auto &stream = str();
+        std::lock_guard<std::mutex> lock(stream.cs);
+        const bool fresh = stream.armed && stream.nr_ok && !stream.finished &&
+            stream.output_health.visible(GetTickCount64());
+        static bool previous = false;
+        if (fresh != previous) {
+            if (!fresh) stream.nr_first = true;
+            char report[320];
+            snprintf(report, sizeof report,
+                "[MGPU][NTE-OUTPUT-LIVE] ready=%u completed_seal=%llu; stale output yields native, recovery requires three completed NR frames",
+                unsigned(fresh), static_cast<unsigned long long>(stream.output_health.sequence()));
+            mgpu::diag::info(report);
+            previous = fresh;
+        }
+        return fresh;
+    }
+
     // P5.0. Forward-declared above present_frame. Copies out the pointer and
     // geometry under the stream's lock and returns immediately - the caller
     // does GPU work with it, and holding a lock the GAME'S render thread takes
@@ -10593,6 +10632,7 @@ namespace
         stream_state &s = str();
         std::lock_guard<std::mutex> lk(s.cs);
         if (!s.nr_ok || s.profile) return nullptr;
+        if (mgpu::official_bridge::selected() && !s.output_health.visible(GetTickCount64())) return nullptr;
         // R229: the format of the TEXTURE returned, which stream_nr_create made as
         // the linear twin of s.format (P7.8). The P7.3 copy guard compares this
         // against the chain, and the chain is now resized to the same twin.
@@ -11771,6 +11811,7 @@ namespace
         s.snapshots.release();
         s.pipeline_readbacks = {};
         s.pipeline = {};
+        s.output_health = {};
         s.neural_settings_history = {};
         s.async_neural = false;
         s.probe_read_fence = 0;
@@ -14978,7 +15019,7 @@ namespace
             s.tex_out = s.tex_out_ring[0];
             s.tex_pong = s.tex_pong_ring[0];
         }
-        if (SUCCEEDED(h)) h = make_buf(ndev, 1024, D3D12_HEAP_TYPE_READBACK, &s.nr_read);
+        if (mgpu::gpu_measurement::diagnostic_pixels && SUCCEEDED(h)) h = make_buf(ndev, 1024, D3D12_HEAP_TYPE_READBACK, &s.nr_read);
         // R208: the FP16 input path. Reads NRInput16 itself; a failure here
         // leaves it off and never fails the arm.
         if (SUCCEEDED(h)) { (void)mgpu::nr16::arm(ndev, s.width, s.height); s.n16_ini_ok = true; }
@@ -15961,6 +16002,7 @@ namespace sfdiag
 
     inline LONGLONG qpc()
     {
+        if constexpr (!mgpu::gpu_measurement::cpu_statistics) return 0;
         LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart;
     }
     inline double qpf()
@@ -15988,6 +16030,7 @@ namespace sfdiag
         explicit hold_timer(int s) : site(s), t0(qpc()) {}
         ~hold_timer()
         {
+            if constexpr (!mgpu::gpu_measurement::cpu_statistics) return;
             const unsigned long long us =
                 (unsigned long long)(ms(t0, qpc()) * 1000.0);
             hold_n[site].fetch_add(1, std::memory_order_relaxed);
@@ -16026,6 +16069,7 @@ namespace sfdiag
 
     inline void bucket(int i, double milli)
     {
+        if constexpr (!mgpu::gpu_measurement::cpu_statistics) return;
         const unsigned long long us = (unsigned long long)(milli * 1000.0);
         b_n[i].fetch_add(1, std::memory_order_relaxed);
         b_us_sum[i].fetch_add(us, std::memory_order_relaxed);
@@ -16089,6 +16133,8 @@ bool stream_present_gate(unsigned long timeout_ms)
     bool took_wait = false;
     bool ret = false;
     unsigned fg_sleep_ms = 0;
+    unsigned wait_timeout_ms = timeout_ms;
+    bool nr_backpressure = false;
 
     {
         std::lock_guard<std::mutex> lk(s.cs);
@@ -16134,7 +16180,13 @@ bool stream_present_gate(unsigned long timeout_ms)
         }
         else if (!s.armed || s.summarised)
         { ++s.gate_presents; ret = true; }
-        else if ((s.async_neural ? s.pipeline.display_seal() : s.consumed) != s.presented)
+        else if (([&] {
+            const auto decision = mgpu::present_backpressure::choose(s.async_neural, s.pipeline.pending(),
+                s.pipeline.inflight(), s.produced, s.consumed);
+            wait_timeout_ms = decision.timeout_ms;
+            nr_backpressure = decision.wait_for_nr;
+            return !nr_backpressure;
+        })() && (s.async_neural ? s.pipeline.display_seal() : s.consumed) != s.presented)
         {
             s.presented = s.async_neural ? s.pipeline.display_seal() : s.consumed;
             ++s.gate_presents;
@@ -16174,10 +16226,10 @@ bool stream_present_gate(unsigned long timeout_ms)
         if (source_ev != nullptr)
         {
             const HANDLE events[]{ev, source_ev};
-            wr = WaitForMultipleObjects(2, events, FALSE, timeout_ms);
+            wr = WaitForMultipleObjects(2, events, FALSE, wait_timeout_ms);
             if (wr == WAIT_OBJECT_0 + 1) wr = WAIT_OBJECT_0;
         }
-        else wr = WaitForSingleObject(ev, timeout_ms);
+        else wr = WaitForSingleObject(ev, wait_timeout_ms);
         t3 = sfdiag::qpc();          // R167: the WAIT bucket
         took_wait = true;
     }
@@ -16186,6 +16238,7 @@ bool stream_present_gate(unsigned long timeout_ms)
         t2 = t1; t3 = t1;
     }
 
+    if constexpr (!mgpu::gpu_measurement::cpu_statistics) return ret;
     const double d_lock = sfdiag::ms(t0, t1);
     const double d_set  = sfdiag::ms(t1, t2);
     const double d_wait = sfdiag::ms(t2, t3);
@@ -16223,7 +16276,7 @@ bool stream_present_gate(unsigned long timeout_ms)
                      "milliseconds, so the bucket named above is where the time actually is. "
                      "Warn %llu; first 20 then every 100th, counters stay complete.",
                      calls, d_tot, d_lock, d_set, d_wait,
-                     timeout_ms, (unsigned long)wr,
+                     wait_timeout_ms, (unsigned long)wr,
                      took_wait ? sfdiag::wait_result_name(wr) : "(no wait taken this call)",
                      owner, w);
             mgpu::diag::warn(l167);
@@ -16270,6 +16323,59 @@ bool stream_present_gate(unsigned long timeout_ms)
     }
 
     return ret;
+}
+
+static void stream_finish_present_backpressure()
+{
+    stream_state &s = str();
+    const auto start = GetTickCount64();
+    DWORD last_result = WAIT_OBJECT_0;
+    std::uint64_t produced = 0, consumed = 0;
+    unsigned inflight = 0, iterations = 0;
+    for (;;)
+    {
+        ID3D12Fence *fence = nullptr;
+        UINT64 value = 0;
+        {
+            std::lock_guard<std::mutex> lock(s.cs);
+            const auto decision = mgpu::present_backpressure::choose(s.async_neural, s.pipeline.pending(),
+                s.pipeline.inflight(), s.produced, s.consumed);
+            produced = s.produced;
+            consumed = s.consumed;
+            inflight = s.pipeline.inflight();
+            if (!decision.wait_for_nr || s.nf == nullptr || !s.pipeline.pending() ||
+                produced <= consumed + 1 || GetTickCount64() - start >= 50) break;
+            fence = s.nf;
+            value = s.pipeline.current().fence;
+            fence->AddRef();
+        }
+        if (value == 0 || value == UINT64_MAX) { fence->Release(); break; }
+        const auto completed = fence->GetCompletedValue();
+        if (completed == UINT64_MAX || completed >= value) { fence->Release(); continue; }
+        HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (event == nullptr) { fence->Release(); break; }
+        const auto remaining = static_cast<DWORD>((std::max)(1ll, 50ll - static_cast<long long>(GetTickCount64() - start)));
+        const auto registration = fence->SetEventOnCompletion(value, event);
+        last_result = SUCCEEDED(registration) ? WaitForSingleObject(event, (std::min)(25ul, remaining)) : WAIT_FAILED;
+        CloseHandle(event);
+        fence->Release();
+        ++iterations;
+        if (last_result == WAIT_FAILED) break;
+    }
+    static std::atomic<unsigned long long> waits{0}, timeouts{0};
+    const auto count = waits.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (last_result != WAIT_OBJECT_0 || produced > consumed + 1) timeouts.fetch_add(1, std::memory_order_relaxed);
+    if (count <= 3 || count % 120 == 0 || last_result != WAIT_OBJECT_0 || produced > consumed + 1)
+    {
+        char line[560];
+        snprintf(line, sizeof line,
+            "[MGPU][NTE-PRESENT-BP] wait=%llu result=0x%08lX elapsed_ms=%llu iterations=%u backlog=%llu inflight=%u "
+            "timeouts=%llu; finish_present waits until NR lead is <=1, capture hooks untouched",
+            count, static_cast<unsigned long>(last_result), static_cast<unsigned long long>(GetTickCount64() - start), iterations,
+            produced > consumed ? static_cast<unsigned long long>(produced - consumed) : 0ull, inflight,
+            timeouts.load(std::memory_order_relaxed));
+        mgpu::diag::info(line);
+    }
 }
 
 bool probes_enabled()
@@ -17767,6 +17873,7 @@ namespace reflex { void status(int &was_out, int &now_out, bool &applied_out); v
 // features go before the device they were created against.
 void stream_shutdown()
 {
+    mgpu::official_bridge::source_cancel();
     g_consumer_shutdown.store(true, std::memory_order_release);
     g_fg_source_gate.disable();
     g_fg_game_queue.store(nullptr);
@@ -19637,6 +19744,9 @@ void stream_on_present(void *cmd_queue_v)
 
 void stream_finish_present(void *cmd_queue_v)
 {
+        if (cmd_queue_v != nullptr && cmd_queue_v == g_fg_game_queue.load(std::memory_order_acquire) &&
+        !g_fg_source_gate.enabled() && !mgpu::official_bridge::selected())
+        stream_finish_present_backpressure();
     if (cmd_queue_v == nullptr || cmd_queue_v != g_fg_game_queue.load(std::memory_order_acquire) ||
         !g_fg_source_gate.enabled()) return;
     if (g_present_read_fault.load(std::memory_order_acquire))
@@ -20892,7 +21002,8 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
                 qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
                 qh.Count = stream_state::TS_MARKS;
                 qh.NodeMask = 0;
-                HRESULT th = ndev->CreateQueryHeap(&qh, IID_PPV_ARGS(&s.tsheap));
+                HRESULT th = mgpu::gpu_measurement::timestamps
+                    ? ndev->CreateQueryHeap(&qh, IID_PPV_ARGS(&s.tsheap)) : E_NOTIMPL;
                 if (SUCCEEDED(th))
                     th = make_buf(ndev, (UINT64)stream_state::TS_MARKS * 8,
                                   D3D12_HEAP_TYPE_READBACK, &s.tsread);
@@ -21072,8 +21183,8 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
                     // the adapter has to support copy-queue timestamps at all.
                     // Each owned input has six queries: one pair per plane.
                     D3D12_FEATURE_DATA_D3D12_OPTIONS3 o3{};
-                    HRESULT th = ndev->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3,
-                                                           &o3, sizeof o3);
+                    HRESULT th = mgpu::gpu_measurement::timestamps
+                        ? ndev->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3, &o3, sizeof o3) : E_NOTIMPL;
                     if (SUCCEEDED(th) && !o3.CopyQueueTimestampQueriesSupported) th = E_NOTIMPL;
                     if (SUCCEEDED(th))
                     {
@@ -22969,7 +23080,7 @@ static void seal_consume(stream_state &s, unsigned long long f, unsigned slot,
         // identical-rate means is ambiguous by construction and the summary
         // says so: a static scene produces identical NR output legitimately.
         // It is a rate to be read alongside the scene, not a verdict.
-        if (run_nr && !s.profile)
+        if (mgpu::gpu_measurement::diagnostic_pixels && run_nr && !s.profile)
         {
             unsigned char *sm = nullptr;
             D3D12_RANGE sr{0, 1024};
@@ -23728,7 +23839,8 @@ static void stream_pump_aligned_locked(stream_state &s)
 static bool stream_parallel_compatible(const stream_state &s)
 {
     return mgpu::aligned::enabled() && s.neural && s.nr_ok &&
-        !mgpu::fgmap::fg_presented_active() && !s.profile && s.passes == 1u &&
+        !mgpu::fgmap::fg_presented_active() && !s.profile &&
+        mgpu::neural_pipeline::parallel_passes_supported(s.passes, mgpu::official_bridge::selected()) &&
         !s.sr_ready && s.sr_rebuild_req == 0u && s.vr_mode == 0u && !s.p2r_on &&
         s.p1f_mode == 0u && s.p2f_mode == 0u && !s.nrs_on &&
         s.cv_nr == 0u && s.cv_sr == 0u && s.subrect_pct == 100u && s.cc_state == 0u;
@@ -23792,11 +23904,55 @@ static HRESULT stream_pipeline_readbacks(stream_state &s)
         if (SUCCEEDED(result) && s.ev_ok && entry.evaluations == nullptr)
             result = make_buf(s.ndev_b, (stream_state::EV_MAX + 1u) * 8ull,
                 D3D12_HEAP_TYPE_READBACK, entry.evaluations.GetAddressOf());
-        if (SUCCEEDED(result) && entry.sample == nullptr)
+        if (mgpu::gpu_measurement::diagnostic_pixels && SUCCEEDED(result) && entry.sample == nullptr)
             result = make_buf(s.ndev_b, 1024, D3D12_HEAP_TYPE_READBACK, entry.sample.GetAddressOf());
         if (FAILED(result)) return result;
     }
     return S_OK;
+}
+
+static void stream_nr_audit_poll(stream_state &s)
+{
+    if constexpr (!mgpu::gpu_measurement::diagnostic_pixels) return;
+    const auto now = GetTickCount64();
+    if (now >= s.nr_audit_poll_ms && now - s.nr_audit_poll_ms < 1000) return;
+    s.nr_audit_poll_ms = now;
+    const bool active = s.nr_audit_budget.active(now);
+    if (s.nr_audit_was_active && !active)
+    {
+        char report[240];
+        snprintf(report, sizeof report, "[MGPU][NTE-NR-AUDIT-END] token=%llu attempted_frames=%u; dense sampling disabled",
+            static_cast<unsigned long long>(s.nr_audit_budget.token()), s.nr_audit_budget.recorded());
+        mgpu::diag::info(report);
+    }
+    s.nr_audit_was_active = active;
+    wchar_t path[32768]{};
+    const auto length = GetModuleFileNameW(mgpu::module_handle(), path, 32768);
+    if (!length || length >= 32768) return;
+    auto *separator = wcsrchr(path, L'\\');
+    if (!separator) return;
+    separator[1] = L'\0';
+    if (wcscat_s(path, L"nte-nr-diagnostic.trigger") != 0) return;
+    WIN32_FILE_ATTRIBUTE_DATA attributes{};
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &attributes)) return;
+    ULARGE_INTEGER token{};
+    token.LowPart = attributes.ftLastWriteTime.dwLowDateTime;
+    token.HighPart = attributes.ftLastWriteTime.dwHighDateTime;
+    FILETIME current_time{};
+    GetSystemTimeAsFileTime(&current_time);
+    ULARGE_INTEGER wall{};
+    wall.LowPart = current_time.dwLowDateTime;
+    wall.HighPart = current_time.dwHighDateTime;
+    if (wall.QuadPart < token.QuadPart || wall.QuadPart - token.QuadPart > 300000000ull) return;
+    if (s.nr_audit_budget.observe(token.QuadPart, now))
+    {
+        s.nr_audit_was_active = true;
+        char report[300];
+        snprintf(report, sizeof report,
+            "[MGPU][NTE-NR-AUDIT-BEGIN] token=%llu max_frames=600 max_ms=20000; three fixed input/output patches, code-value brightness, original NR settings retained",
+            static_cast<unsigned long long>(token.QuadPart));
+        mgpu::diag::info(report);
+    }
 }
 
 bool stream_consumer_ready()
@@ -23836,6 +23992,7 @@ void stream_consumer_wait(void *stop, void *timer)
 
 void stream_poll()
 {
+    mgpu::aligned::poll_admission_audit();
     if (t_consumer_poll && g_consumer_shutdown.load(std::memory_order_acquire)) return;
     mgpu::measurement::poll();
     if (g_present_read_fault.load(std::memory_order_relaxed)) return;
@@ -23910,6 +24067,7 @@ void stream_poll()
     // question: is the bridge holding s.cs long enough to stall the GAME.
     sfdiag::hold_timer r168_poll(sfdiag::SITE_POLL);
     if (!s.armed || s.summarised) return;
+    stream_nr_audit_poll(s);
     if (t_consumer_poll && (!s.async_neural || (!s.fg_ready && !mgpu::official_bridge::selected()) || s.finished ||
         !stream_parallel_compatible(s))) return;
     mgpu::aligned::set_ready_dispatch(mgpu::aligned::enabled());
@@ -23999,13 +24157,40 @@ void stream_poll()
         const bool retired = (s.fg_ready || mgpu::official_bridge::selected())
             ? s.pipeline.retire(completed_fence) : s.pipeline.publish(completed_fence);
         if (!retired) break;
+        if (mgpu::official_bridge::selected())
+            mgpu::official_bridge::source_completed(pending.engine_frame);
+        s.output_health.complete(pending.seal, GetTickCount64());
         if (s.fg_ready)
         {
             g_fg_source_gate.complete(pending.engine_frame);
             if (!s.finished) g_fg_source_gate.enable();
         }
         std::array<mgpu::neural_pipeline::difference_audit::difference, 3> differences{};
-        if (s.pipeline_readbacks[pending.snapshot].difference.collect(differences))
+        auto &audit_readback = s.pipeline_readbacks[pending.snapshot];
+        const bool difference_collected = audit_readback.difference.collect(differences);
+        if (audit_readback.nr_audit)
+        {
+            char audit_line[1600];
+            std::snprintf(audit_line, sizeof audit_line,
+                "[MGPU][NTE-NR-AUDIT] token=%llu seal=%llu frame=%u predecessor=%u predecessor_valid=%u "
+                "gap_reset=%u engine_reset=%u first_reset=%u settings_change=0x%x reset_mask=0x%x "
+                "motion_valid=%u motion_size=%ux%u motion_scale=(%.6f,%.6f) patches_valid=%u "
+                "input=(%.8f,%.8f,%.8f) output=(%.8f,%.8f,%.8f) mae=(%.8f,%.8f,%.8f) "
+                "completed_ms=%llu; code-value brightness of same-frame patches, not whole-screen luminance",
+                static_cast<unsigned long long>(audit_readback.nr_audit_token), pending.seal, pending.engine_frame,
+                audit_readback.predecessor_frame, unsigned(audit_readback.predecessor_valid),
+                unsigned(audit_readback.gap_reset), unsigned(audit_readback.engine_reset), unsigned(audit_readback.first_reset),
+                pending.settings_change, pending.reset_pass_mask, unsigned(pending.motion_binding_valid),
+                pending.motion_width, pending.motion_height, pending.bound_motion_scale[0], pending.bound_motion_scale[1],
+                unsigned(difference_collected && audit_readback.nr_audit_pixels),
+                differences[0].input_brightness, differences[1].input_brightness, differences[2].input_brightness,
+                differences[0].output_brightness, differences[1].output_brightness, differences[2].output_brightness,
+                differences[0].mean, differences[1].mean, differences[2].mean,
+                static_cast<unsigned long long>(GetTickCount64()));
+            mgpu::diag::info(audit_line);
+            audit_readback.nr_audit = false;
+        }
+        if (difference_collected && pending.seal % 120ull == 0ull)
         {
             char report[480];
             std::snprintf(report, sizeof report,
@@ -24731,6 +24916,11 @@ void stream_poll()
             s.async_present_us = g_present_wait_us.load();
             s.async_present_count = g_present_wait_count.load();
             mgpu::diag::info("[MGPU][PIPE3] three owned slots enabled; fill_while_pending=1; ordered NR queue, overlapped copy/compute/presentation; unchanged quality");
+            char pipeline_line[320];
+            std::snprintf(pipeline_line, sizeof pipeline_line,
+                "[MGPU][NTE-DUAL-ASYNC] passes=%u official=%u owned_slots=%u; each source frame retains all NR passes in one ordered command list",
+                s.passes, unsigned(mgpu::official_bridge::selected()), stream_state::PIPELINE_SLOTS);
+            mgpu::diag::info(pipeline_line);
         }
         const bool submit_async = s.async_neural && run_nr;
         if (s.fg_ready && (s.fg_pending || s.pipeline.pending())) break;
@@ -24740,6 +24930,12 @@ void stream_poll()
         if (!submit_async && s.pipeline.pending()) break;
         ii = submit_async ? pipeline_slot : (s.copy_queue ? (unsigned)(f & 1ull) : 0u);
         auto *job_readback = submit_async ? &s.pipeline_readbacks[pipeline_slot] : nullptr;
+        if (job_readback != nullptr)
+        {
+            job_readback->nr_audit = s.nr_audit_budget.active(GetTickCount64());
+            job_readback->nr_audit_pixels = false;
+            job_readback->nr_audit_token = s.nr_audit_budget.token();
+        }
         bool probe_recorded = false;
         if (submit_async)
         {
@@ -25492,6 +25688,14 @@ void stream_poll()
                     ? s.pipeline.latest().engine_frame : s.aligned_history_frame;
                 const bool aligned_reset = aligned_mode && (!predecessor_valid ||
                     !mgpu::aligned::consecutive_frame(static_cast<unsigned>(gnow), predecessor_frame));
+                if (job_readback != nullptr && job_readback->nr_audit)
+                {
+                    job_readback->predecessor_frame = predecessor_frame;
+                    job_readback->predecessor_valid = predecessor_valid;
+                    job_readback->gap_reset = aligned_reset;
+                    job_readback->engine_reset = s.aligned_constants[slot].reset;
+                    job_readback->first_reset = s.nr_first;
+                }
                 if (aligned_reset && predecessor_valid) ++s.async_gap_resets;
                 if (aligned_mode && s.aligned_constants[slot].reset) ++s.async_engine_resets;
                 unsigned long long mv_elapsed = 1ull;
@@ -26974,7 +27178,7 @@ void stream_poll()
                     probe_recorded = true;
                 }
 
-                if (!s.profile)
+                if (mgpu::gpu_measurement::diagnostic_pixels && !s.profile)
                 {
                 // P6.0: sample the LAST pass's output, not tex_out. With
                 // Passes=1 nr_final IS tex_out; with an even pass count it is
@@ -27054,9 +27258,11 @@ void stream_poll()
                 if (submit_async && aligned_evaluation_recorded)
                 {
                     s.snapshots.record(s.nl, pipeline_slot, s.tex_in[ii], s.tex_in_rest, s.nr_final);
-                    if (f % 120ull == 0ull)
-                        (void)job_readback->difference.record(s.nl, s.snapshots.input(pipeline_slot),
-                            s.snapshots.output(pipeline_slot));
+                    if (job_readback->nr_audit)
+                        job_readback->nr_audit = s.nr_audit_budget.take(GetTickCount64());
+                    if (mgpu::gpu_measurement::diagnostic_pixels && (job_readback->nr_audit || f % 120ull == 0ull))
+                        job_readback->nr_audit_pixels = job_readback->difference.record(s.nl, s.snapshots.input(pipeline_slot),
+                            s.snapshots.output(pipeline_slot)) == S_OK;
                 }
                 if (s.ts_ok) s.nl->EndQuery(s.tsheap, D3D12_QUERY_TYPE_TIMESTAMP, 4);
             }
@@ -27218,6 +27424,12 @@ void stream_poll()
         // D1: one checker, two callers. See seal_consume.
         seal_consume(s, f, slot, run_nr, use_cq, ii);
         s.consumed = f;
+        if (run_nr && aligned_evaluation_recorded)
+        {
+            if (mgpu::official_bridge::selected())
+                mgpu::official_bridge::source_completed(static_cast<unsigned>(s.slot_game_frame[slot]));
+            s.output_health.complete(f, GetTickCount64());
+        }
         if (mgpu::t119::perf_active()) { mgpu::perf::job_end(s.produced); mgpu::perf::periodic(s.consumed); }   // R300e1
         if (s.fg_requested && f % 300ull == 0ull)
         {

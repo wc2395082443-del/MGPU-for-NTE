@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pipeline_timing.hpp"
+#include "gpu_measurement_policy.hpp"
 #include <d3d12.h>
 #include <wrl/client.h>
 
@@ -28,6 +29,7 @@ inline double cpu_ms(UINT64 ticks)
 
 inline calibration calibrate(ID3D12CommandQueue *queue)
 {
+    if constexpr (!gpu_measurement::timestamps) return {};
     calibration clock{};
     clock.cpu_frequency = cpu_frequency();
     if (queue == nullptr || FAILED(queue->GetTimestampFrequency(&clock.gpu_frequency))) return {};
@@ -99,6 +101,7 @@ public:
         clock_ = {};
         recorded_ms_ = cpu_ms(cpu_ticks());
         submitted_ms_ = -1;
+        if constexpr (!gpu_measurement::timestamps) return;
         if (command == nullptr || serial == 0 ||
             (command->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT &&
              command->GetType() != D3D12_COMMAND_LIST_TYPE_COMPUTE) || !initialize(device)) return;

@@ -44,6 +44,7 @@
 #include <chrono>     // T1.1 FrameCap (FrameCap line present only)
 #include <thread>     // T1.1 FrameCap
 #include "game_work_trace.hpp"
+#include "gpu_measurement_policy.hpp"
 #include "queue_dependency_trace.hpp"
 
 // ---- R141: BUILD IDENTITY, SAID ONCE, FIRST ----
@@ -954,6 +955,7 @@ static std::atomic<unsigned> g_t117_window_frames{0};
 static std::atomic<unsigned> g_t117_report_windows{0};
 static void t117_count_game_present(reshade::api::swapchain *sc)
 {
+    if constexpr (!mgpu::gpu_measurement::cpu_statistics) return;
     if (!t119_is_game_d3d12(sc)) return;
     LARGE_INTEGER t, frequency;
     QueryPerformanceCounter(&t);

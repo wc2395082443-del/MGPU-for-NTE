@@ -64,6 +64,15 @@ int main()
     check(readiness.note(1437, 2) && readiness.bits(1437) == 0x17, "replay observed missing RenderSubmitEnd state");
     check(readiness.simulation_ready(1437) && !readiness.complete(1437), "observed 0x17 no longer blocks independent helper render submission");
     check(!readiness.simulation_ready(1438), "adjacent frame cannot borrow simulation markers");
+    source_history photo_gap;
+    check(photo_gap.note(52156, sleep_marker) && photo_gap.note(52156, 0) && photo_gap.note(52156, 2), "photo failure actual source stages retained");
+    photo_gap.retain({52156, 0, 0});
+    check(photo_gap.bits(52156) == 0x15 && !photo_gap.simulation_ready(52156), "observed photo frame cannot authorize FG without simulation end");
+    check(full(photo_gap, 52157) && photo_gap.simulation_ready(52157), "next complete real source can resume after incomplete photo frame");
+    check(!photo_gap.simulation_ready(52156) && photo_gap.bits(52156) == 0x15, "recovery never borrows next frame simulation end");
+    photo_gap.retain({0, 52157, 0});
+    check(photo_gap.simulation_ready(52157), "releasing skipped tuple preserves complete next tuple");
+    check(photo_gap.note(52156, 1) && photo_gap.simulation_ready(52156), "late actual simulation end remains a valid marker without fabrication");
     readiness.retain({1437, 0, 0});
     for (unsigned frame = 1438; frame <= 1565; ++frame) full(readiness, frame);
     check(readiness.simulation_ready(1437) && !readiness.complete(1437), "pending tuple retains actual simulation across rolling history wraps");

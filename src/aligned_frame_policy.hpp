@@ -139,4 +139,15 @@ struct frame_state
         if (release_command == command) released = ticket;
     }
 };
+
+template <std::size_t Capacity>
+bool submitted_source_target(const frame_state &state, const guide_constants &constants,
+    const std::array<std::uint64_t, Capacity> &serials, unsigned count)
+{
+    if (!state.schedulable() || !constants.valid || !(constants.key == state.key)) return false;
+    for (const auto command : state.commands)
+        for (unsigned index = 0; index < count && index < Capacity; ++index)
+            if (command == serials[index]) return true;
+    return false;
+}
 }

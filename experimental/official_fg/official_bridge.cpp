@@ -2,6 +2,7 @@
 #include "official_bridge.hpp"
 #include "official_channel.hpp"
 #include "shared_constants.hpp"
+#include "source_admission_gate.hpp"
 #include "../../src/diag.hpp"
 #include <atomic>
 #include <memory>
@@ -22,6 +23,7 @@ std::mutex producer_lock;
 std::atomic<bool> requested{false};
 std::atomic<unsigned> requested_multiplier{6};
 std::atomic<bool> requested_visible{true};
+official_fg::source_admission_gate source_gate;
 
 struct context
 {
@@ -58,6 +60,7 @@ void report_failure(context *current, const char *message)
         }
         if (current->stop_event) SetEvent(current->stop_event);
     }
+    source_gate.reset(false);
     char line[512];
     std::snprintf(line, sizeof line, "[MGPU][M349-HOST] %s; official output stopped, NR remains enabled", message);
     mgpu::diag::error(line);
@@ -205,8 +208,9 @@ std::uint64_t send_marker(context &current, std::uint32_t frame, unsigned kind,
 
 void request(bool enabled, unsigned multiplier)
 {
-    requested.store(enabled);
+    const bool previous = requested.exchange(enabled);
     requested_multiplier.store(multiplier);
+    if (enabled != previous) source_gate.reset(enabled);
 }
 bool selected() { return requested.load(); }
 
@@ -399,6 +403,7 @@ status inspect()
 
 bool shutdown()
 {
+    source_gate.reset(false);
     std::lock_guard<std::mutex> guard(producer_lock);
     AcquireSRWLockExclusive(&lifetime_lock);
     bool stopped = true;
@@ -414,5 +419,60 @@ bool shutdown()
     ReleaseSRWLockExclusive(&lifetime_lock);
     if (!stopped) mgpu::diag::error("[MGPU][M349-HOST] helper/export not retired; retaining shared allocations");
     return stopped;
+}
+
+void source_submitted(std::uint32_t frame)
+{
+    if (!selected()) return;
+    static std::atomic<std::uint64_t> calls{0};
+    const auto result = source_gate.wait_submitted(frame);
+    const auto call = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (call <= 3 || call % 120 == 0 || result.timed_out || result.cancelled ||
+        (result.waited && result.waits <= 3)) {
+        char line[520];
+        std::snprintf(line, sizeof line,
+            "[MGPU][NTE-PIPELINE-BP] call=%llu submitted=%u retire_target=%u completed=%u ready=%u waited=%u "
+            "wait_ms=%llu waits=%llu timeout=%u cancelled=%u pending=%u capacity=%u; wait only for full pipeline credits, locks released",
+            static_cast<unsigned long long>(call), frame, result.target, result.completed, unsigned(result.ready),
+            unsigned(result.waited), static_cast<unsigned long long>(result.wait_ms),
+            static_cast<unsigned long long>(result.waits), unsigned(result.timed_out), unsigned(result.cancelled),
+            result.pending, official_fg::source_admission_gate::capacity);
+        if (result.timed_out) mgpu::diag::error(line);
+        else mgpu::diag::info(line);
+    }
+}
+
+void source_cancel()
+{
+    source_gate.reset(false);
+}
+
+void source_wait_input(std::uint32_t frame)
+{
+    if (!selected()) return;
+    static std::atomic<std::uint64_t> calls{0}, waits{0};
+    const auto begin_ns = source_clock_ns();
+    const auto result = source_gate.wait_before_input(frame);
+    const auto end_ns = source_clock_ns();
+    const auto call = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    const auto waited = result.waited ? waits.fetch_add(1, std::memory_order_relaxed) + 1 : waits.load(std::memory_order_relaxed);
+    if (call <= 3 || call % 120 == 0 || result.timed_out || result.cancelled || (result.waited && waited <= 3)) {
+        char line[600];
+        std::snprintf(line, sizeof line,
+            "[MGPU][NTE-INPUT-BP] call=%llu frame=%u retire_target=%u completed=%u ready=%u waited=%u "
+            "wait_ms=%llu waits=%llu timeout=%u cancelled=%u pending=%u capacity=%u begin_ns=%llu end_ns=%llu; "
+            "before native Reflex Sleep, original SDK pacing retained, post-submit safety retained",
+            static_cast<unsigned long long>(call), frame, result.target, result.completed, unsigned(result.ready),
+            unsigned(result.waited), static_cast<unsigned long long>(result.wait_ms), static_cast<unsigned long long>(waited),
+            unsigned(result.timed_out), unsigned(result.cancelled), result.pending, official_fg::source_admission_gate::capacity,
+            static_cast<unsigned long long>(begin_ns), static_cast<unsigned long long>(end_ns));
+        if (result.timed_out) mgpu::diag::error(line);
+        else mgpu::diag::info(line);
+    }
+}
+
+void source_completed(std::uint32_t frame)
+{
+    source_gate.complete(frame);
 }
 }

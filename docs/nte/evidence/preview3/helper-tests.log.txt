@@ -1,0 +1,28 @@
+Internal ctest changing into directory: C:/Users/Administrator/Documents/Codex/2026-11-09/github-pipeline-publication/build/helper
+Test project C:/Users/Administrator/Documents/Codex/2026-11-09/github-pipeline-publication/build/helper
+      Start  2: official_output_trace_pipeline
+ 1/11 Test  #2: official_output_trace_pipeline .........   Passed    3.03 sec
+      Start  3: official_reflex_contract
+ 2/11 Test  #3: official_reflex_contract ...............   Passed    0.02 sec
+      Start  4: official_output_trace
+ 3/11 Test  #4: official_output_trace ..................   Passed    0.21 sec
+      Start  5: official_helper_measurement_disabled
+ 4/11 Test  #5: official_helper_measurement_disabled ...   Passed    0.03 sec
+      Start  7: official_output_visibility
+ 5/11 Test  #7: official_output_visibility .............   Passed    0.02 sec
+      Start  8: official_output_liveness
+ 6/11 Test  #8: official_output_liveness ...............   Passed    0.02 sec
+      Start  9: official_output_window
+ 7/11 Test  #9: official_output_window .................   Passed    0.39 sec
+      Start 14: official_metrics
+ 8/11 Test #14: official_metrics .......................   Passed    0.03 sec
+      Start 16: official_source_history
+ 9/11 Test #16: official_source_history ................   Passed    0.03 sec
+      Start 17: official_startup_source_policy
+10/11 Test #17: official_startup_source_policy .........   Passed    0.02 sec
+      Start 18: shared_frame_contract
+11/11 Test #18: shared_frame_contract ..................   Passed    0.02 sec
+
+100% tests passed, 0 tests failed out of 11
+
+Total Test time (real) =   3.83 sec

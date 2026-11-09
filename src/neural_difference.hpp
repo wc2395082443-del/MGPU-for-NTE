@@ -7,13 +7,14 @@
 #include <cmath>
 #include <cstring>
 #include <utility>
+#include "nr_audit_policy.hpp"
 
 namespace mgpu::neural_pipeline
 {
 class difference_audit
 {
 public:
-    struct difference { double mean = 0, changed_fraction = 0; };
+    struct difference { double mean = 0, changed_fraction = 0, input_brightness = 0, output_brightness = 0; };
     HRESULT record(ID3D12GraphicsCommandList *command, ID3D12Resource *input, ID3D12Resource *output)
     {
         if (pending_) return E_UNEXPECTED;
@@ -92,7 +93,7 @@ public:
         const unsigned mask = (1u << bits) - 1u;
         for (unsigned region = 0; region != 3; ++region)
         {
-            double total = 0;
+            double total = 0, input_total = 0, output_total = 0;
             unsigned changed = 0;
             for (UINT row = 0; row != layout_.Footprint.Height; ++row)
                 for (UINT column = 0; column != layout_.Footprint.Width; ++column)
@@ -101,6 +102,9 @@ public:
                     unsigned original = 0, neural = 0;
                     std::memcpy(&original, static_cast<const char *>(input) + offset, 4);
                     std::memcpy(&neural, static_cast<const char *>(output) + offset, 4);
+                    const bool blue_first = layout_.Footprint.Format == DXGI_FORMAT_B8G8R8A8_UNORM;
+                    input_total += mgpu::nr_audit::brightness(original, bits, blue_first);
+                    output_total += mgpu::nr_audit::brightness(neural, bits, blue_first);
                     bool differs = false;
                     for (unsigned channel = 0; channel != 3; ++channel)
                     {
@@ -111,7 +115,7 @@ public:
                     if (differs) ++changed;
                 }
             const double pixels = double(layout_.Footprint.Width) * layout_.Footprint.Height;
-            result[region] = {total / (pixels * 3.0), changed / pixels};
+            result[region] = {total / (pixels * 3.0), changed / pixels, input_total / pixels, output_total / pixels};
         }
         const D3D12_RANGE empty{};
         readback_[0]->Unmap(0, &empty);

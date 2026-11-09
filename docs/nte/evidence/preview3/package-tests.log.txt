@@ -1,0 +1,9 @@
+KEEP configuration: mgpu.ini
+PASS: 7 package files validated; no changes
+KEEP configuration: mgpu.ini
+PASS: installed nte-pipeline-preview.3; rollback receipt=C:\Users\Administrator\AppData\Local\Temp\mgpu-nte-release-test-43342d946345448f9d4372c00d663406\game\mgpu-nte-backups\20261109-130932-7448094\receipt.json
+Next: supply matching NVIDIA runtimes, merge Engine.ini example, and start from your original launcher.
+PASS: rollback identities; no changes
+PASS: rollback complete; user configuration and imported runtime remain untouched
+KEEP configuration: mgpu.ini
+PASS: install/rollback, validation-only, preserved config, external-change rejection, corrupt-package and path containment. Fixture retained: C:\Users\Administrator\AppData\Local\Temp\mgpu-nte-release-test-43342d946345448f9d4372c00d663406

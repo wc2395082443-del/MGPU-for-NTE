@@ -1,0 +1,40 @@
+{
+  "date": "2026-11-09",
+  "main_sha256": "8ADEAA052261EA7C89DC6AB3137496B13A5A57D3D7B54F3CE98C776737987E48",
+  "helper_sha256": "446FD26095FCB21EEB446D06F67E18485BCEE3D4C432D6B7A3BBB841C9DE6933",
+  "game_exe_sha256": "E72655E227E17796D13EDF00F827DDFEBDE9859B3D758858F0FFC82765D84EFE",
+  "source_snapshot": "NTE-measurement-stage3; stage2 main and stage3 helper",
+  "production_source_matches_snapshot": true,
+  "publication_test_only_changes": [
+    "fenced_pipeline_warp_test.cpp submission-result arguments/assertion",
+    "standalone source/module stubs in aligned fixtures"
+  ],
+  "build": {
+    "main": "passed",
+    "helper": "passed",
+    "compiler": "MSVC 14.44.35207",
+    "windows_sdk": "10.0.26100.0"
+  },
+  "focused_tests": {
+    "main_passed": 14,
+    "main_total": 14,
+    "helper_passed": 11,
+    "helper_total": 11
+  },
+  "complete_tests": {
+    "main_passed": 69,
+    "main_total": 86,
+    "helper_passed": 23,
+    "helper_total": 23,
+    "failures_suppressed": false
+  },
+  "installer_fixture": "passed",
+  "new_controlled_performance_measurements": false,
+  "user_acceptance": [
+    "login and dual-Pass no flicker",
+    "low latency after early capacity wait",
+    "good dual-Pass asynchronous behavior",
+    "all three measurement-removal stages normal"
+  ],
+  "remaining_validation": "17 complete-main failures; legacy instrumentation assumptions, WARP drain/coverage and software depth failure; not all independently attributed"
+}

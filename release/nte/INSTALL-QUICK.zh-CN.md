@@ -1,6 +1,6 @@
-# MGPU for NTE：源端FG关闭版安装
+# MGPU for NTE：并行流水线与低延迟版 preview.3 安装
 
-本包让4080S负责游戏渲染并关闭源端FG，5080负责NR及其后的NVIDIA官方FG，最多请求六倍。当前helper限定RTX 5080。
+本包采用已验证主模块8ADEAA05＋helper446FD260，新增并行背压、提前等待、双Pass异步及分阶段测量清理。让4080S负责游戏渲染并关闭源端FG，5080负责NR及其后的NVIDIA官方FG，最多请求六倍。当前helper限定RTX 5080。
 
 1. 正常退出游戏及helper。先准备API20 ReShade、NR运行库/模型及匹配的官方Streamline运行库。NVIDIA模型/运行库不含在此包。
 2. 在解压目录打开PowerShell，路径换成实际HTGame.exe目录：
@@ -20,4 +20,4 @@
 .\Install.ps1 -RollbackReceipt '游戏目录\mgpu-nte-backups\TIMESTAMP\receipt.json'
 ```
 
-[依赖](docs/nte/DEPENDENCIES.md) · [新版改动和验证范围](docs/nte/SOURCE-FG-OFF.zh-CN.md) · [二进制来源](docs/nte/PROVENANCE.md)
+[依赖](docs/nte/DEPENDENCIES.md) · [新版改动和验证范围](docs/nte/PIPELINE-UPDATE.zh-CN.md) · [二进制来源](docs/nte/PROVENANCE.md)

@@ -37,6 +37,7 @@ struct lease
 };
 
 void enable();
+void poll_admission_audit();
 bool enabled();
 void observe_queue(ID3D12CommandQueue *queue);
 void set_game_device(ID3D12Device *device);

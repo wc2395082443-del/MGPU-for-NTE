@@ -1,0 +1,34 @@
+Internal ctest changing into directory: C:/Users/Administrator/Documents/Codex/2026-11-09/github-pipeline-publication/build/main
+Test project C:/Users/Administrator/Documents/Codex/2026-11-09/github-pipeline-publication/build/main
+      Start 50: mgpu_source_admission_gate_test
+ 1/14 Test #50: mgpu_source_admission_gate_test ..............   Passed    1.19 sec
+      Start 51: mgpu_early_input_backpressure_test
+ 2/14 Test #51: mgpu_early_input_backpressure_test ...........   Passed    1.12 sec
+      Start 52: mgpu_source_credit_serial_control_rejected
+ 3/14 Test #52: mgpu_source_credit_serial_control_rejected ...   Passed    6.11 sec
+      Start 53: mgpu_neural_pipeline_test
+ 4/14 Test #53: mgpu_neural_pipeline_test ....................   Passed    0.03 sec
+      Start 54: mgpu_dualpass_pipeline_test
+ 5/14 Test #54: mgpu_dualpass_pipeline_test ..................   Passed    0.03 sec
+      Start 55: mgpu_gpu_measurement_disabled_test
+ 6/14 Test #55: mgpu_gpu_measurement_disabled_test ...........   Passed    0.03 sec
+      Start 56: mgpu_cpu_measurement_disabled_test
+ 7/14 Test #56: mgpu_cpu_measurement_disabled_test ...........   Passed    0.02 sec
+      Start 61: mgpu_aligned_frame_policy_test
+ 8/14 Test #61: mgpu_aligned_frame_policy_test ...............   Passed    0.03 sec
+      Start 64: mgpu_admission_audit_test
+ 9/14 Test #64: mgpu_admission_audit_test ....................   Passed    0.03 sec
+      Start 65: mgpu_present_backpressure_test
+10/14 Test #65: mgpu_present_backpressure_test ...............   Passed    0.02 sec
+      Start 66: mgpu_nr_audit_policy_test
+11/14 Test #66: mgpu_nr_audit_policy_test ....................   Passed    0.02 sec
+      Start 67: mgpu_source_fg_options_test
+12/14 Test #67: mgpu_source_fg_options_test ..................   Passed    0.02 sec
+      Start 68: mgpu_source_fg_guard_test
+13/14 Test #68: mgpu_source_fg_guard_test ....................   Passed    0.02 sec
+      Start 77: mgpu_streamline_route_audit_test
+14/14 Test #77: mgpu_streamline_route_audit_test .............   Passed    0.02 sec
+
+100% tests passed, 0 tests failed out of 14
+
+Total Test time (real) =   8.72 sec

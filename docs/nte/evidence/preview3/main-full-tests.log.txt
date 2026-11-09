@@ -1,0 +1,299 @@
+Internal ctest changing into directory: C:/Users/Administrator/Documents/Codex/2026-11-09/github-pipeline-publication/build/main
+Test project C:/Users/Administrator/Documents/Codex/2026-11-09/github-pipeline-publication/build/main
+      Start  1: mgpu_continuous_trace_test
+ 1/86 Test  #1: mgpu_continuous_trace_test .........................   Passed    0.31 sec
+      Start  2: mgpu_continuous_measurement_test
+ 2/86 Test  #2: mgpu_continuous_measurement_test ...................   Passed    6.27 sec
+      Start  3: mgpu_incomplete_measurement_rejected_test
+ 3/86 Test  #3: mgpu_incomplete_measurement_rejected_test ..........   Passed    0.05 sec
+      Start  4: mgpu_legacy_continuous_transition_rejected_test
+ 4/86 Test  #4: mgpu_legacy_continuous_transition_rejected_test ....   Passed    0.01 sec
+      Start  5: mgpu_continuous_game_work_warp_test
+ 5/86 Test  #5: mgpu_continuous_game_work_warp_test ................***Failed   10.37 sec
+FAIL asynchronous recording did not drain created=24640 emitted=12352 cancelled=12288 invalid=12352 rejected=0 live=64 drain_timeouts=0
+[MGPU][M337] kind=status session=712 reason=session_started_nonblocking jobs=0 rejected=0 replayed=0 max_jobs=32768 max_marks=64 invalid=0 encoding_errors=0 fine_selection_refused=0 fine_operation_limit=1024 query_stride=2048 cumulative_jobs=0 recycled=0 cancelled_total=0 live=0 peak_live=0 fine_truncated=0 queue_contention=0 continuous=1 nonblocking=1 hot_path_mutex=0 fine_pool=4096 provenance=etw_only growth_failures=0 drain_timeouts=0
+[MGPU][M337] kind=status session=712 reason=recording_stopped jobs=8519 rejected=0 replayed=0 max_jobs=32768 max_marks=64 invalid=12352 encoding_errors=0 fine_selection_refused=0 fine_operation_limit=1024 query_stride=2048 cumulative_jobs=24640 recycled=24576 cancelled_total=12288 live=64 peak_live=8519 fine_truncated=0 queue_contention=0 continuous=1 nonblocking=1 hot_path_mutex=0 fine_pool=4096 provenance=etw_only growth_failures=0 drain_timeouts=0
+[MGPU][M337] kind=status session=712 reason=trace_incomplete jobs=8519 rejected=0 replayed=0 max_jobs=32768 max_marks=64 invalid=12352 encoding_errors=0 fine_selection_refused=0 fine_operation_limit=1024 query_stride=2048 cumulative_jobs=24640 recycled=24576 cancelled_total=12288 live=64 peak_live=8519 fine_truncated=0 queue_contention=0 continuous=1 nonblocking=1 hot_path_mutex=0 fine_pool=4096 provenance=etw_only growth_failures=0 drain_timeouts=0
+
+      Start  6: mgpu_nonblocking_recording_warp_test
+ 6/86 Test  #6: mgpu_nonblocking_recording_warp_test ...............***Failed   22.16 sec
+ADAPTER Microsoft Basic Render Driver LUID=00000000:00012580
+FAIL asynchronous GPU drain timed out
+
+      Start  7: mgpu_nonblocking_fine_capacity_warp_test
+ 7/86 Test  #7: mgpu_nonblocking_fine_capacity_warp_test ...........***Failed   22.14 sec
+ADAPTER Microsoft Basic Render Driver LUID=00000000:00012580
+FAIL asynchronous GPU drain timed out
+
+      Start  8: mgpu_nonblocking_unsubmitted_test
+ 8/86 Test  #8: mgpu_nonblocking_unsubmitted_test ..................   Passed    5.18 sec
+      Start  9: mgpu_nonblocking_replay_test
+ 9/86 Test  #9: mgpu_nonblocking_replay_test .......................   Passed    0.17 sec
+      Start 10: mgpu_nonblocking_queue-limit_test
+10/86 Test #10: mgpu_nonblocking_queue-limit_test ..................***Failed    0.14 sec
+FAIL unknown queue not explicitly rejected
+
+      Start 11: mgpu_nonblocking_delayed-retirement_test
+11/86 Test #11: mgpu_nonblocking_delayed-retirement_test ...........***Failed    0.28 sec
+FAIL valid delayed work was not drained
+
+      Start 12: mgpu_nonblocking_stop-during-scope_test
+12/86 Test #12: mgpu_nonblocking_stop-during-scope_test ............***Failed    0.14 sec
+FAIL valid delayed work was not drained
+
+      Start 13: mgpu_official_capacity_test
+13/86 Test #13: mgpu_official_capacity_test ........................   Passed    0.02 sec
+      Start 14: mgpu_official_capacity_old_rejected
+14/86 Test #14: mgpu_official_capacity_old_rejected ................   Passed    0.03 sec
+      Start 15: mgpu_game_work_policy_test
+15/86 Test #15: mgpu_game_work_policy_test .........................   Passed    0.02 sec
+      Start 16: mgpu_game_work_trace_warp_test
+16/86 Test #16: mgpu_game_work_trace_warp_test .....................***Failed    2.97 sec
+
+      Start 17: mgpu_game_work_trace_stress_warp_test
+17/86 Test #17: mgpu_game_work_trace_stress_warp_test ..............***Failed    2.95 sec
+
+      Start 18: mgpu_native_work_policy_test
+18/86 Test #18: mgpu_native_work_policy_test .......................   Passed    0.03 sec
+      Start 19: mgpu_native_work_abi_test
+19/86 Test #19: mgpu_native_work_abi_test ..........................   Passed    0.02 sec
+      Start 20: mgpu_native_work_warp_test
+20/86 Test #20: mgpu_native_work_warp_test .........................***Failed    2.99 sec
+FAIL: learned=0 fine=0 truncated=0 mixed=0 drained=0
+
+      Start 21: mgpu_native_work_stop_warp_test
+21/86 Test #21: mgpu_native_work_stop_warp_test ....................   Passed    0.04 sec
+      Start 22: mgpu_native_work_capacity_warp_test
+22/86 Test #22: mgpu_native_work_capacity_warp_test ................***Failed    2.90 sec
+[MGPU][M337] kind=status session=339 reason=session_started_native_boundary_probe jobs=0 rejected=0 replayed=0 max_jobs=8192 max_marks=64 recording=0 closed_unsubmitted=0 submitted_pending=0 retired=0 cancelled=0 invalid=0 overflow_jobs=0 invalid_timestamps=0 encoding_errors=0 native_starts=0 native_closes=0 native_reset_failures=0 native_boundary_mode=1 scope_pending=0 fine_selected=0 fine_general=0 fine_meta=0 fine_selection_refused=0 fine_general_limit=1024 fine_meta_limit=16 fine_job_limit=1040 fine_operation_limit=160 query_stride=384 fine_mixed_continues=1 cumulative_jobs=0 recycled=0 continuous=0
+[MGPU][M339] kind=coverage session=0 mask=32767 extended=1 failures=0
+[MGPU][M337] kind=native_hook session=0 table=00007FFE2D99E830 close_slot=9 reset_slot=10
+[MGPU][M337] kind=origin session=339 origin=1 pcs=7ff7b3a41eb5,7ff7b3a42e96,7ff7b3a5b450,7ffe98a2dda7,7ffe99f3ee4c,0,0,0
+[MGPU][M337] kind=origin session=339 origin=2 pcs=7ff7b3a42eba,7ff7b3a5b450,7ffe98a2dda7,7ffe99f3ee4c,0,0,0,0
+[MGPU][M336] kind=queue session=339 role=m337_game_work queue=000002B227796CA0 device=000002B2277A70E0 luid=00000000:00012580 type=0
+[MGPU][M337] kind=job session=339 job=1 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:7b3
+[MGPU][M337] kind=job session=339 job=2 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:1079
+[MGPU][M337] kind=job session=339 job=3 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:38b
+[MGPU][M337] kind=origin session=339 origin=3 pcs=7ff7b3a41f71,7ff7b3a42e96,7ff7b3a5b450,7ffe98a2dda7,7ffe99f3ee4c,0,0,0
+[MGPU][M337] kind=origin session=339 origin=4 pcs=7ff7b3a42034,7ff7b3a42e96,7ff7b3a5b450,7ffe98a2dda7,7ffe99f3ee4c,0,0,0
+[MGPU][M337] kind=origin session=339 origin=5 pcs=7ff7b3a42093,7ff7b3a42e96,7ff7b3a5b450,7ffe98a2dda7,7ffe99f3ee4c,0,0,0
+[MGPU][M337] kind=origin session=339 origin=6 pcs=7ff7b3a420db,7ff7b3a42e96,7ff7b3a5b450,7ffe98a2dda7,7ffe99f3ee4c,0,0,0
+[MGPU][M337] kind=job session=339 job=4 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=9 ngx_handle=514 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=1 data=0:0:0:0,2:0:0:65,0:0:0:67,10:0:0:73,11:0:0:7b,0:0:0:7d,0:0:0:a2,0:0:0:aa,12:0:0:c6
+[MGPU][M339] kind=callbacks session=339 job=4 total=4 counts=1,1,1,1 origins=3,4,5,6 points=2,5,6,7
+[MGPU][M337] kind=job session=339 job=5 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:c
+[MGPU][M337] kind=job session=339 job=6 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:69
+[MGPU][M337] kind=job session=339 job=7 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:3a
+[MGPU][M337] kind=job session=339 job=8 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:1b
+[MGPU][M337] kind=job session=339 job=9 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:31
+[MGPU][M337] kind=job session=339 job=10 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:3c
+[MGPU][M337] kind=job session=339 job=11 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:2b
+[MGPU][M337] kind=job session=339 job=12 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:20
+[MGPU][M337] kind=job session=339 job=13 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:17
+[MGPU][M337] kind=job session=339 job=14 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:39
+[MGPU][M337] kind=job session=339 job=15 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:2a
+[MGPU][M337] kind=job session=339 job=16 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:26
+[MGPU][M337] kind=job session=339 job=17 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:1b
+[MGPU][M337] kind=job session=339 job=18 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:23
+[MGPU][M337] kind=job session=339 job=19 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:18
+[MGPU][M337] kind=job session=339 job=20 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:2a
+[MGPU][M337] kind=job session=339 job=21 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:24
+[MGPU][M337] kind=job session=339 job=22 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:16
+[MGPU][M337] kind=job session=339 job=23 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:1d
+[MGPU][M337] kind=job session=339 job=24 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:2a
+[MGPU][M337] kind=job session=339 job=25 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:17
+[MGPU][M337] kind=job session=339 job=26 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:13
+[MGPU][M337] kind=job session=339 job=27 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:17
+[MGPU][M337] kind=job session=339 job=28 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:1a
+[MGPU][M337] kind=job session=339 job=29 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:24
+[MGPU][M337] kind=job session=339 job=30 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:19
+[MGPU][M337] kind=job session=339 job=31 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:18
+[MGPU][M337] kind=job session=339 job=32 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:29
+[MGPU][M337] kind=job session=339 job=33 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:29
+[MGPU][M337] kind=job session=339 job=34 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:22
+[MGPU][M337] kind=job session=339 job=35 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:27
+[MGPU][M337] kind=job session=339 job=36 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:17
+[MGPU][M337] kind=job session=339 job=37 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:25
+[MGPU][M337] kind=job session=339 job=38 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:27
+[MGPU][M337] kind=job session=339 job=39 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:14
+[MGPU][M337] kind=job session=339 job=40 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:27
+[MGPU][M337] kind=job session=339 job=41 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:17
+[MGPU][M337] kind=job session=339 job=42 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:15
+[MGPU][M337] kind=job session=339 job=43 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:16
+[MGPU][M337] kind=job session=339 job=44 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:15
+[MGPU][M337] kind=job session=339 job=45 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:18
+[MGPU][M337] kind=job session=339 job=46 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:27
+[MGPU][M337] kind=job session=339 job=47 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:23
+[MGPU][M337] kind=job session=339 job=48 queue=000002B227796CA0 type=0 engine_frame=0 frame_known=0 viewport=0 overflow=0 start_ms=-1.000000 frequency=0 marks=2 ngx_handle=0 ngx_feature=4294967295 ngx_known=0 reset_origin=1 submit_origin=2 native_start=1 native_end=1 command=000002B22B70C7C0 fine_selected=0 fine_candidate=0 callback_record=0 data=0:0:0:0,12:0:0:17
+[MGPU][M337] kind=status session=339 reason=recording_stopped jobs=48 rejected=0 replayed=0 max_jobs=8192 max_marks=64 recording=0 closed_unsubmitted=0 submitted_pending=0 retired=48 cancelled=0 invalid=0 overflow_jobs=0 invalid_timestamps=55 encoding_errors=0 native_starts=48 native_closes=48 native_reset_failures=0 native_boundary_mode=1 scope_pending=0 fine_selected=0 fine_general=0 fine_meta=0 fine_selection_refused=0 fine_general_limit=1024 fine_meta_limit=16 fine_job_limit=1040 fine_operation_limit=160 query_stride=384 fine_mixed_continues=1 cumulative_jobs=48 recycled=0 continuous=0
+[MGPU][M337] kind=status session=339 reason=submitted_jobs_drained jobs=48 rejected=0 replayed=0 max_jobs=8192 max_marks=64 recording=0 closed_unsubmitted=0 submitted_pending=0 retired=48 cancelled=0 invalid=0 overflow_jobs=0 invalid_timestamps=55 encoding_errors=0 native_starts=48 native_closes=48 native_reset_failures=0 native_boundary_mode=1 scope_pending=0 fine_selected=0 fine_general=0 fine_meta=0 fine_selection_refused=0 fine_general_limit=1024 fine_meta_limit=16 fine_job_limit=1040 fine_operation_limit=160 query_stride=384 fine_mixed_continues=1 cumulative_jobs=48 recycled=0 continuous=0
+[MGPU][M337] kind=aggregate session=339 queue=000002B227796CA0 type=0 jobs=48 frame_known=0 frame_conflict=0 overflow_jobs=0 lists=48 traced=48 segments=(0,0,0,0,0,0,0,0,0,0,0,0,0) gpu_ms=(0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000)
+FAIL: learned=0 fine=0 truncated=0 mixed=0 drained=0
+
+      Start 23: mgpu_trace_log_parts_test
+23/86 Test #23: mgpu_trace_log_parts_test ..........................   Passed    0.03 sec
+      Start 24: mgpu_game_work_native_boundary_warp_test
+24/86 Test #24: mgpu_game_work_native_boundary_warp_test ...........   Passed    3.77 sec
+      Start 25: mgpu_game_work_native_reset_after_stop_warp_test
+25/86 Test #25: mgpu_game_work_native_reset_after_stop_warp_test ...   Passed    2.91 sec
+      Start 26: mgpu_frame_measurement_test
+26/86 Test #26: mgpu_frame_measurement_test ........................***Failed    0.04 sec
+
+      Start 27: mgpu_worker_dispatch_test
+27/86 Test #27: mgpu_worker_dispatch_test ..........................   Passed    0.02 sec
+      Start 28: mgpu_worker_dispatch_m358_control
+28/86 Test #28: mgpu_worker_dispatch_m358_control ..................   Passed    0.03 sec
+      Start 29: mgpu_aligned_prefetch_test
+29/86 Test #29: mgpu_aligned_prefetch_test .........................   Passed    0.02 sec
+      Start 30: mgpu_neural_poll_test
+30/86 Test #30: mgpu_neural_poll_test ..............................   Passed    0.03 sec
+      Start 31: mgpu_neural_poll_old_return_is_rejected
+31/86 Test #31: mgpu_neural_poll_old_return_is_rejected ............   Passed    0.02 sec
+      Start 32: mgpu_pipeline_timing_test
+32/86 Test #32: mgpu_pipeline_timing_test ..........................   Passed    0.02 sec
+      Start 33: mgpu_queue_clock_cache_test
+33/86 Test #33: mgpu_queue_clock_cache_test ........................***Failed    0.03 sec
+
+      Start 34: mgpu_producer_copy_warp_test
+34/86 Test #34: mgpu_producer_copy_warp_test .......................   Passed    0.16 sec
+      Start 35: mgpu_color_copy_overlap_warp_test
+35/86 Test #35: mgpu_color_copy_overlap_warp_test ..................   Passed    0.70 sec
+      Start 36: mgpu_guide_copy_overlap_warp_test
+36/86 Test #36: mgpu_guide_copy_overlap_warp_test ..................   Passed    0.94 sec
+      Start 37: mgpu_neural_history_test
+37/86 Test #37: mgpu_neural_history_test ...........................   Passed    0.02 sec
+      Start 38: mgpu_neural_snapshots_warp_test
+38/86 Test #38: mgpu_neural_snapshots_warp_test ....................   Passed    0.15 sec
+      Start 39: mgpu_async_consumer_test
+39/86 Test #39: mgpu_async_consumer_test ...........................   Passed    0.10 sec
+      Start 40: mgpu_presentation_freshness_test
+40/86 Test #40: mgpu_presentation_freshness_test ...................   Passed    0.02 sec
+      Start 41: mgpu_presentation_feedback_warp_test
+41/86 Test #41: mgpu_presentation_feedback_warp_test ...............   Passed    0.09 sec
+      Start 42: mgpu_secondary_fg_pipeline_test
+42/86 Test #42: mgpu_secondary_fg_pipeline_test ....................   Passed    0.02 sec
+      Start 43: mgpu_secondary_fg_retirement_test
+43/86 Test #43: mgpu_secondary_fg_retirement_test ..................   Passed    0.42 sec
+      Start 44: mgpu_fg_presentation_old_defect_is_rejected
+44/86 Test #44: mgpu_fg_presentation_old_defect_is_rejected ........   Passed    0.04 sec
+      Start 45: mgpu_fg_partial_progress_old_defect_is_rejected
+45/86 Test #45: mgpu_fg_partial_progress_old_defect_is_rejected ....   Passed    0.44 sec
+      Start 46: mgpu_secondary_fg_contract_test
+46/86 Test #46: mgpu_secondary_fg_contract_test ....................   Passed    0.02 sec
+      Start 47: mgpu_secondary_fg_api_test
+47/86 Test #47: mgpu_secondary_fg_api_test .........................   Passed    0.02 sec
+      Start 48: mgpu_secondary_fg_stage_warp_test
+48/86 Test #48: mgpu_secondary_fg_stage_warp_test ..................   Passed    0.17 sec
+      Start 49: mgpu_streamline_constants_test
+49/86 Test #49: mgpu_streamline_constants_test .....................   Passed    0.02 sec
+      Start 50: mgpu_source_admission_gate_test
+50/86 Test #50: mgpu_source_admission_gate_test ....................   Passed    1.19 sec
+      Start 51: mgpu_early_input_backpressure_test
+51/86 Test #51: mgpu_early_input_backpressure_test .................   Passed    1.13 sec
+      Start 52: mgpu_source_credit_serial_control_rejected
+52/86 Test #52: mgpu_source_credit_serial_control_rejected .........   Passed    6.12 sec
+      Start 53: mgpu_neural_pipeline_test
+53/86 Test #53: mgpu_neural_pipeline_test ..........................   Passed    0.01 sec
+      Start 54: mgpu_dualpass_pipeline_test
+54/86 Test #54: mgpu_dualpass_pipeline_test ........................   Passed    0.01 sec
+      Start 55: mgpu_gpu_measurement_disabled_test
+55/86 Test #55: mgpu_gpu_measurement_disabled_test .................   Passed    0.01 sec
+      Start 56: mgpu_cpu_measurement_disabled_test
+56/86 Test #56: mgpu_cpu_measurement_disabled_test .................   Passed    0.03 sec
+      Start 57: mgpu_depth_plane_policy_test
+57/86 Test #57: mgpu_depth_plane_policy_test .......................   Passed    0.03 sec
+      Start 58: mgpu_depth_normalizer_warp_test
+58/86 Test #58: mgpu_depth_normalizer_warp_test ....................***Failed    0.11 sec
+Software-only adapter: Microsoft Basic Render Driver
+Native depth footprint: format=39 row_pitch=512 bytes=3616
+FAIL: 0x80004005
+
+      Start 59: mgpu_d3d12_device_identity_test
+59/86 Test #59: mgpu_d3d12_device_identity_test ....................   Passed    0.02 sec
+      Start 60: mgpu_aligned_texture_policy_test
+60/86 Test #60: mgpu_aligned_texture_policy_test ...................   Passed    0.02 sec
+      Start 61: mgpu_aligned_frame_policy_test
+61/86 Test #61: mgpu_aligned_frame_policy_test .....................   Passed    0.01 sec
+      Start 62: mgpu_calibration_policy_test
+62/86 Test #62: mgpu_calibration_policy_test .......................   Passed    0.02 sec
+      Start 63: mgpu_native_reflex_request_test
+63/86 Test #63: mgpu_native_reflex_request_test ....................   Passed    0.02 sec
+      Start 64: mgpu_admission_audit_test
+64/86 Test #64: mgpu_admission_audit_test ..........................   Passed    0.01 sec
+      Start 65: mgpu_present_backpressure_test
+65/86 Test #65: mgpu_present_backpressure_test .....................   Passed    0.01 sec
+      Start 66: mgpu_nr_audit_policy_test
+66/86 Test #66: mgpu_nr_audit_policy_test ..........................   Passed    0.01 sec
+      Start 67: mgpu_source_fg_options_test
+67/86 Test #67: mgpu_source_fg_options_test ........................   Passed    0.01 sec
+      Start 68: mgpu_source_fg_guard_test
+68/86 Test #68: mgpu_source_fg_guard_test ..........................   Passed    0.01 sec
+      Start 69: mgpu_aligned_queue_abi_test
+69/86 Test #69: mgpu_aligned_queue_abi_test ........................   Passed    0.02 sec
+      Start 70: mgpu_aligned_submission_test
+70/86 Test #70: mgpu_aligned_submission_test .......................   Passed    0.02 sec
+      Start 71: mgpu_fenced_pipeline_warp_test
+71/86 Test #71: mgpu_fenced_pipeline_warp_test .....................***Failed    0.15 sec
+D3D12 debug layer unavailable; pixel/fence validation still runs
+FAIL: all capture and normalization spans must be measurable
+
+      Start 72: mgpu_source_ready_dispatch_warp_test
+72/86 Test #72: mgpu_source_ready_dispatch_warp_test ...............***Failed    0.23 sec
+D3D12 debug layer unavailable; pixel/fence validation still runs
+FAIL: all capture and normalization spans must be measurable
+
+      Start 73: mgpu_motion_frame_packet_test
+73/86 Test #73: mgpu_motion_frame_packet_test ......................   Passed    0.02 sec
+      Start 74: mgpu_present_read_retirement_test
+74/86 Test #74: mgpu_present_read_retirement_test ..................   Passed    0.02 sec
+      Start 75: mgpu_tagged_motion_policy_test
+75/86 Test #75: mgpu_tagged_motion_policy_test .....................   Passed    0.02 sec
+      Start 76: mgpu_streamline_tag_reader_test
+76/86 Test #76: mgpu_streamline_tag_reader_test ....................   Passed    0.02 sec
+      Start 77: mgpu_streamline_route_audit_test
+77/86 Test #77: mgpu_streamline_route_audit_test ...................   Passed    0.01 sec
+      Start 78: mgpu_motion_source_audit_test
+78/86 Test #78: mgpu_motion_source_audit_test ......................   Passed    0.02 sec
+      Start 79: mgpu_fg_present_evidence_test
+79/86 Test #79: mgpu_fg_present_evidence_test ......................   Passed    0.02 sec
+      Start 80: mgpu_adapter_selection_test
+80/86 Test #80: mgpu_adapter_selection_test ........................   Passed    0.02 sec
+      Start 81: mgpu_temporal_diag_test
+81/86 Test #81: mgpu_temporal_diag_test ............................   Passed    0.03 sec
+      Start 82: mgpu_perf_diag_test
+82/86 Test #82: mgpu_perf_diag_test ................................   Passed    0.02 sec
+      Start 83: mgpu_feature_diag_test
+83/86 Test #83: mgpu_feature_diag_test .............................   Passed    0.02 sec
+      Start 84: mgpu_producer_diag_test
+84/86 Test #84: mgpu_producer_diag_test ............................   Passed    0.02 sec
+      Start 85: mgpu_queue_dependency_trace_warp_test
+85/86 Test #85: mgpu_queue_dependency_trace_warp_test ..............***Failed    0.09 sec
+FAIL trace must activate
+
+      Start 86: mgpu_queue_dependency_trace_overflow_test
+86/86 Test #86: mgpu_queue_dependency_trace_overflow_test ..........***Failed    0.03 sec
+FAIL trace must activate
+
+
+80% tests passed, 17 tests failed out of 86
+
+Total Test time (real) =  99.13 sec
+
+The following tests FAILED:
+	  5 - mgpu_continuous_game_work_warp_test (Failed)
+	  6 - mgpu_nonblocking_recording_warp_test (Failed)
+	  7 - mgpu_nonblocking_fine_capacity_warp_test (Failed)
+	 10 - mgpu_nonblocking_queue-limit_test (Failed)
+	 11 - mgpu_nonblocking_delayed-retirement_test (Failed)
+	 12 - mgpu_nonblocking_stop-during-scope_test (Failed)
+	 16 - mgpu_game_work_trace_warp_test (Failed)
+	 17 - mgpu_game_work_trace_stress_warp_test (Failed)
+	 20 - mgpu_native_work_warp_test (Failed)
+	 22 - mgpu_native_work_capacity_warp_test (Failed)
+	 26 - mgpu_frame_measurement_test (Failed)
+	 33 - mgpu_queue_clock_cache_test (Failed)
+	 58 - mgpu_depth_normalizer_warp_test (Failed)
+	 71 - mgpu_fenced_pipeline_warp_test (Failed)
+	 72 - mgpu_source_ready_dispatch_warp_test (Failed)
+	 85 - mgpu_queue_dependency_trace_warp_test (Failed)
+	 86 - mgpu_queue_dependency_trace_overflow_test (Failed)
+Errors while running CTest

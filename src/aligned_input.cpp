@@ -8,11 +8,15 @@
 #include "diag.hpp"
 #include "frame_measurement.hpp"
 #include "game_work_trace.hpp"
+#include "admission_audit.hpp"
+#include "../experimental/official_fg/official_bridge.hpp"
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cwchar>
 #include <mutex>
+
+namespace mgpu { HMODULE module_handle(); }
 
 namespace mgpu::aligned
 {
@@ -22,6 +26,9 @@ constexpr unsigned capacity = 4;
 constexpr unsigned queue_capacity = 8;
 constexpr unsigned execute_slot = 10;
 std::atomic<std::uint64_t> latest_color_submission{0};
+thread_local unsigned submission_depth = 0;
+std::atomic<bool> audit_enabled{false}, audit_flushing{false};
+std::atomic<ULONGLONG> audit_poll_ms{0};
 const GUID command_guid = {0xa091f3d1, 0xefc8, 0x48d1, {0xa8, 0xca, 0x23, 0x53, 0x93, 0x08, 0x16, 0x33}};
 using execute_fn = void (STDMETHODCALLTYPE *)(ID3D12CommandQueue *, UINT, ID3D12CommandList *const *);
 
@@ -94,6 +101,7 @@ struct state
     unsigned wake_slot = capacity;
     std::uint64_t wake_serial = 0, wake_registrations = 0;
     bool wake_failed = false;
+    mgpu::admission::trace admission;
 };
 state &data()
 {
@@ -272,7 +280,7 @@ command_record *record_command(state &context, ID3D12GraphicsCommandList *comman
 }
 
 void after_submit(ID3D12CommandQueue *queue, const std::array<std::uint64_t, 64> &serials, unsigned serial_count,
-                  UINT64 submitted_at)
+                  UINT64 submitted_at, frame_key &submitted_frame, bool &submitted_known)
 {
     auto &context = data();
     std::lock_guard<std::mutex> lock(context.mutex);
@@ -357,11 +365,27 @@ void after_submit(ID3D12CommandQueue *queue, const std::array<std::uint64_t, 64>
             reject(context, "cross-adapter arrival signal failed");
         }
     }
+    if (context.failed || !enabled()) return;
+    for (const auto &frame : context.frames)
+    {
+        const auto &constants = context.constants[frame.state.key.frame % context.constants.size()];
+        if (!submitted_source_target(frame.state, constants, serials, serial_count)) continue;
+        if (!submitted_known || newer_frame(frame.state.key.frame, submitted_frame.frame))
+        {
+            submitted_frame = frame.state.key;
+            submitted_known = true;
+        }
+    }
 }
 
 template <unsigned Hook>
 void STDMETHODCALLTYPE execute(ID3D12CommandQueue *queue, UINT count, ID3D12CommandList *const *lists)
 {
+    struct submission_scope
+    {
+        submission_scope() { ++submission_depth; }
+        ~submission_scope() { --submission_depth; }
+    } depth;
     mgpu::measurement::cpu_scope measurement("execute_hook");
     auto &context = data();
     auto &hook = context.hooks[Hook];
@@ -390,7 +414,11 @@ void STDMETHODCALLTYPE execute(ID3D12CommandQueue *queue, UINT count, ID3D12Comm
     mgpu::game_work::before_submit(queue, count, lists);
     { mgpu::measurement::cpu_scope original("execute_original"); hook.original(queue, count, lists); }
     mgpu::game_work::after_submit(queue, count, lists);
-    if (serial_count != 0) after_submit(queue, serials, serial_count, submitted_at);
+    frame_key submitted_frame{};
+    bool submitted_known = false;
+    if (serial_count != 0) after_submit(queue, serials, serial_count, submitted_at, submitted_frame, submitted_known);
+    if (submission_lock.owns_lock()) submission_lock.unlock();
+    if (submitted_known && submission_depth == 1) mgpu::official_bridge::source_submitted(submitted_frame.frame);
 }
 
 bool allocate_plane(plane &target, ID3D12Device *device, const D3D12_RESOURCE_DESC &description)
@@ -535,6 +563,18 @@ void observe_queue(ID3D12CommandQueue *queue)
 void capture(void *command_pointer, unsigned buffer_type, const tagged_resource &tag,
              motion_packet::identity engine)
 {
+    if (audit_enabled.load(std::memory_order_relaxed) && engine.frame_known)
+    {
+        auto &context = data();
+        std::lock_guard<std::mutex> lock(context.mutex);
+        if (auto *entry = context.admission.note(engine.frame, engine.viewport, GetTickCount64()))
+        {
+            const unsigned component = buffer_type == 53 ? 0 : buffer_type == 0 ? 1 : buffer_type == 1 ? 2 : 3;
+            if (component < 3) entry->seen |= 1u << component;
+            if (!engine.viewport_known || command_pointer == nullptr || tag.lifecycle != 0 || tag.state == UINT_MAX || tag.native == 0)
+                entry->reasons |= mgpu::admission::invalid_tag;
+        }
+    }
     if (!enabled() || !engine.viewport_known || command_pointer == nullptr ||
         tag.lifecycle != 0 || tag.state == UINT_MAX || tag.native == 0) return;
     const unsigned component = buffer_type == 53 ? 0 : buffer_type == 0 ? 1 : buffer_type == 1 ? 2 : 3;
@@ -556,7 +596,12 @@ void capture(void *command_pointer, unsigned buffer_type, const tagged_resource 
             mgpu::diag::info(line);
         }
         auto *record = record_command(context, command);
-        if (record == nullptr) return;
+        if (record == nullptr) {
+            if (audit_enabled.load(std::memory_order_relaxed))
+                if (auto *entry = context.admission.note(engine.frame, engine.viewport, GetTickCount64()))
+                    entry->reasons |= mgpu::admission::no_command_record;
+            return;
+        }
         if (engine.frame_known) record->identity = engine;
         else
         {
@@ -575,6 +620,9 @@ void capture(void *command_pointer, unsigned buffer_type, const tagged_resource 
     {
         std::lock_guard<std::mutex> lock(context.mutex);
         report_input(context, component, buffer_type, tag, description, "ID3D12Resource query failed");
+        if (audit_enabled.load(std::memory_order_relaxed))
+            if (auto *entry = context.admission.note(engine.frame, engine.viewport, GetTickCount64()))
+                entry->reasons |= mgpu::admission::invalid_resource;
         return;
     }
     ID3D12Device *device = nullptr;
@@ -584,6 +632,9 @@ void capture(void *command_pointer, unsigned buffer_type, const tagged_resource 
     {
         std::lock_guard<std::mutex> lock(context.mutex);
         report_input(context, component, buffer_type, tag, description, reason);
+        if (audit_enabled.load(std::memory_order_relaxed))
+            if (auto *entry = context.admission.note(engine.frame, engine.viewport, GetTickCount64()))
+                entry->reasons |= mgpu::admission::invalid_descriptor;
         resource->Release();
         return;
     }
@@ -605,6 +656,7 @@ void capture(void *command_pointer, unsigned buffer_type, const tagged_resource 
         context.viewport_known = true;
     }
     const bool newer = !context.delivered || newer_frame(key.frame, context.last_delivered.frame);
+    bool reserved_tuple = false;
     if (!context.failed && matching_adapter && context.viewport == key.viewport && newer)
     {
         bool reserved = false;
@@ -612,17 +664,30 @@ void capture(void *command_pointer, unsigned buffer_type, const tagged_resource 
             if (frame.state.serial != 0 && frame.state.key == key)
             {
                 reserved = frame.state.leased || frame.state.release_command != 0;
+                reserved_tuple = reserved;
                 if (!reserved) selected = &frame;
                 break;
             }
         if (selected == nullptr && !reserved)
-            for (auto &frame : context.frames)
-                if (context.depth_converter.complete(frame.normalization) && (frame.state.reclaimable(done) ||
-                    (frame.state.key.viewport == key.viewport &&
-                     newer_frame(key.frame, frame.state.key.frame) &&
-                     key.frame - frame.state.key.frame >= capacity &&
-                     frame.state.abandoned_complete(done))))
+        {
+            for (unsigned pass = 0; pass < 2 && selected == nullptr; ++pass)
+                for (auto &frame : context.frames)
                 {
+                    const bool retired = frame.state.reclaimable(done);
+                    const bool stale_complete = frame.state.recorded() && context.delivered &&
+                        frame.state.key.viewport == key.viewport &&
+                        !newer_frame(frame.state.key.frame, context.last_delivered.frame) &&
+                        frame.state.abandoned_complete(done);
+                    const bool incomplete_age = !frame.state.recorded() &&
+                        frame.state.key.viewport == key.viewport &&
+                        newer_frame(key.frame, frame.state.key.frame) &&
+                        key.frame - frame.state.key.frame >= capacity &&
+                        frame.state.abandoned_complete(done);
+                    if (!context.depth_converter.complete(frame.normalization) ||
+                        (pass == 0 ? !retired : !(incomplete_age || stale_complete))) continue;
+                    if (audit_enabled.load(std::memory_order_relaxed) && frame.state.serial != 0 && frame.state.release_command == 0)
+                        if (auto *entry = context.admission.note(frame.state.key.frame, frame.state.key.viewport, GetTickCount64()))
+                            entry->reasons |= pass == 1 ? (stale_complete ? mgpu::admission::stale_complete_reclaimed : mgpu::admission::incomplete_reclaimed) : 0u;
                     collect_timing(context, frame);
                     frame.state = {};
                     frame.state.key = key;
@@ -631,8 +696,22 @@ void capture(void *command_pointer, unsigned buffer_type, const tagged_resource 
                     selected = &frame;
                     break;
                 }
+        }
     }
-    if (selected == nullptr) ++context.held;
+    if (selected == nullptr)
+    {
+        ++context.held;
+        if (audit_enabled.load(std::memory_order_relaxed))
+            if (auto *entry = context.admission.note(key.frame, key.viewport, GetTickCount64()))
+            {
+                ++entry->held_calls;
+                entry->reasons |= context.failed ? mgpu::admission::failed_context :
+                    !matching_adapter ? mgpu::admission::wrong_device :
+                    context.viewport != key.viewport ? mgpu::admission::wrong_viewport :
+                    !newer ? mgpu::admission::already_delivered :
+                    reserved_tuple ? mgpu::admission::reserved_tuple : mgpu::admission::no_capture_slot;
+            }
+    }
     else if (selected->state.commands[component] == 0)
     {
         auto *record = record_command(context, command);
@@ -665,10 +744,18 @@ void capture(void *command_pointer, unsigned buffer_type, const tagged_resource 
             std::swap(transition.Transition.StateBefore, transition.Transition.StateAfter);
             if (transition_source) command->ResourceBarrier(1, &transition);
             selected->state.commands[component] = record->serial;
+            if (audit_enabled.load(std::memory_order_relaxed))
+                if (auto *entry = context.admission.note(key.frame, key.viewport, GetTickCount64()))
+                    entry->recorded |= 1u << component;
             if (component == 1) selected->depth_region = tag;
             selected->capture_timing[component].end(command);
         }
-        else reject(context, "command tracking or staging allocation failed");
+        else {
+            if (audit_enabled.load(std::memory_order_relaxed))
+                if (auto *entry = context.admission.note(key.frame, key.viewport, GetTickCount64()))
+                    entry->reasons |= mgpu::admission::allocation_failed;
+            reject(context, "command tracking or staging allocation failed");
+        }
     }
     device->Release();
     resource->Release();
@@ -684,6 +771,80 @@ void set_ready_dispatch(bool enabled)
     mgpu::diag::info(enabled
         ? "[MGPU][M342-DISPATCH] color_ready=1; worker event wake; all GPU dependencies retained; performance unverified"
         : "[MGPU][M342-DISPATCH] color_ready=0; original prequeue route");
+}
+
+void poll_admission_audit()
+{
+    const auto now = GetTickCount64();
+    auto previous = audit_poll_ms.load(std::memory_order_relaxed);
+    const bool check_trigger = now < previous || now - previous >= 1000;
+    if (!audit_flushing.load(std::memory_order_relaxed) && !check_trigger) return;
+    bool poll_file = false;
+    if (check_trigger) poll_file = audit_poll_ms.compare_exchange_strong(previous, now);
+    std::uint64_t token = 0;
+    if (poll_file)
+    {
+        wchar_t path[32768]{};
+        const auto length = GetModuleFileNameW(mgpu::module_handle(), path, 32768);
+        auto *separator = length && length < 32768 ? wcsrchr(path, L'\\') : nullptr;
+        if (separator) {
+            separator[1] = L'\0';
+            WIN32_FILE_ATTRIBUTE_DATA attributes{};
+            if (wcscat_s(path, L"nte-admission-diagnostic.trigger") == 0 && GetFileAttributesExW(path, GetFileExInfoStandard, &attributes)) {
+                ULARGE_INTEGER stamp{}, wall{};
+                stamp.LowPart = attributes.ftLastWriteTime.dwLowDateTime;
+                stamp.HighPart = attributes.ftLastWriteTime.dwHighDateTime;
+                FILETIME clock{};
+                GetSystemTimeAsFileTime(&clock);
+                wall.LowPart = clock.dwLowDateTime;
+                wall.HighPart = clock.dwHighDateTime;
+                if (wall.QuadPart >= stamp.QuadPart && wall.QuadPart - stamp.QuadPart <= 300000000ull)
+                    token = stamp.QuadPart;
+            }
+        }
+    }
+    auto &context = data();
+    std::array<mgpu::admission::row, 8> rows{};
+    unsigned count = 0, total = 0, overflow = 0;
+    std::uint64_t capture_token = 0;
+    bool started = false, ended = false;
+    {
+        std::lock_guard<std::mutex> lock(context.mutex);
+        context.admission.active(now);
+        if (token) started = context.admission.begin(token, now);
+        const bool active = context.admission.active(now);
+        audit_enabled.store(active, std::memory_order_relaxed);
+        const bool was_flushing = context.admission.flushing();
+        while (count < rows.size() && context.admission.pop(rows[count])) ++count;
+        audit_flushing.store(context.admission.flushing(), std::memory_order_relaxed);
+        ended = was_flushing && !context.admission.flushing();
+        capture_token = context.admission.token();
+        total = context.admission.count();
+        overflow = context.admission.overflow();
+    }
+    if (started) {
+        char line[240];
+        snprintf(line, sizeof line, "[MGPU][NTE-ADMISSION-BEGIN] token=%llu max_ms=20000 max_source_frames=2048; CPU-only identity/rejection audit, original queues and fences retained",
+            static_cast<unsigned long long>(capture_token));
+        mgpu::diag::info(line);
+    }
+    for (unsigned index = 0; index < count; ++index) {
+        const auto &entry = rows[index];
+        char line[600];
+        snprintf(line, sizeof line,
+            "[MGPU][NTE-ADMISSION] token=%llu frame=%u viewport=%u seen=0x%x recorded=0x%x reasons=0x%x held_calls=%u constants_seen=%u constants_valid_seen=%u acquired=%u delivered=%u seal=%llu first_ms=%llu last_ms=%llu",
+            static_cast<unsigned long long>(capture_token), entry.frame, entry.viewport, entry.seen, entry.recorded,
+            entry.reasons, entry.held_calls, unsigned(entry.constants_seen), unsigned(entry.constants_valid_seen),
+            unsigned(entry.acquired), unsigned(entry.delivered), static_cast<unsigned long long>(entry.seal),
+            static_cast<unsigned long long>(entry.first_ms), static_cast<unsigned long long>(entry.last_ms));
+        mgpu::diag::info(line);
+    }
+    if (ended) {
+        char line[240];
+        snprintf(line, sizeof line, "[MGPU][NTE-ADMISSION-END] token=%llu unique_source_frames=%u overflow_events=%u; transient waits are not dropped frames",
+            static_cast<unsigned long long>(capture_token), total, overflow);
+        mgpu::diag::info(line);
+    }
 }
 
 HANDLE dispatch_event()
@@ -756,7 +917,18 @@ bool acquire(lease &result)
         const auto &constants = context.constants[frame.state.key.frame % context.constants.size()];
         if (!frame.state.schedulable() || !constants.valid || !(constants.key == frame.state.key) ||
             frame.normalization.serial != frame.state.serial || frame.normalization.value == 0 ||
-            frame.normalization.value == UINT64_MAX) selected = capacity;
+            frame.normalization.value == UINT64_MAX)
+        {
+            if (audit_enabled.load(std::memory_order_relaxed))
+                if (auto *entry = context.admission.note(frame.state.key.frame, frame.state.key.viewport, GetTickCount64()))
+                {
+                    if (!frame.state.schedulable()) entry->reasons |= mgpu::admission::missing_submission;
+                    if (!constants.valid || !(constants.key == frame.state.key)) entry->reasons |= mgpu::admission::missing_constants;
+                    if (frame.normalization.serial != frame.state.serial || frame.normalization.value == 0 || frame.normalization.value == UINT64_MAX)
+                        entry->reasons |= mgpu::admission::missing_normalization;
+                }
+            selected = capacity;
+        }
     }
     if (selected == capacity)
     {
@@ -801,6 +973,9 @@ bool acquire(lease &result)
         }
         if (finished < ticket.value)
         {
+            if (audit_enabled.load(std::memory_order_relaxed))
+                if (auto *entry = context.admission.note(frame.state.key.frame, frame.state.key.viewport, GetTickCount64()))
+                    entry->reasons |= mgpu::admission::waiting_color;
             context.wake_slot = selected;
             context.wake_serial = frame.state.serial;
             if (!context.wake_failed &&
@@ -827,6 +1002,9 @@ bool acquire(lease &result)
     }
     frame.acquired_ms = timing::cpu_ms(timing::cpu_ticks());
     frame.state.leased = true;
+    if (audit_enabled.load(std::memory_order_relaxed))
+        if (auto *entry = context.admission.note(frame.state.key.frame, frame.state.key.viewport, GetTickCount64()))
+            entry->acquired = true;
     result.slot = selected;
     result.serial = frame.state.serial;
     result.measurement_session = frame.measurement_session;
@@ -860,6 +1038,12 @@ void commit_transfer(lease &source)
     auto &context = data();
     std::lock_guard<std::mutex> lock(context.mutex);
     if (!source || source.slot >= capacity) return;
+    if (audit_enabled.load(std::memory_order_relaxed))
+        if (auto *entry = context.admission.note(source.key.frame, source.key.viewport, GetTickCount64()))
+        {
+            entry->delivered = true;
+            entry->seal = context.frames[source.slot].seal;
+        }
     context.last_delivered = source.key;
     context.delivered = true;
     context.frames[source.slot].state.leased = false;
@@ -932,6 +1116,10 @@ HRESULT submit_transfer(lease &source, ID3D12Resource *seal_upload, UINT64 seal_
         arrival_value, retirement, dependencies, color_arrival, depth_arrival);
     if (FAILED(result))
     {
+        if (audit_enabled.load(std::memory_order_relaxed))
+            if (auto *entry = context.admission.note(source.key.frame, source.key.viewport, GetTickCount64()))
+                entry->reasons |= result == DXGI_ERROR_WAS_STILL_DRAWING
+                    ? mgpu::admission::copy_queue_busy : mgpu::admission::transfer_failed;
         if (result != DXGI_ERROR_WAS_STILL_DRAWING) context.failed = true;
         return result;
     }
@@ -986,6 +1174,12 @@ void capture_constants(const guide_constants &constants)
     auto &context = data();
     std::lock_guard<std::mutex> lock(context.mutex);
     context.constants[constants.key.frame % context.constants.size()] = constants;
+    if (audit_enabled.load(std::memory_order_relaxed))
+        if (auto *entry = context.admission.note(constants.key.frame, constants.key.viewport, GetTickCount64()))
+        {
+            entry->constants_seen = true;
+            entry->constants_valid_seen = entry->constants_valid_seen || constants.valid;
+        }
     static unsigned reports = 0;
     if (reports++ < 4)
     {
@@ -1017,6 +1211,7 @@ std::uint64_t submitted_color_frame()
 
 void stop()
 {
+    mgpu::official_bridge::source_cancel();
     data().active.store(false, std::memory_order_release);
 }
 

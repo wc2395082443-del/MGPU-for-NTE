@@ -1,8 +1,20 @@
 # Release provenance
 
-## Current preview.2 — 2026-10-31
+## Current preview.3 — 2026-11-09
 
-The current source follows the installed source-FG-off main module (`20CF7B73`) and target-200 helper (`118BBCBA`). The main starts from the M364 control-rollback baseline, retains M361 measurement hooks and M363 input isolation/passthrough, and adds guarded source `slDLSSGSetOptions` mode-Off forwarding. It reuses the previously uninstalled M367 option policy, with a new read-only build/tagging guard, and excludes M366's one-shot native CVar setter and M359's plugin CVar takeover. The helper retains the RTX 5080 check and sets official dynamic MFG target 200.
+The production sources match the unified validated measurement-stage3 snapshot, combining the stage2 main with the stage3 helper. The release packages the installed binaries instead of substituting rebuilds. See [changes](PIPELINE-UPDATE.zh-CN.md).
+
+| Current artifact | SHA256 |
+| --- | --- |
+| `nvngx.dll_mgpu_bridge.addon64` | `8ADEAA052261EA7C89DC6AB3137496B13A5A57D3D7B54F3CE98C776737987E48` |
+| `mgpu_official_host.exe` | `446FD26095FCB21EEB446D06F67E18485BCEE3D4C432D6B7A3BBB841C9DE6933` |
+| Supported `HTGame.exe` | `E72655E227E17796D13EDF00F827DDFEBDE9859B3D758858F0FFC82765D84EFE` |
+
+The user confirmed all three measurement-removal stages normal after installation, following login/dual-Pass flicker and latency acceptance. Relevant snapshot checks passed 14 main and 11 helper cases. Publication-only changes adapt the standalone fenced-pipeline test's submission-result arguments and add source/module stubs to aligned-input fixtures; production code matches the snapshot. Complete publication builds passed; main CTest was 69/86 and helper 23/23, with full failure logs retained in BUILD.md's linked evidence. Byte-reproducible rebuilds are not claimed. The failed wholesale-removal binaries, uninstalled serial candidate, other-50-series and Cyberpunk experiments are excluded. Earlier releases remain unchanged.
+
+## Historical preview.2 — 2026-10-31
+
+The preview.2 source followed the installed source-FG-off main module (`20CF7B73`) and target-200 helper (`118BBCBA`). The main starts from the M364 control-rollback baseline, retains M361 measurement hooks and M363 input isolation/passthrough, and adds guarded source `slDLSSGSetOptions` mode-Off forwarding. It reuses the previously uninstalled M367 option policy, with a new read-only build/tagging guard, and excludes M366's one-shot native CVar setter and M359's plugin CVar takeover. The helper retains the RTX 5080 check and sets official dynamic MFG target 200.
 
 | Current artifact | SHA256 |
 | --- | --- |

@@ -8,6 +8,11 @@
 
 namespace mgpu::neural_pipeline
 {
+inline bool parallel_passes_supported(unsigned passes, bool official_output)
+{
+    return passes == 1u || (official_output && passes == 2u);
+}
+
 enum class completion { idle, waiting, ready, failed };
 struct job
 {

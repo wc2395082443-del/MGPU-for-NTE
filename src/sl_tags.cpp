@@ -470,7 +470,8 @@ namespace
     int hook_constants(const void *values, const void *frame, const void *viewport)
     {
         g_constants_calls.fetch_add(1, std::memory_order_relaxed);
-        const auto constants = read_constants(values, read_identity(frame, viewport));
+        const auto identity = read_identity(frame, viewport);
+        const auto constants = read_constants(values, identity);
         const int result = g_real_constants(values, frame, viewport);
         if (result != 0) g_constants_errors.fetch_add(1, std::memory_order_relaxed);
         if (result == 0 && constants.valid) g_constants_valid.fetch_add(1, std::memory_order_relaxed);
@@ -513,10 +514,11 @@ namespace
         const auto original = g_real_source_sleep.load(std::memory_order_acquire);
         if (original == nullptr) return sl::Result::eErrorNotInitialized;
         const bool observe = mgpu::official_bridge::selected();
+        const auto identity = read_identity(&frame, nullptr);
+        if (observe && identity.frame_known) mgpu::official_bridge::source_wait_input(identity.frame);
         const auto begin_ns = observe ? mgpu::official_bridge::source_clock_ns() : 0;
         const auto result = original(frame);
         const auto end_ns = observe ? mgpu::official_bridge::source_clock_ns() : 0;
-        const auto identity = read_identity(&frame, nullptr);
         if (result == sl::Result::eOk && identity.frame_known)
             mgpu::official_bridge::source_sleep(identity.frame, begin_ns, end_ns);
         return result;

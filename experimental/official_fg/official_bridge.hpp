@@ -27,6 +27,10 @@ bool shutdown();
 void set_visible(bool visible);
 status inspect();
 std::uint64_t source_clock_ns();
+void source_submitted(std::uint32_t frame);
+void source_wait_input(std::uint32_t frame);
+void source_cancel();
+void source_completed(std::uint32_t frame);
 void source_sleep(std::uint32_t frame, std::uint64_t native_begin_ns = 0, std::uint64_t native_end_ns = 0);
 void source_marker(std::uint32_t frame, unsigned marker, std::uint64_t native_begin_ns = 0, std::uint64_t native_end_ns = 0);
 }

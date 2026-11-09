@@ -196,7 +196,11 @@ int main()
                 std::array<std::uint64_t, 64> serials{};
                 UINT bytes = sizeof serials[0];
                 require(command->GetPrivateData(command_guid, &bytes, &serials[0]));
-                after_submit(renderer.Get(), serials, 1, mgpu::timing::cpu_ticks());
+                frame_key submitted_frame{};
+                bool submitted_known = false;
+                after_submit(renderer.Get(), serials, 1, mgpu::timing::cpu_ticks(), submitted_frame, submitted_known);
+                check(submitted_known && submitted_frame.frame == engine_frame,
+                    "submission reports the captured source frame");
             }
             if (ready_mode)
             {

@@ -2,7 +2,7 @@
 
 本文对应首发 **M364主模块＋M363 `mgpu_official_host.exe`**。helper接到的是5080已经处理好的NR画面及其同帧引导；游戏场景渲染和NR处理在上游完成。
 
-当前preview.2在M363输入修复基础上使用helper118BBCBA，官方动态FG目标200；主20CF7B73将4080S源FG模式转Off。**5080继续执行NR后的官方FG**。本文线程/资源/输入机制保留；新状态和验收范围见[新版说明](SOURCE-FG-OFF.zh-CN.md)。其他50系兼容候选未合入此发布，历史表格保留原版本身份。
+当前 **preview.3 使用主8ADEAA05＋helper446FD260**，5080仍执行NR后的NVIDIA官方FG，动态目标200。新增拍照／菜单源标记恢复、旧输出过期保护、源端并行背压和双Pass异步。本文下方历史版本名与性能表保留原身份；当前变化见[更新说明](PIPELINE-UPDATE.zh-CN.md)。其他50系候选未合入。
 
 ## 1. 为什么需要独立进程
 
@@ -63,7 +63,7 @@ helper完成共享输入到私有资源的复制后即可归还共享槽。私�
 
 helper加载并校验NVIDIA签名的Streamline模块，启用DLSS-G、Reflex、PCL。在5080建立代理device/factory/queue/swapchain，使用真实源帧token、正确常量和资源标签，调用官方代理 `Present(0,0)`。
 
-按当前策略，2–5倍使用固定模式，6倍选择官方**动态MFG**；`dynamicTargetFrameRate=0`由SDK结合显示器策略选择目标。实际生成数量随SDK策略调整；能力不满足时返回错误。
+按当前策略，2–5倍使用固定模式，6倍选择官方**动态MFG**；`dynamicTargetFrameRate=200`为当前目标。实际生成数量随SDK策略调整；能力不满足时返回错误。
 
 **官方SDK负责生成和呈现节拍。** `numFramesActuallyPresented`提供SDK呈现计数，输入处理完成fence用于资源退休。“FG后缓存一组六帧，再均匀送屏”仍在开发计划中，需要增加生成输出的接管路径。
 
@@ -73,7 +73,7 @@ helper加载并校验NVIDIA签名的Streamline模块，启用DLSS-G、Reflex、P
 
 它保留与三槽相关源帧的历史标记，避免源帧在NR/跨卡阶段延后时，标记已被新帧滚动覆盖。进入呈现前要求对应真实Simulation就绪；缺失时超时失败，不靠补造时间戳继续。
 
-M364源Sleep中继会等待helper完成相应串行号，并设置超时；呈现队列和私有资源也有安全等待。这些反馈可能反压上游。当前source age记录从捕获到代理Present返回的时间，端到端输入延迟测量仍待补充。
+M364源Sleep中继会等待helper完成相应串行号，并设置超时；呈现队列和私有资源也有安全等待。这些反馈可能反压上游。历史source age从捕获到代理Present返回计时；当前关闭该纯统计，端到端输入延迟数值尚未测量。
 
 ## 6. 线程分工
 
@@ -82,7 +82,7 @@ M364源Sleep中继会等待helper完成相应串行号，并设置超时；呈�
 | helper主呈现循环 | 按序接收metadata、检查源标记、准备资源、提交官方Present、更新指标 |
 | source relay线程 | 消费源标记、调用源关联Reflex Sleep/PCL、维护源历史并回报完成 |
 | 输出UI线程 | 窗口消息、位置/DPI/前台可见性；与可能阻塞的Present分开 |
-| 诊断写出线程 | 在启用对应采样时后台写CPU阶段/流水线记录 |
+| 诊断写出线程 | 历史诊断版按事件写记录；当前发布不创建该线程、采集事件或追踪数组 |
 
 事件和fence协调数据、资源与停止流程。UI线程约16ms检查一次窗口消息；生成帧节拍由官方SDK管理。
 
@@ -96,16 +96,11 @@ UI线程跟随原游戏客户区位置和DPI；原游戏可见、非最小化、
 
 ## 8. 计数、浮层与测量
 
-helper每秒更新源Present数量、SDK报告数量、倍率比、可见状态和source age，通过共享通道提供给主面板；可见窗口与后台窗口分开记录。自带画面角标已移除，保留第三方RTSS只挂helper的方案；主游戏/启动链的RTSS排除由用户配置，本程序不自动全局改动。
+当前helper以 `MGPU_HELPER_NO_TRACE=1` 编译，关闭可选追踪数组／事件／写入线程／CSV和二进制输出、阶段计时、source age和纯帧率统计。主面板部分统计字段因此不再更新。第三方RTSS仍可只挂helper；本程序不自动改动全局RTSS配置。
 
-| 指标 | 定义 | 测量终点 |
-| --- | --- | --- |
-| `real_presents` / source rate | helper处理的真实NR源帧数量和速率 | helper呈现调用 |
-| `sdk_presents` / SDK rate | SDK自报呈现数量和速率 | SDK状态查询 |
-| source age | 原捕获时间到代理Present返回的年龄 | 代理Present返回 |
-| PresentMon显示事件 | OS呈现路径及变化间隔 | 系统显示事件；生成/真实帧分类取决于驱动支持 |
+官方Present和SDK状态查询仍执行。SDK返回的输入处理完成fence负责资源退休，实际Present结果和SDK计数仍供输出存活保护使用；源标记、heartbeat、超时、错误日志及必要状态继续工作。主模块MetaProbe、PresentAudit、PanelStats和部分计数／日志尚保留。
 
-CPU阶段trace和流水线记录由对应事件触发；常驻计时与日志持续运行。性能记录会注明详细采集是否开启，M364的120秒记录属于重采集窗口。
+历史性能表中的source／SDK速率及source age来自当时启用测量的构建。当前发布不再提供原详细GPU／CPU流水线采集，需要诊断构建才能重采。
 
 ## 9. 生命周期与出错保护
 

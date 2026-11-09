@@ -4,6 +4,8 @@
 #include "shared_frame_transport.hpp"
 #include "output_window.hpp"
 #include "output_trace.hpp"
+#include "startup_source_policy.hpp"
+#include "output_liveness.hpp"
 #include <thread>
 #include <atomic>
 #include <cstdio>
@@ -22,6 +24,7 @@ void require(bool condition, const char *message)
 
 std::uint64_t clock_ns()
 {
+    if constexpr (!helper_measurements) return 0;
     static const auto frequency = [] { LARGE_INTEGER value{}; QueryPerformanceFrequency(&value); return value.QuadPart; }();
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
@@ -72,8 +75,8 @@ struct source_relay
                     require(written >= consumed && written - consumed <= marker_capacity, "source marker ring overflow");
                     const source_marker marker = channel.markers[consumed % marker_capacity];
                     require(marker.serial == static_cast<std::uint64_t>(consumed + 1), "source marker serial mismatch");
-                    const auto operation_start = GetTickCount64();
-                    if (marker.serial <= 15) std::printf("[M349-SOURCE] begin serial=%llu frame=%u kind=%u\n",
+                    const auto operation_start = helper_measurements ? GetTickCount64() : 0;
+                    if (helper_measurements && marker.serial <= 15) std::printf("[M349-SOURCE] begin serial=%llu frame=%u kind=%u\n",
                         static_cast<unsigned long long>(marker.serial), marker.frame, marker.kind);
                     bool accepted = false;
                     source_history updated;
@@ -102,14 +105,15 @@ struct source_relay
                             std::lock_guard<std::mutex> lock(history_mutex);
                             refresh_retention();
                             require(history.note(marker.frame, marker.kind), "real source marker commit lost ordering");
-                            require(history.record_timing(marker.frame, marker.kind, timing), "source timing identity lost");
+                            if (helper_measurements)
+                                require(history.record_timing(marker.frame, marker.kind, timing), "source timing identity lost");
                         }
                     }
                     if (marker.kind == sleep_marker) {
                         InterlockedExchange64(&channel.sleep_completed, marker.serial);
                         SetEvent(channel_handle(channel.sleep_event));
                     }
-                    if (marker.serial <= 15) std::printf("[M349-SOURCE] end serial=%llu accepted=%u elapsed_ms=%llu\n",
+                    if (helper_measurements && marker.serial <= 15) std::printf("[M349-SOURCE] end serial=%llu accepted=%u elapsed_ms=%llu\n",
                         static_cast<unsigned long long>(marker.serial), accepted ? 1u : 0u,
                         static_cast<unsigned long long>(GetTickCount64() - operation_start));
                     InterlockedExchange64(&channel.markers_read, ++consumed);
@@ -131,6 +135,11 @@ struct source_relay
     {
         std::lock_guard<std::mutex> lock(history_mutex);
         return history.bits(frame);
+    }
+    unsigned cached_owner(unsigned frame)
+    {
+        std::lock_guard<std::mutex> lock(history_mutex);
+        return history.cached_frame(frame);
     }
     source_reflex_timing timing(unsigned frame)
     {
@@ -187,6 +196,11 @@ public:
         }
     }
     ~presenter() { if (event_) CloseHandle(event_); }
+    void discard_unpresented(const frame_packet &packet)
+    {
+        require_hr(transport_.wait_ready(runtime_.queue(), packet.sequence), "unpresented export fence wait");
+        require_hr(transport_.signal_released(runtime_.queue(), packet.sequence), "release unpresented slot after export completion");
+    }
     double present(const frame_packet &packet, official_channel &channel, bool first, output_frame_trace &trace, bool measure_present)
     {
         auto &slot = slots_[slot_for(packet.sequence)];
@@ -261,8 +275,8 @@ public:
         InterlockedIncrement64(&channel.real_presents);
         InterlockedAdd64(&channel.sdk_presents, fg.numFramesActuallyPresented);
         InterlockedExchange64(&channel.last_source_frame, packet.color_frame);
-        if (result == S_OK && fg.numFramesActuallyPresented > 0) InterlockedExchange(&channel.presenting, 1);
         trace.mark(output_stage::finished);
+        if constexpr (!helper_measurements) return 0;
         LARGE_INTEGER now{}, frequency{};
         QueryPerformanceCounter(&now);
         QueryPerformanceFrequency(&frequency);
@@ -328,17 +342,24 @@ int run(official_channel &channel, const std::filesystem::path &directory)
     presenter output(runtime, transport);
     const auto trace_path = logs / L"output-stages.csv";
     output_trace trace(trace_path);
-    std::printf("[M356] helper render markers bracket actual import submission; native simulation retained; built-in output OSD removed; CPU-stage trace: %ls; trigger required, limit=%u frames, not GPU execution times\n",
+    if (helper_measurements) std::printf("[M356] helper render markers bracket actual import submission; native simulation retained; built-in output OSD removed; CPU-stage trace: %ls; trigger required, limit=%u frames, not GPU execution times\n",
         trace_path.c_str(), output_trace::capacity);
+    else std::printf("[NTE-STAGE3] diagnostic trace and rate collection disabled; official FG, source relay, retirement fences and freshness retained\n");
     source_relay source(channel, runtime);
     source.start();
     consumer_schedule schedule(channel.manifest.generation);
     InterlockedExchange(&channel.maximum_multiplier, runtime.maximum_multiplier());
     InterlockedExchange(&channel.state, static_cast<LONG>(host_state::ready));
     std::uint64_t next = 1;
+    unsigned startup_skipped = 0;
+    std::uint64_t source_gaps = 0;
+    bool first_present = true;
+    std::printf("[NTE-STARTUP-SOURCE] cold-start expired-source recovery enabled; real source timing required; SDK pacing unchanged\n");
     const auto started = GetTickCount64();
     auto last_heartbeat_log = started;
     rate_meter metrics;
+    output_liveness output_health;
+    bool output_was_fresh = false;
     std::int64_t input_poll_wait_ticks = 0;
     try {
         while (WaitForSingleObject(channel_handle(channel.stop_event), 0) == WAIT_TIMEOUT &&
@@ -352,11 +373,21 @@ int run(official_channel &channel, const std::filesystem::path &directory)
                     read_atomic(channel.markers_read), read_atomic(channel.markers_written), read_atomic(channel.marker_failures));
                 last_heartbeat_log = GetTickCount64();
             }
-            window.update(parent, read_atomic(channel.visible) != 0 && read_atomic(channel.real_presents) > 0);
+            const bool output_fresh = output_health.visible(GetTickCount64());
+            if (!output_fresh) {
+                InterlockedExchange(&channel.presenting, 0);
+                if (output_was_fresh) {
+                    first_present = true;
+                    std::printf("[NTE-OUTPUT-STALE] last_sequence=%llu; native/NR fallback until fresh complete sources recover\n",
+                        static_cast<unsigned long long>(output_health.sequence()));
+                }
+            }
+            output_was_fresh = output_fresh;
+            window.update(parent, read_atomic(channel.visible) != 0 && output_fresh, output_health.expires_ms());
             const bool visible_output = read_atomic(channel.visible) != 0 && IsWindowVisible(parent) &&
                 GetForegroundWindow() == GetAncestor(parent, GA_ROOT);
             rate_snapshot sample{};
-            if (metrics.update(GetTickCount64(), read_atomic(channel.real_presents), read_atomic(channel.sdk_presents), visible_output, sample)) {
+            if (helper_measurements && metrics.update(GetTickCount64(), read_atomic(channel.real_presents), read_atomic(channel.sdk_presents), visible_output, sample)) {
                 publish_metrics(channel.current_metrics, sample);
                 if (sample.visible && sample.valid) publish_metrics(channel.last_visible_metrics, sample);
             }
@@ -367,9 +398,9 @@ int run(official_channel &channel, const std::filesystem::path &directory)
                 HANDLE waits[] = {channel_handle(channel.frames_event), channel_handle(channel.stop_event),
                     channel_handle(channel.parent_process)};
                 LARGE_INTEGER wait_begin{}, wait_end{};
-                QueryPerformanceCounter(&wait_begin);
+                if (helper_measurements) QueryPerformanceCounter(&wait_begin);
                 MsgWaitForMultipleObjects(3, waits, FALSE, 4, QS_ALLINPUT);
-                QueryPerformanceCounter(&wait_end);
+                if (helper_measurements) QueryPerformanceCounter(&wait_end);
                 input_poll_wait_ticks += wait_end.QuadPart - wait_begin.QuadPart;
                 continue;
             }
@@ -390,11 +421,39 @@ int run(official_channel &channel, const std::filesystem::path &directory)
                 WaitForSingleObject(channel_handle(channel.stop_event), 1) == WAIT_TIMEOUT) {}
             if (!source.simulation_ready(packet.color_frame)) {
                 source.diagnose(packet.color_frame, next);
+                const auto cached_owner = source.cached_owner(packet.color_frame);
+                if (!read_atomic(channel.marker_failures) &&
+                    startup_source_expired(packet.color_frame, cached_owner, marker_history,
+                        static_cast<std::uint64_t>(read_atomic(channel.real_presents)), startup_skipped, GetTickCount64() - started))
+                {
+                    output.discard_unpresented(packet);
+                    require(schedule.release(next), "ordered expired startup release");
+                    ++startup_skipped;
+                    std::printf("[NTE-STARTUP-SOURCE] skipped=%u sequence=%llu source=%u cached_owner=%u; export-ready then release on original queue, no FG/Present or fabricated markers\n",
+                        startup_skipped, static_cast<unsigned long long>(next), packet.color_frame, cached_owner);
+                    ++next;
+                    continue;
+                }
                 std::printf("[M349-SOURCE] incomplete frame=%u bits=0x%x written=%lld read=%lld failures=%ld stop=%lu\n",
                     packet.color_frame, source.bits(packet.color_frame), read_atomic(channel.markers_written),
                     read_atomic(channel.markers_read), read_atomic(channel.marker_failures),
                     WaitForSingleObject(channel_handle(channel.stop_event), 0));
-                throw std::runtime_error("missing real source simulation markers");
+                require(!read_atomic(channel.marker_failures), "source Reflex relay timed out or overflowed");
+                const DWORD stopped = WaitForSingleObject(channel_handle(channel.stop_event), 0);
+                if (stopped == WAIT_OBJECT_0) break;
+                require(stopped == WAIT_TIMEOUT, "source recovery stop event failed");
+                InterlockedExchange(&channel.presenting, 0);
+                output_health.invalidate();
+                window.update(parent, false);
+                output.discard_unpresented(packet);
+                require(schedule.release(next), "ordered incomplete source release");
+                first_present = true;
+                ++source_gaps;
+                std::printf("[NTE-SOURCE-GAP] skipped=%llu sequence=%llu source=%u bits=0x%x; NR fallback, export fence retained, next complete source resets FG history\n",
+                    static_cast<unsigned long long>(source_gaps), static_cast<unsigned long long>(next),
+                    packet.color_frame, source.bits(packet.color_frame));
+                ++next;
+                continue;
             }
             const unsigned wanted = static_cast<unsigned>(read_atomic(channel.multiplier));
             if (wanted != multiplier) {
@@ -402,11 +461,20 @@ int run(official_channel &channel, const std::filesystem::path &directory)
                 multiplier = wanted;
             }
             frame.requested = wanted;
-            frame.reflex = source.timing(packet.color_frame);
+            if (helper_measurements) frame.reflex = source.timing(packet.color_frame);
             frame.source_pings = static_cast<std::uint64_t>(read_atomic(channel.source_pings));
             frame.mark(output_stage::markers_ready);
             if (next <= 3) source.diagnose(packet.color_frame, next);
-            metrics.source_age(output.present(packet, channel, next == 1, frame, trace.pipeline_requested()));
+            const bool recovering_source = first_present && source_gaps != 0;
+            const auto source_age = output.present(packet, channel, first_present, frame, trace.pipeline_requested());
+            if (helper_measurements) metrics.source_age(source_age);
+            if (frame.present_result == S_OK && frame.sdk_reported > 0)
+                output_health.complete(packet.sequence, GetTickCount64());
+            InterlockedExchange(&channel.presenting, output_health.visible(GetTickCount64()) ? 1 : 0);
+            if (recovering_source)
+                std::printf("[NTE-SOURCE-RESUMED] skipped=%llu sequence=%llu source=%u; complete real simulation and reset first FG Present\n",
+                    static_cast<unsigned long long>(source_gaps), static_cast<unsigned long long>(next), packet.color_frame);
+            first_present = false;
             trace.record(frame);
             require(schedule.release(next), "ordered private-copy release");
             ++next;

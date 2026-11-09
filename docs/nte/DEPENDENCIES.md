@@ -4,7 +4,7 @@ Our code retains the upstream MIT license. ReShade header notices, ImGui notices
 
 ## Included in the binary release
 
-- M364 bridge add-on and M363 output helper compiled from the published source lineage.
+- Preview.3 main 8ADEAA05 and helper 446FD260, using the installed user-confirmed artifacts and their published source lineage.
 - The project's `mgpu_depth_tap.fx`, configuration templates, installation/rollback and local runtime-import scripts, hashes and licenses.
 
 ## Supplied by the user
@@ -22,6 +22,6 @@ NVIDIA runtime/model binaries are excluded from both Git and this release, follo
 
 ## Hardware/build restrictions
 
-M363 currently requires `NVIDIA GeForce RTX 5080` as its neural/output adapter. The tested primary GPU is RTX 4080 SUPER. Other GPU combinations need adaptation and testing. Some hooks validate the game build, so game updates may also require changes.
+The current helper requires `NVIDIA GeForce RTX 5080` as its neural/output adapter. The tested primary GPU is RTX 4080 SUPER. Other GPU combinations need adaptation and testing. Some hooks validate the game build, so game updates may also require changes.
 
-The [RTX 50-series compatibility candidate](RTX50-COMPAT.zh-CN.md) is archived separately and is not included in preview.2 source or binaries. Preview.2 uses main20CF7B73/helper118BBCBA with the same pinned NVIDIA runtime requirements, RTX 5080 helper check and game-build restrictions.
+The [RTX 50-series compatibility candidate](RTX50-COMPAT.zh-CN.md) is archived separately and is not included in preview.3 source or binaries. Preview.3 uses main8ADEAA05/helper446FD260 with the same pinned NVIDIA runtime requirements, RTX 5080 helper check and game-build restrictions.

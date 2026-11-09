@@ -6,9 +6,9 @@ An experimental Neverness to Everness adaptation of [Neural Coprocessor](https:/
 
 The RTX 4080 SUPER renders the game and runs its game-side DLSS super resolution. The RTX 5080 receives matched color/depth/motion/camera inputs, runs neural rendering, and uses an independent Streamline/Reflex/PCL process for frame generation and presentation. This release targets the tested NTE build and **GeForce RTX 5080 helper**.
 
-The current [source-FG-off preview](https://github.com/wc2395082443-del/MGPU-for-NTE/releases/tag/nte-source-fg-off-preview.2) uses main `20CF7B73` and helper `118BBCBA`. **The RTX 4080 SUPER's game-process frame generation is switched off; the RTX 5080 runs NVIDIA official frame generation after NR, with up to a sixfold request.** The separate [RTX 50-series compatibility candidate](docs/nte/RTX50-COMPAT.zh-CN.md) is not included; this helper accepts RTX 5080.
+The current [pipeline preview.3](https://github.com/wc2395082443-del/MGPU-for-NTE/releases/tag/nte-pipeline-preview.3), dated 2026-11-09, uses user-confirmed main `8ADEAA05` and helper `446FD260`. **The RTX 4080 SUPER's game-process frame generation is switched off; the RTX 5080 runs NVIDIA official frame generation after NR, with up to a sixfold request.** The separate [RTX 50-series compatibility candidate](docs/nte/RTX50-COMPAT.zh-CN.md) is not included; this helper accepts RTX 5080.
 
-The source SDK was observed Off in the foreground while NR and helper output continued. A new GPU window showed COPY/DIRECT query overlap, but its helper visibility was zero and SDK count was one per source frame. Foreground sixfold GPU/performance acceptance is still pending. See [implementation and validation](docs/nte/SOURCE-FG-OFF.zh-CN.md); historical FPS figures below retain their original scope.
+This update adds three-credit parallel backpressure, capacity waiting before native Reflex Sleep, asynchronous official dual-Pass NR, photo/menu recovery, stale-overlay expiry and staged optional instrumentation removal. The user confirmed login/dual-Pass flicker resolved, low latency, and normal operation after all three removal stages. See [changes and validation](docs/nte/PIPELINE-UPDATE.en.md); historical FPS figures below retain their original scope.
 
 **Sixfold frame generation uses NVIDIA's official DLSS Frame Generation runtime through Streamline/DLSS-G, rather than Lossless Scaling. The user's latest feedback describes the visual result as excellent.** This project connects the NR image and guides to that runtime and manages the output window.
 
@@ -63,7 +63,7 @@ Historical unique neural completions increased from **26.699/s to 33.451/s (~25.
 
 Sixfold requests up to five generated frames per real frame. Visible pacing and latency remain areas for improvement. Post-generation buffering of six completed images is planned. M365 was withdrawn; M366/M367 experiments remain separate.
 
-This revision passed 77 main + 20 helper cases locally. [Preview.2 hosted CI](https://github.com/wc2395082443-del/MGPU-for-NTE/actions/runs/41129943140) compiled successfully and passed 76/77 main cases; the existing `mgpu_nonblocking_fine_capacity_warp_test` hit its asynchronous GPU-drain timeout, stopping before helper tests. New source-FG option, guard and wiring cases passed. The preview retains this known limitation without weakening the stress test.
+The validated snapshot passed 14 main + 11 helper focused cases. Publication validation and historical hosted-CI limitations are recorded in [BUILD.md](docs/nte/BUILD.md). No new controlled FPS or end-to-end latency measurement was made. Some functional counters/logs remain; optional helper trace and pure rate statistics are disabled, so some panel fields no longer update. External RTSS can still monitor the helper.
 
 ![Before and after, five measured cycles on one scale](docs/nte/figures/five-frame-comparison.svg)
 
@@ -77,6 +77,6 @@ The transport change allows color reception while the producer is still sending 
 
 The release ZIP contains our bridge/helper binaries, example configuration, shader, integrity checks, backup/rollback installer and local runtime import tool. NVIDIA runtime/model binaries, ReShade and game assets are **not redistributed**. Supply the matching dependencies from your own installation; see [dependencies](docs/nte/DEPENDENCIES.md).
 
-Tested game EXE SHA256: `032EB661CE65E0669FB643A2E87E727D5574BBA832CD6FE34FF0AB1D134CD788`. Some integration routes use build-specific guards. The project loads through ReShade; compatibility depends on the game build and its anti-cheat policy.
+Tested game EXE SHA256: `E72655E227E17796D13EDF00F827DDFEBDE9859B3D758858F0FFC82765D84EFE`. Some integration routes use build-specific guards. The project loads through ReShade; compatibility depends on the game build and its anti-cheat policy.
 
 MIT license and upstream attribution are retained. Maintained by [wc2395082443-del](https://github.com/wc2395082443-del). Exact source/binary provenance and test limits are documented in [PROVENANCE.md](docs/nte/PROVENANCE.md).
