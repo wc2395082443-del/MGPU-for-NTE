@@ -1,0 +1,12 @@
+{
+  "MainBuildExit": 1,
+  "MainFullTestExit": null,
+  "HelperFullTestExit": 0,
+  "focused_main": 13,
+  "focused_helper": 12,
+  "full_helper": 24,
+  "complete_main_suite_run": false,
+  "accepted_main": "B09CA7B12A3B23069FFB35DDB9F08D8684239DBAFDFEBB486E78EEAFA7922BF0",
+  "accepted_helper": "E172D87654241079991C3D8766BDCE66B7B763235720703EAA1F3B1DD3B0A767",
+  "user_feedback": "保持流畅，延迟明显降低"
+}

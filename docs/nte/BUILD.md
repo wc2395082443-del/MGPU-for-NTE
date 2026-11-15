@@ -1,6 +1,23 @@
 # Build and verify
 
-## Current preview.3 (2026-11-09)
+## Current preview.4 (2026-11-16)
+
+Production matches accepted B09C/E172 sources. Publication rebuilds use active main measurement backends and helper `MGPU_FG_GPU_AUDIT=ON`; accepted binary hashes are pinned in PROVENANCE.md. Rebuilds may differ and do not replace the accepted files.
+
+```powershell
+./scripts/Fetch-Dependencies.ps1
+./scripts/Build-Lifecycle.ps1
+```
+
+Focused publication checks cover lifecycle reservation, two-frame engine submission lag, timeout recovery, explicit disable, source FG guarding, dual-Pass, serial negative control, NR preset hints, actual Streamline route and FG timestamp readback. The helper synthetic foreground test used during development is excluded from the shipped helper. Complete legacy suites and focused tests have separate results under evidence/preview4; previous failures below remain historical records.
+
+Publication result: both production targets build; focused main **13/13**, focused helper **12/12**, complete helper **24/24** pass. Attempting the complete main build stops at the legacy `mgpu_gpu_measurement_disabled_test` static assertion that requires GPU timestamps disabled, while this preview deliberately enables them. The complete main suite was therefore not run and is not claimed passing. The original failure output is preserved alongside the focused success log. No legacy assertion was removed.
+
+Installer fixtures pass validation-only, install, configuration preservation, rollback, external-change rejection, corrupted-payload rejection and path containment. ZIP CRC and exact accepted payload hashes are checked. Browser checks cover the published single-file viewer, real FG lanes,5/10/20 frames, desktop/mobile and absence of external requests.
+
+Five-frame evidence is exported with scripts/Publish-Lifecycle-Evidence.py from sealed captures. Actual selection contains capture time5.000s. The current HTML is self-contained; full raw ETLs remain locally archived, while compact windows, summaries and source-batch/display identity evidence are published.
+
+## Historical preview.3 (2026-11-09)
 
 Production sources match the validated measurement-stage3 snapshot: stage2 main `8ADEAA05` plus stage3 helper `446FD260`. The release distributes those exact installed artifacts. Rebuild output can differ in compiler paths, PE metadata and optimization output.
 

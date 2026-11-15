@@ -6,6 +6,9 @@
 #include "fg_mode_policy.hpp"
 #include <cstdio>
 #include <stdexcept>
+#ifdef MGPU_FG_GPU_AUDIT
+#include "fg_gpu_audit.hpp"
+#endif
 
 namespace mgpu::official_fg
 {
@@ -88,6 +91,9 @@ void official_runtime::initialize(const std::filesystem::path &runtime, const st
     const auto set_device = exported<PFun_slSetD3DDevice>(module_, "slSetD3DDevice");
     const auto supported = exported<PFun_slIsFeatureSupported>(module_, "slIsFeatureSupported");
     const auto upgrade_interface = exported<PFun_slUpgradeInterface>(module_, "slUpgradeInterface");
+#ifdef MGPU_FG_GPU_AUDIT
+    gpu_audit::install(runtime, logs);
+#endif
     const sl::Feature features[] = {sl::kFeatureDLSS_G, sl::kFeatureReflex, sl::kFeaturePCL};
     const wchar_t *paths[] = {runtime_path_.c_str()};
     sl::Preferences preferences{};
@@ -118,6 +124,9 @@ void official_runtime::initialize(const std::filesystem::path &runtime, const st
     information.deviceLUIDSizeInBytes = sizeof(adapter);
     for (auto requested : features) require_sl(supported(requested, information), "required official feature");
     require_hr(D3D12CreateDevice(selected.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device_)), "5080 device");
+#ifdef MGPU_FG_GPU_AUDIT
+    gpu_audit::attach_device(device_.Get());
+#endif
     require_sl(set_device(device_.Get()), "set independent device");
     upgrade(upgrade_interface, device_.Get(), device_proxy_);
     upgrade(upgrade_interface, factory_.Get(), factory_proxy_);
@@ -176,6 +185,9 @@ void official_runtime::configure(unsigned multiplier)
 
 void official_runtime::create_swapchain(HWND window, unsigned width, unsigned height, DXGI_FORMAT format, unsigned multiplier)
 {
+#ifdef MGPU_FG_AUDIT_FOCUS_STUB
+    gpu_audit::test_focus_window(window);
+#endif
     if (swapchain_) throw std::runtime_error("swapchain already exists");
     configure(multiplier);
     DXGI_SWAP_CHAIN_DESC1 description{};
@@ -243,6 +255,9 @@ void official_runtime::close()
         require_sl(reflex_options_(options), "release helper Reflex mode");
     }
     require_sl(shutdown_(), "official shutdown");
+#ifdef MGPU_FG_GPU_AUDIT
+    gpu_audit::stop();
+#endif
     active_ = false;
     queue_.Reset();
     queue_proxy_.Reset();

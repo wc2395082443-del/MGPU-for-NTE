@@ -20,11 +20,11 @@ jobs:
         run: ./scripts/Fetch-Dependencies.ps1
       - name: Build and test source
         shell: pwsh
-        run: ./scripts/Build.ps1
+        run: ./scripts/Build-Lifecycle.ps1
       - name: Upload rebuilt artifacts (not deployed release binaries)
         uses: actions/upload-artifact@v4
         with:
           name: MGPU-for-NTE-rebuilt
           path: |
-            _build/nte/main/mgpu_bridge.addon64
-            _build/nte/helper/mgpu_official_host.exe
+            _build/preview4/main/mgpu_bridge.addon64
+            _build/preview4/helper/mgpu_official_host.exe

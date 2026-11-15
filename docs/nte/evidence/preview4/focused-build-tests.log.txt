@@ -1,0 +1,221 @@
+-- The CXX compiler identification is MSVC 19.44.35229.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: C:/Users/Administrator/Documents/Codex/2026-08-21/t/work/mgpu-nr-fg-dev/devtools/portable-msvc/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- MGPU: overlay panel ENABLED - ImGui headers at <repo>/_build/preview4/main/ext/imgui
+-- Configuring done (2.0s)
+-- Generating done (0.2s)
+-- Build files have been written to: <repo>/_build/preview4/main
+[1/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\aligned_input.cpp.obj
+[2/77] Building CXX object CMakeFiles\mgpu_queue_trace.dir\src\queue_dependency_trace.cpp.obj
+[3/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\nonblocking_work_trace.cpp.obj
+[4/77] Linking CXX static library mgpu_queue_trace.lib
+[5/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\frame_measurement.cpp.obj
+[6/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\game_work_trace.cpp.obj
+[7/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\depth_normalizer.cpp.obj
+[8/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\native_work_observer.cpp.obj
+[9/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\dllmain.cpp.obj
+[10/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\diag.cpp.obj
+[11/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\adapter_selection.cpp.obj
+[12/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\adapter.cpp.obj
+[13/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\worker.cpp.obj
+[14/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\probe.cpp.obj
+[15/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\calibrator.cpp.obj
+[16/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\screen.cpp.obj
+[17/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\sl_probe.cpp.obj
+<repo>\src\sl_probe.cpp(9): warning C4005: 'WIN32_LEAN_AND_MEAN': macro redefinition
+<repo>\src\sl_probe.cpp(9): note: 'WIN32_LEAN_AND_MEAN' previously declared on the command line
+[18/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\sl_tags.cpp.obj
+<repo>\src\sl_tags.cpp(19): warning C4005: 'WIN32_LEAN_AND_MEAN': macro redefinition
+<repo>\src\sl_tags.cpp(19): note: 'WIN32_LEAN_AND_MEAN' previously declared on the command line
+[19/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\nr16.cpp.obj
+[20/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\discovery.cpp.obj
+[21/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\gpu1_context.cpp.obj
+[22/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\latency_probe.cpp.obj
+[23/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\log_queue.cpp.obj
+[24/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\journal.cpp.obj
+[25/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\stall_watch.cpp.obj
+[26/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\own_reflex.cpp.obj
+[27/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\native_reflex.cpp.obj
+<repo>\src\native_reflex.cpp(5): warning C4005: 'WIN32_LEAN_AND_MEAN': macro redefinition
+<repo>\src\native_reflex.cpp(5): note: 'WIN32_LEAN_AND_MEAN' previously declared on the command line
+[28/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\source_fg_guard.cpp.obj
+[29/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\fg_map.cpp.obj
+[30/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\dx11_probe.cpp.obj
+[31/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\dx11_producer.cpp.obj
+[32/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\mvec_census.cpp.obj
+[33/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\tex_census.cpp.obj
+<repo>\src\tex_census.cpp(298): warning C4996: 'reshade::api::memory_heap::gpu_to_cpu': use 'memory_heap::readback' instead
+[34/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\mvec_extract.cpp.obj
+<repo>\src\mvec_extract.cpp(283): warning C4996: 'reshade::api::memory_heap::gpu_only': use 'memory_heap::default_' instead
+[35/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\live_panel.cpp.obj
+[36/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\t119_keys.cpp.obj
+[37/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\temporal_diag.cpp.obj
+[38/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\feature_diag.cpp.obj
+[39/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\perf_diag.cpp.obj
+[40/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\producer_diag.cpp.obj
+[41/77] Building CXX object CMakeFiles\mgpu_bridge.dir\src\producer_gpu_timers.cpp.obj
+[42/77] Building CXX object CMakeFiles\mgpu_bridge.dir\experimental\secondary_fg\parameter_bridge.cpp.obj
+[43/77] Building CXX object CMakeFiles\mgpu_bridge.dir\experimental\secondary_fg\dlss_fg_stage.cpp.obj
+[44/77] Building CXX object CMakeFiles\mgpu_bridge.dir\experimental\official_fg\shared_frame_transport.cpp.obj
+[45/77] Building CXX object CMakeFiles\mgpu_nr_preset_test.dir\tests\nr_preset_test.cpp.obj
+[46/77] Building CXX object CMakeFiles\mgpu_source_admission_gate_test.dir\tests\source_admission_gate_test.cpp.obj
+[47/77] Building CXX object CMakeFiles\mgpu_bridge.dir\experimental\official_fg\official_bridge.cpp.obj
+[48/77] Building CXX object CMakeFiles\mgpu_early_input_backpressure_test.dir\tests\early_input_backpressure_test.cpp.obj
+[49/77] Building CXX object CMakeFiles\mgpu_source_credit_serial_control.dir\tests\source_admission_gate_test.cpp.obj
+[50/77] Building CXX object CMakeFiles\mgpu_dualpass_pipeline_test.dir\tests\dualpass_pipeline_test.cpp.obj
+[51/77] Building CXX object CMakeFiles\mgpu_neural_pipeline_test.dir\tests\neural_pipeline_test.cpp.obj
+[52/77] Building CXX object CMakeFiles\mgpu_aligned_frame_policy_test.dir\tests\aligned_frame_policy_test.cpp.obj
+[53/77] Building CXX object CMakeFiles\mgpu_nr_audit_policy_test.dir\tests\nr_audit_policy_test.cpp.obj
+[54/77] Building CXX object CMakeFiles\mgpu_source_fg_options_test.dir\tests\source_fg_options_test.cpp.obj
+[55/77] Building CXX object CMakeFiles\mgpu_present_backpressure_test.dir\tests\present_backpressure_test.cpp.obj
+[56/77] Building CXX object CMakeFiles\mgpu_admission_audit_test.dir\tests\admission_audit_test.cpp.obj
+[57/77] Building CXX object CMakeFiles\mgpu_source_fg_guard_test.dir\tests\source_fg_guard_test.cpp.obj
+[58/77] Building CXX object CMakeFiles\mgpu_streamline_route_audit_test.dir\tests\game_work_poll_stub.cpp.obj
+[59/77] Building CXX object CMakeFiles\mgpu_streamline_route_audit_test.dir\tests\official_source_stub.cpp.obj
+[60/77] Building CXX object CMakeFiles\mgpu_streamline_route_audit_test.dir\tests\streamline_route_audit_test.cpp.obj
+[61/77] Building CXX object CMakeFiles\mgpu_streamline_route_audit_test.dir\tests\source_fg_guard_stub.cpp.obj
+[62/77] Building CXX object CMakeFiles\mgpu_streamline_route_audit_test.dir\src\native_reflex.cpp.obj
+[63/77] Building CXX object CMakeFiles\mgpu_streamline_route_audit_test.dir\tests\measurement_inactive_stub.cpp.obj
+[64/77] Linking CXX shared library mgpu_bridge.addon64
+[65/77] Linking CXX executable mgpu_nr_preset_test.exe
+[66/77] Linking CXX executable mgpu_source_admission_gate_test.exe
+[67/77] Linking CXX executable mgpu_early_input_backpressure_test.exe
+[68/77] Linking CXX executable mgpu_source_credit_serial_control.exe
+[69/77] Linking CXX executable mgpu_neural_pipeline_test.exe
+[70/77] Linking CXX executable mgpu_dualpass_pipeline_test.exe
+[71/77] Linking CXX executable mgpu_aligned_frame_policy_test.exe
+[72/77] Linking CXX executable mgpu_nr_audit_policy_test.exe
+[73/77] Linking CXX executable mgpu_source_fg_options_test.exe
+[74/77] Linking CXX executable mgpu_admission_audit_test.exe
+[75/77] Linking CXX executable mgpu_present_backpressure_test.exe
+[76/77] Linking CXX executable mgpu_source_fg_guard_test.exe
+[77/77] Linking CXX executable mgpu_streamline_route_audit_test.exe
+Internal ctest changing into directory: <repo>/_build/preview4/main
+Test project <repo>/_build/preview4/main
+      Start 38: mgpu_nr_preset_test
+ 1/13 Test #38: mgpu_nr_preset_test ..........................   Passed    0.02 sec
+      Start 51: mgpu_source_admission_gate_test
+ 2/13 Test #51: mgpu_source_admission_gate_test ..............   Passed    1.19 sec
+      Start 52: mgpu_early_input_backpressure_test
+ 3/13 Test #52: mgpu_early_input_backpressure_test ...........   Passed    1.20 sec
+      Start 53: mgpu_source_credit_serial_control_rejected
+ 4/13 Test #53: mgpu_source_credit_serial_control_rejected ...   Passed    7.12 sec
+      Start 54: mgpu_neural_pipeline_test
+ 5/13 Test #54: mgpu_neural_pipeline_test ....................   Passed    0.03 sec
+      Start 55: mgpu_dualpass_pipeline_test
+ 6/13 Test #55: mgpu_dualpass_pipeline_test ..................   Passed    0.02 sec
+      Start 62: mgpu_aligned_frame_policy_test
+ 7/13 Test #62: mgpu_aligned_frame_policy_test ...............   Passed    0.03 sec
+      Start 65: mgpu_admission_audit_test
+ 8/13 Test #65: mgpu_admission_audit_test ....................   Passed    0.03 sec
+      Start 66: mgpu_present_backpressure_test
+ 9/13 Test #66: mgpu_present_backpressure_test ...............   Passed    0.02 sec
+      Start 67: mgpu_nr_audit_policy_test
+10/13 Test #67: mgpu_nr_audit_policy_test ....................   Passed    0.02 sec
+      Start 68: mgpu_source_fg_options_test
+11/13 Test #68: mgpu_source_fg_options_test ..................   Passed    0.02 sec
+      Start 69: mgpu_source_fg_guard_test
+12/13 Test #69: mgpu_source_fg_guard_test ....................   Passed    0.02 sec
+      Start 78: mgpu_streamline_route_audit_test
+13/13 Test #78: mgpu_streamline_route_audit_test .............   Passed    0.02 sec
+
+100% tests passed, 0 tests failed out of 13
+
+Total Test time (real) =   9.77 sec
+-- The CXX compiler identification is MSVC 19.44.35229.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: C:/Users/Administrator/Documents/Codex/2026-08-21/t/work/mgpu-nr-fg-dev/devtools/portable-msvc/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Configuring done (0.8s)
+-- Generating done (0.0s)
+-- Build files have been written to: <repo>/_build/preview4/helper
+[1/54] Building CXX object CMakeFiles\mgpu_shared_frame_transport.dir\shared_frame_transport.cpp.obj
+[2/54] Building CXX object CMakeFiles\mgpu_streamline_probe_policy_test.dir\probe_policy_test.cpp.obj
+[3/54] Linking CXX static library mgpu_shared_frame_transport.lib
+[4/54] Building CXX object CMakeFiles\mgpu_shared_contract_test.dir\shared_contract_test.cpp.obj
+[5/54] Building CXX object CMakeFiles\mgpu_streamline_probe.dir\streamline_probe.cpp.obj
+[6/54] Building CXX object CMakeFiles\mgpu_shared_transport_test.dir\shared_transport_test.cpp.obj
+[7/54] Building CXX object CMakeFiles\mgpu_official_host.dir\official_host.cpp.obj
+[8/54] Building CXX object CMakeFiles\mgpu_official_host.dir\official_runtime.cpp.obj
+[9/54] Building CXX object CMakeFiles\mgpu_fg_gpu_audit_test.dir\fg_gpu_audit_test.cpp.obj
+[10/54] Building CXX object CMakeFiles\mgpu_official_host.dir\fg_gpu_audit.cpp.obj
+[11/54] Building CXX object CMakeFiles\mgpu_fg_mode_policy_test.dir\fg_mode_policy_test.cpp.obj
+[12/54] Building CXX object CMakeFiles\mgpu_official_source_test.dir\source_history_test.cpp.obj
+[13/54] Building CXX object CMakeFiles\mgpu_fg_gpu_audit_test.dir\fg_gpu_audit.cpp.obj
+[14/54] Building CXX object CMakeFiles\mgpu_official_connection_test.dir\official_connection_test.cpp.obj
+[15/54] Building CXX object CMakeFiles\mgpu_output_trace_pipeline_test.dir\output_trace_pipeline_test.cpp.obj
+[16/54] Building CXX object CMakeFiles\mgpu_official_connection_test.dir\official_bridge.cpp.obj
+[17/54] Building CXX object CMakeFiles\mgpu_reflex_contract_test.dir\reflex_contract_test.cpp.obj
+[18/54] Building CXX object CMakeFiles\mgpu_output_trace_test.dir\output_trace_test.cpp.obj
+[19/54] Building CXX object CMakeFiles\mgpu_helper_measurement_disabled_test.dir\helper_measurement_disabled_test.cpp.obj
+[20/54] Building CXX object CMakeFiles\mgpu_output_visibility_test.dir\output_visibility_test.cpp.obj
+[21/54] Building CXX object CMakeFiles\mgpu_output_liveness_test.dir\output_liveness_test.cpp.obj
+[22/54] Building CXX object CMakeFiles\mgpu_output_osd_test.dir\output_osd_test.cpp.obj
+[23/54] Building CXX object CMakeFiles\mgpu_output_window_test.dir\output_window_test.cpp.obj
+[24/54] Building CXX object CMakeFiles\mgpu_input_queue_isolation_test.dir\input_queue_isolation_test.cpp.obj
+[25/54] Building CXX object CMakeFiles\mgpu_input_queue_legacy_control.dir\input_queue_isolation_test.cpp.obj
+[26/54] Building CXX object CMakeFiles\mgpu_mouse_passthrough_test.dir\mouse_passthrough_test.cpp.obj
+[27/54] Building CXX object CMakeFiles\mgpu_mouse_passthrough_m362_control.dir\mouse_passthrough_test.cpp.obj
+[28/54] Building CXX object CMakeFiles\mgpu_official_metrics_test.dir\official_metrics_test.cpp.obj
+[29/54] Building CXX object CMakeFiles\mgpu_live_log_test.dir\live_log_test.cpp.obj
+[30/54] Linking CXX executable mgpu_streamline_probe.exe
+[31/54] Building CXX object CMakeFiles\mgpu_startup_source_policy_test.dir\startup_source_policy_test.cpp.obj
+[32/54] Linking CXX executable mgpu_streamline_probe_policy_test.exe
+[33/54] Linking CXX executable mgpu_shared_contract_test.exe
+[34/54] Linking CXX executable mgpu_shared_transport_test.exe
+[35/54] Linking CXX executable mgpu_official_host.exe
+[36/54] Linking CXX executable mgpu_fg_gpu_audit_test.exe
+[37/54] Linking CXX executable mgpu_fg_mode_policy_test.exe
+[38/54] Linking CXX executable mgpu_official_source_test.exe
+[39/54] Linking CXX executable mgpu_official_connection_test.exe
+[40/54] Linking CXX executable mgpu_output_trace_pipeline_test.exe
+[41/54] Linking CXX executable mgpu_reflex_contract_test.exe
+[42/54] Linking CXX executable mgpu_output_trace_test.exe
+[43/54] Linking CXX executable mgpu_helper_measurement_disabled_test.exe
+[44/54] Linking CXX executable mgpu_output_osd_test.exe
+[45/54] Linking CXX executable mgpu_output_visibility_test.exe
+[46/54] Linking CXX executable mgpu_output_liveness_test.exe
+[47/54] Linking CXX executable mgpu_output_window_test.exe
+[48/54] Linking CXX executable mgpu_input_queue_isolation_test.exe
+[49/54] Linking CXX executable mgpu_input_queue_legacy_control.exe
+[50/54] Linking CXX executable mgpu_mouse_passthrough_test.exe
+[51/54] Linking CXX executable mgpu_mouse_passthrough_m362_control.exe
+[52/54] Linking CXX executable mgpu_official_metrics_test.exe
+[53/54] Linking CXX executable mgpu_live_log_test.exe
+[54/54] Linking CXX executable mgpu_startup_source_policy_test.exe
+Internal ctest changing into directory: <repo>/_build/preview4/helper
+Test project <repo>/_build/preview4/helper
+      Start  1: official_fg_gpu_audit_warp
+ 1/12 Test  #1: official_fg_gpu_audit_warp .............   Passed    0.13 sec
+      Start  2: official_fg_mode_policy
+ 2/12 Test  #2: official_fg_mode_policy ................   Passed    0.02 sec
+      Start  3: official_output_trace_pipeline
+ 3/12 Test  #3: official_output_trace_pipeline .........   Passed    3.03 sec
+      Start  4: official_reflex_contract
+ 4/12 Test  #4: official_reflex_contract ...............   Passed    0.02 sec
+      Start  5: official_output_trace
+ 5/12 Test  #5: official_output_trace ..................   Passed    0.20 sec
+      Start  6: official_helper_measurement_disabled
+ 6/12 Test  #6: official_helper_measurement_disabled ...   Passed    0.03 sec
+      Start  8: official_output_visibility
+ 7/12 Test  #8: official_output_visibility .............   Passed    0.02 sec
+      Start  9: official_output_liveness
+ 8/12 Test  #9: official_output_liveness ...............   Passed    0.02 sec
+      Start 10: official_output_window
+ 9/12 Test #10: official_output_window .................   Passed    0.38 sec
+      Start 17: official_source_history
+10/12 Test #17: official_source_history ................   Passed    0.03 sec
+      Start 18: official_startup_source_policy
+11/12 Test #18: official_startup_source_policy .........   Passed    0.03 sec
+      Start 19: shared_frame_contract
+12/12 Test #19: shared_frame_contract ..................   Passed    0.02 sec
+
+100% tests passed, 0 tests failed out of 12
+
+Total Test time (real) =   3.96 sec
+PASS: focused lifecycle/FG regression; full suites and live game acceptance reported separately

@@ -2,7 +2,7 @@
 
 本文对应首发 **M364主模块＋M363 `mgpu_official_host.exe`**。helper接到的是5080已经处理好的NR画面及其同帧引导；游戏场景渲染和NR处理在上游完成。
 
-当前 **preview.3 使用主8ADEAA05＋helper446FD260**，5080仍执行NR后的NVIDIA官方FG，动态目标200。新增拍照／菜单源标记恢复、旧输出过期保护、源端并行背压和双Pass异步。本文下方历史版本名与性能表保留原身份；当前变化见[更新说明](PIPELINE-UPDATE.zh-CN.md)。其他50系候选未合入。
+当前 **preview.4 使用主B09C＋helper E172**，5080继续执行NR后的NVIDIA官方FG，动态目标200。新增三帧生命周期额度及超时恢复，helper包含真实NGX生成调用GPU时间查询入口。详细采集需显式触发，其他诊断仍有开销。本文下方M363及性能表保留历史身份；当前变化和五帧实测见[本次更新](LIFECYCLE-UPDATE.zh-CN.md)，preview.3测量清理见[历史记录](PIPELINE-UPDATE.zh-CN.md)。其他50系候选未合入。
 
 ## 1. 为什么需要独立进程
 

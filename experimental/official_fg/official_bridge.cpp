@@ -457,15 +457,16 @@ void source_wait_input(std::uint32_t frame)
     const auto call = calls.fetch_add(1, std::memory_order_relaxed) + 1;
     const auto waited = result.waited ? waits.fetch_add(1, std::memory_order_relaxed) + 1 : waits.load(std::memory_order_relaxed);
     if (call <= 3 || call % 120 == 0 || result.timed_out || result.cancelled || (result.waited && waited <= 3)) {
-        char line[600];
+        char line[800];
         std::snprintf(line, sizeof line,
             "[MGPU][NTE-INPUT-BP] call=%llu frame=%u retire_target=%u completed=%u ready=%u waited=%u "
-            "wait_ms=%llu waits=%llu timeout=%u cancelled=%u pending=%u capacity=%u begin_ns=%llu end_ns=%llu; "
-            "before native Reflex Sleep, original SDK pacing retained, post-submit safety retained",
+            "wait_ms=%llu waits=%llu timeout=%u cancelled=%u pending=%u capacity=%u begin_ns=%llu end_ns=%llu submitted=%u reserved=%u recovering=%u; "
+            "three lifecycle credits before native Reflex Sleep, submitted confirms reservation; real NR completion rearms suspended gate",
             static_cast<unsigned long long>(call), frame, result.target, result.completed, unsigned(result.ready),
             unsigned(result.waited), static_cast<unsigned long long>(result.wait_ms), static_cast<unsigned long long>(waited),
             unsigned(result.timed_out), unsigned(result.cancelled), result.pending, official_fg::source_admission_gate::capacity,
-            static_cast<unsigned long long>(begin_ns), static_cast<unsigned long long>(end_ns));
+            static_cast<unsigned long long>(begin_ns), static_cast<unsigned long long>(end_ns),
+            result.submitted, result.reserved, unsigned(result.recovering));
         if (result.timed_out) mgpu::diag::error(line);
         else mgpu::diag::info(line);
     }

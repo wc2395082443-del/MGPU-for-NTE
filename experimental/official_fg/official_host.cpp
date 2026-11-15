@@ -11,6 +11,9 @@
 #include <cstdio>
 #include <stdexcept>
 #include <filesystem>
+#ifdef MGPU_FG_GPU_AUDIT
+#include "fg_gpu_audit.hpp"
+#endif
 
 using Microsoft::WRL::ComPtr;
 using namespace mgpu::official_fg;
@@ -255,7 +258,13 @@ public:
         runtime_.tag(packet.color_frame, tags, 2);
         runtime_.marker(packet.color_frame, static_cast<unsigned>(sl::PCLMarker::ePresentStart));
         trace.mark(output_stage::tagged);
+#ifdef MGPU_FG_GPU_AUDIT
+        gpu_audit::present(packet.sequence, packet.color_frame);
+#endif
         const HRESULT result = runtime_.swapchain()->Present(0, 0);
+#ifdef MGPU_FG_GPU_AUDIT
+        gpu_audit::finish_present();
+#endif
         trace.mark(output_stage::present_returned);
         runtime_.marker(packet.color_frame, static_cast<unsigned>(sl::PCLMarker::ePresentEnd));
         require_hr(result, "official proxy Present");
@@ -366,6 +375,9 @@ int run(official_channel &channel, const std::filesystem::path &directory)
             WaitForSingleObject(channel_handle(channel.parent_process), 0) == WAIT_TIMEOUT) {
             InterlockedExchange64(&channel.heartbeat_ms, GetTickCount64());
             trace.poll();
+#ifdef MGPU_FG_GPU_AUDIT
+            gpu_audit::poll();
+#endif
             if (GetTickCount64() - last_heartbeat_log >= 5000) {
                 std::printf("[M350-HEARTBEAT] state=%ld published=%lld next=%llu real=%lld sdk=%lld source_first=%ld markers=%lld/%lld failures=%ld\n",
                     read_atomic(channel.state), read_atomic(channel.published), static_cast<unsigned long long>(next),

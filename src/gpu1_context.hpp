@@ -473,6 +473,7 @@ struct ui_state
     // P7.9: the guide's tuning parameters. tuning_on false = none of them are
     // set, which is what every published measurement ran under.
     bool  tuning_on = false, auto_mask = false;
+    int nr_preset_requested = 0, nr_preset_active = -1;
     float tone_strength = 1.0f, structure_strength = 1.0f, skin_strength = 1.0f,
           style = 0.0f;
     // P8.0: 0 = off (no DLSSNR.MVec bound - the control arm and what every
@@ -644,6 +645,7 @@ void ui_set_tuning(bool on);
 
 // which: 0 tone, 1 structure, 2 skin, 3 style, 4 auto-mask (0.0/1.0).
 void ui_set_tuning_value(int which, float v);
+bool ui_set_nr_preset(int value);
 
 // P8.0. The motion vector field handed to DLSS-NR.
 //

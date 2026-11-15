@@ -6,9 +6,15 @@
 
 4080 SUPER 负责游戏渲染及游戏自己的 DLSS 超分；RTX 5080 接收同帧颜色、深度、运动矢量和相机数据，执行 DLSS Neural Rendering（本文简称 NR），再由独立 helper 接入官方 Streamline 帧生成和呈现。
 
-当前预览版为 **2026-11-09 并行流水线与低延迟版 preview.3**，采用已安装并逐阶段确认正常的主模块`8ADEAA05`＋helper`446FD260`。**4080S关闭游戏进程里的源端帧生成，5080在NR之后运行NVIDIA官方帧生成，最多请求六倍。** helper当前支持GeForce RTX 5080，源码保留上游MIT许可和署名。
+当前预览版为 **2026-11-16 双NR节拍与低延迟更新 preview.4**，采用已验收的 **B09C主模块＋E172 helper**。[下载安装包和测量附件](https://github.com/wc2395082443-del/MGPU-for-NTE/releases/tag/nte-lifecycle-preview.4)。**4080S关闭源端帧生成，5080在NR之后运行NVIDIA官方帧生成，最多请求六倍。** helper仍限定RTX 5080，源码保留上游MIT许可和署名。
 
-[新版改动与验证记录](docs/nte/PIPELINE-UPDATE.zh-CN.md)：更新游戏构建识别，恢复拍照／菜单后的FG，清理过期覆盖画面；加入三额度并行背压、Reflex Sleep前的容量等待和双Pass异步处理。用户确认登录／双Pass不闪、延迟低，三个测量清理阶段均正常。保留同帧引导、资源同步和输入隔离，旧版[源FG关闭记录](docs/nte/SOURCE-FG-OFF.zh-CN.md)继续留存。其他50系副卡仍为[独立兼容候选](docs/nte/RTX50-COMPAT.zh-CN.md)。
+[本次优化与五帧流水线](docs/nte/LIFECYCLE-UPDATE.zh-CN.md)：输入获准即预留额度，三帧预算覆盖模拟、尚未提交的渲染和NR，提交确认同一额度；超时后由真实NR完成恢复。用户确认**保持流畅，延迟明显降低**。相对AE5C，模拟到同批首次显示平均年龄 **136.80→111.15ms**，显示间隔P95维持 **9.52→9.68ms**。这是画面年龄，硬件输入到光子延迟未直接测量；场景负载和转镜头动作非严格控制，测量开销未剔除。
+
+![B09C五帧实测，蓝条为FG GPU时间查询](docs/nte/figures/lifecycle-five-frames.svg)
+
+[下载完整离线交互图](docs/nte/lifecycle-five-frame-timeline.html) · [三版五帧数据](docs/nte/evidence/preview4/comparison.json)。本版保留计时诊断功能，旧去测量preview.3及其Release继续保留。一次采样前超时已恢复，载入/菜单阶段仍需改进。
+
+[preview.3改动与验证记录](docs/nte/PIPELINE-UPDATE.zh-CN.md)保留此前的恢复、双Pass异步和测量清理历史。其他50系副卡仍为[独立兼容候选](docs/nte/RTX50-COMPAT.zh-CN.md)。
 
 **六倍帧生成使用 NVIDIA 官方 DLSS 多帧生成，通过官方 Streamline／DLSS-G 在5080上运行，并非 Lossless Scaling（小黄鸭）插帧。用户最新体验反馈：画面效果非常好。** 本项目负责NR画面与引导交接、官方SDK接线和输出窗口。
 
@@ -59,7 +65,7 @@
 
 ## helper负责什么，六倍是否影响基础帧
 
-**helper是5080上的独立官方FG与显示端**：接收NR颜色及同帧深度/MV/相机，校验身份，用共享三槽和完成fence交接，复制到私有输入，提交官方FG/Reflex/PCL，并管理独立输出覆盖层、鼠标穿透和存活保护。当前关闭其可选追踪及纯速率统计，必要SDK状态仍有效。4080S游戏渲染、跨卡COPY及5080 NR都在它之前完成。
+**helper是5080上的独立官方FG与显示端**：接收NR颜色及同帧深度/MV/相机，校验身份，用共享三槽和完成fence交接，复制到私有输入，提交官方FG/Reflex/PCL，并管理独立输出覆盖层、鼠标穿透和存活保护。preview.4保留追踪和真实NGX生成调用的GPU计时入口，详细采集需显式触发。4080S游戏渲染、跨卡COPY及5080 NR都在它之前完成。
 
 主要插帧计算放在5080。副卡余量足够时，基础源帧可以基本维持：历史M343约**33.02个真实NR帧/s**，开启六倍的M351约**33.05个真实帧/s**，SDK报告约**194.85/s**。这些窗口中，基础帧基本持平。
 
@@ -106,30 +112,30 @@ M352也记录到33.1真实帧/s、SDK195.2/s，但显示节奏变差，用户反
 
 ## 下载与安装
 
-从 [最新预览发布](https://github.com/wc2395082443-del/MGPU-for-NTE/releases/tag/nte-pipeline-preview.3)下载`MGPU-for-NTE-pipeline-preview.3.zip`，按[安装步骤](docs/nte/INSTALL.zh-CN.md)执行。包包含本次主模块和helper、配置模板、深度shader、校验清单和可回退安装脚本。前两版Release保留。
+从 [最新预览发布](https://github.com/wc2395082443-del/MGPU-for-NTE/releases/tag/nte-lifecycle-preview.4)下载`MGPU-for-NTE-lifecycle-preview.4.zip`，按[安装步骤](docs/nte/INSTALL.zh-CN.md)执行。包包含验收版主模块和helper、配置模板、深度shader、校验清单和可回退安装脚本；测量附件包含三版离线图。旧Release保留。
 
 NVIDIA NR 模型、NGX/Streamline 运行库、ReShade、游戏文件不打进安装包。通过 `Import-Runtime.ps1` 从用户自己的安装导入匹配运行库，避免错版本混装；文件缺失时明确报错，不假装装完即可工作。
 
 ## 当前边界
 
-- 已知异环 EXE SHA256：`E72655E227E17796D13EDF00F827DDFEBDE9859B3D758858F0FFC82765D84EFE`。部分原生接口有版本校验，游戏更新需重新适配。
+- 已知异环 EXE SHA256：`64ED3CAE0B5FC61F3B56CDD933B4807CB23F0EC7913590DB60D1A8642DE2DFEC`。部分原生接口有版本校验，游戏更新需重新适配。
 - 本分支通过 ReShade 加载，并创建 5080 输出覆盖层。兼容性和反作弊策略由游戏决定；本项目不绕过或禁用反作弊。
 - 游戏菜单插帧关闭是测试基线；本版处理与菜单不一致的源SDK请求，保留5080 helper官方六倍。源SDK关闭后，已有代理swapchain仍可能保留离屏复制/同步，尚未重建游戏swapchain。
 - 游戏主DIRECT与COPY之间仍有队列依赖，是后续调度优化的方向。
 - 官方 SDK 管理生成帧呈现；**FG 后缓存六帧再均匀输出尚未实现**。已撤回的 M365 入口前等待不包含在发布版。
 - M366 有更流畅的用户反馈，随后又收到程序异常报告并回退；根因未证实。M367 仅软件候选，首发均不包含。
-- 当前相关回归14项主测试＋11项helper通过；发布验证见[构建记录](docs/nte/BUILD.md)。旧preview.2云端76/77主测试结果及既有WARP排空超时单独保留。本次没有新增同条件FPS或端到端延迟测量。
-- 大规模GPU／CPU流水线采集在本发布关闭；MetaProbe、PresentAudit、PanelStats及部分状态计数、日志和旧条件读回仍保留。面板部分诊断／速率字段停止更新。
+- 当前重点回归13项主测试＋12项helper、完整helper24/24通过；完整主构建被历史“GPU计时关闭”断言阻止，全套未通过。原始记录见[构建记录](docs/nte/BUILD.md)。
+- 当前保留GPU/CPU测量和helper详细FG计时入口；详细采集需显式触发，测量开销未剔除。一次采样前1秒超时已恢复，菜单/载入全场景仍待改进。
 
 ## 开发与来源
 
 发布二进制 SHA256：
 
 ```text
-pipeline-preview.3 nvngx.dll_mgpu_bridge.addon64
-8ADEAA052261EA7C89DC6AB3137496B13A5A57D3D7B54F3CE98C776737987E48
-helper-measurement-stage3 mgpu-official/mgpu_official_host.exe
-446FD26095FCB21EEB446D06F67E18485BCEE3D4C432D6B7A3BBB841C9DE6933
+lifecycle-preview.4 nvngx.dll_mgpu_bridge.addon64
+B09CA7B12A3B23069FFB35DDB9F08D8684239DBAFDFEBB486E78EEAFA7922BF0
+official-FG-GPU-audit mgpu-official/mgpu_official_host.exe
+E172D87654241079991C3D8766BDCE66B7B763235720703EAA1F3B1DD3B0A767
 ```
 
 [构建与验证](docs/nte/BUILD.md) · [发布来源](docs/nte/PROVENANCE.md) · [第三方依赖](docs/nte/DEPENDENCIES.md) · [上游原 README](docs/nte/UPSTREAM_README.md)

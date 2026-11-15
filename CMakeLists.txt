@@ -14,7 +14,7 @@ project(mgpu_bridge CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_library(mgpu_queue_trace STATIC src/queue_measurement_disabled.cpp)
+add_library(mgpu_queue_trace STATIC src/queue_dependency_trace.cpp)
 target_compile_definitions(mgpu_queue_trace PRIVATE NOMINMAX _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
 add_executable(mgpu_m343_etl_exporter tools/m343_etl_raw_exporter.cpp)
 add_executable(mgpu_pipeline_trace_layout tools/pipeline_trace_layout.cpp)
@@ -29,7 +29,7 @@ target_link_libraries(mgpu_m343_etl_exporter PRIVATE advapi32)
 add_library(mgpu_bridge SHARED
     src/aligned_input.cpp
     src/nonblocking_work_trace.cpp
-    src/cpu_measurement_disabled.cpp
+    src/frame_measurement.cpp
     src/game_work_trace.cpp
     src/native_work_observer.cpp
     src/depth_normalizer.cpp
@@ -408,6 +408,8 @@ if(MGPU_BUILD_TESTS)
     set_tests_properties(mgpu_guide_copy_overlap_warp_test PROPERTIES TIMEOUT 30)
     add_executable(mgpu_neural_history_test tests/neural_history_test.cpp)
     add_test(NAME mgpu_neural_history_test COMMAND mgpu_neural_history_test)
+    add_executable(mgpu_nr_preset_test tests/nr_preset_test.cpp)
+    add_test(NAME mgpu_nr_preset_test COMMAND mgpu_nr_preset_test)
     add_executable(mgpu_neural_snapshots_warp_test tests/neural_snapshots_warp_test.cpp)
     target_compile_definitions(mgpu_neural_snapshots_warp_test PRIVATE NOMINMAX)
     target_link_libraries(mgpu_neural_snapshots_warp_test PRIVATE d3d12 dxgi dxguid)

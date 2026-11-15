@@ -1,0 +1,54 @@
+Internal ctest changing into directory: <repo>/_build/preview4/helper
+Test project <repo>/_build/preview4/helper
+      Start  1: official_fg_gpu_audit_warp
+ 1/24 Test  #1: official_fg_gpu_audit_warp ................   Passed    0.06 sec
+      Start  2: official_fg_mode_policy
+ 2/24 Test  #2: official_fg_mode_policy ...................   Passed    0.01 sec
+      Start  3: official_output_trace_pipeline
+ 3/24 Test  #3: official_output_trace_pipeline ............   Passed    2.95 sec
+      Start  4: official_reflex_contract
+ 4/24 Test  #4: official_reflex_contract ..................   Passed    0.01 sec
+      Start  5: official_output_trace
+ 5/24 Test  #5: official_output_trace .....................   Passed    0.13 sec
+      Start  6: official_helper_measurement_disabled
+ 6/24 Test  #6: official_helper_measurement_disabled ......   Passed    0.01 sec
+      Start  7: official_output_osd_warp
+ 7/24 Test  #7: official_output_osd_warp ..................   Passed    0.12 sec
+      Start  8: official_output_visibility
+ 8/24 Test  #8: official_output_visibility ................   Passed    0.02 sec
+      Start  9: official_output_liveness
+ 9/24 Test  #9: official_output_liveness ..................   Passed    0.01 sec
+      Start 10: official_output_window
+10/24 Test #10: official_output_window ....................   Passed    0.37 sec
+      Start 11: official_input_queue_isolation
+11/24 Test #11: official_input_queue_isolation ............   Passed    0.16 sec
+      Start 12: official_input_queue_legacy_control
+12/24 Test #12: official_input_queue_legacy_control .......   Passed    0.13 sec
+      Start 13: official_mouse_passthrough
+13/24 Test #13: official_mouse_passthrough ................   Passed    0.05 sec
+      Start 14: official_mouse_passthrough_m362_control
+14/24 Test #14: official_mouse_passthrough_m362_control ...   Passed    0.05 sec
+      Start 15: official_metrics
+15/24 Test #15: official_metrics ..........................   Passed    0.03 sec
+      Start 16: official_live_log_readable
+16/24 Test #16: official_live_log_readable ................   Passed    0.03 sec
+      Start 17: official_source_history
+17/24 Test #17: official_source_history ...................   Passed    0.01 sec
+      Start 18: official_startup_source_policy
+18/24 Test #18: official_startup_source_policy ............   Passed    0.01 sec
+      Start 19: shared_frame_contract
+19/24 Test #19: shared_frame_contract .....................   Passed    0.01 sec
+      Start 20: shared_transport_warp_processes
+20/24 Test #20: shared_transport_warp_processes ...........   Passed    0.20 sec
+      Start 21: probe_policy
+21/24 Test #21: probe_policy ..............................   Passed    0.02 sec
+      Start 22: probe_requires_explicit_mode
+22/24 Test #22: probe_requires_explicit_mode ..............   Passed    0.03 sec
+      Start 23: probe_rejects_unknown_mode
+23/24 Test #23: probe_rejects_unknown_mode ................   Passed    0.01 sec
+      Start 24: probe_rejects_relative_runtime
+24/24 Test #24: probe_rejects_relative_runtime ............   Passed    0.01 sec
+
+100% tests passed, 0 tests failed out of 24
+
+Total Test time (real) =   4.44 sec

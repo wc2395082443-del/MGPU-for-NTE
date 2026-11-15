@@ -1,0 +1,199 @@
+{
+  "version": "b7d3",
+  "capture": "20261116-031819-4647628",
+  "duration_seconds": 8.0118142,
+  "source_fps": 22.34200588426027,
+  "sdk_count_per_second": 102.59848512213377,
+  "sdk_count_distribution": {
+    "6": 90,
+    "3": 78,
+    "4": 7,
+    "5": 4
+  },
+  "display_intervals_ms": {
+    "count": 613,
+    "mean": 13.024787765089723,
+    "median": 12.1349,
+    "p95": 30.7051,
+    "p99": 35.5105,
+    "max": 67.07
+  },
+  "display_gaps_over20ms": 85,
+  "source_cadence": {
+    "batches": 179,
+    "native_reflex_sleep_ms": {
+      "count": 179,
+      "mean": 9.529066413407822,
+      "median": 10.2546,
+      "p95": 24.6975,
+      "minimum": 0.002,
+      "maximum": 27.855099
+    },
+    "native_to_relayed_simulation_start_ms": {
+      "count": 179,
+      "mean": 0.0367759217877095,
+      "median": 0.0332,
+      "p95": 0.059601,
+      "minimum": 0.021801,
+      "maximum": 0.142899
+    },
+    "sim_interval_ms": {
+      "count": 179,
+      "mean": 44.76434748603352,
+      "median": 28.473401,
+      "p95": 79.699699,
+      "minimum": 16.6512,
+      "maximum": 90.301
+    },
+    "helper_arrival_interval_ms": {
+      "count": 179,
+      "mean": 44.685209497206706,
+      "median": 39.66,
+      "p95": 58.7266,
+      "minimum": 32.6456,
+      "maximum": 84.5424
+    },
+    "long_sim_batches": 86,
+    "long_sim_batches_with_display_interval_near_sim_divided_by_six": 86,
+    "normal_sim_batches": 93,
+    "normal_sim_batches_with_display_interval_near_sim_divided_by_six": 12,
+    "positive_within_batch_display_intervals": 469,
+    "intervals_near_sim_divided_by_six": 450,
+    "intervals_near_multiples_of_sim_divided_by_six": 454,
+    "long_sim_examples": [
+      {
+        "source_sim_interval_ms": 80.162899,
+        "helper_acquire_interval_ms": 55.907,
+        "prior_source": 2548,
+        "source": 2549,
+        "sequence": 1157,
+        "native_present_count": 6,
+        "source_sim_divided_by_six_ms": 13.360483166666667,
+        "source_sim_divided_by_actual_multiplier_ms": 13.360483166666667,
+        "actual_display_deltas_ms": [
+          13.350799999999996,
+          13.367900000000002,
+          13.374300000000005,
+          13.35370000000001,
+          13.330099999999984
+        ],
+        "positive_display_intervals": 5,
+        "intervals_near_sim_divided_by_six": 5,
+        "intervals_near_multiple_of_sim_divided_by_six": 5,
+        "mean_near_interval_ms": 13.35536
+      },
+      {
+        "source_sim_interval_ms": 73.206,
+        "helper_acquire_interval_ms": 51.3494,
+        "prior_source": 2550,
+        "source": 2551,
+        "sequence": 1159,
+        "native_present_count": 6,
+        "source_sim_divided_by_six_ms": 12.201,
+        "source_sim_divided_by_actual_multiplier_ms": 12.201,
+        "actual_display_deltas_ms": [
+          12.158100000000005,
+          12.208799999999991,
+          12.206400000000006,
+          12.222199999999988,
+          12.170600000000004
+        ],
+        "positive_display_intervals": 5,
+        "intervals_near_sim_divided_by_six": 5,
+        "intervals_near_multiple_of_sim_divided_by_six": 5,
+        "mean_near_interval_ms": 12.193219999999998
+      },
+      {
+        "source_sim_interval_ms": 68.0012,
+        "helper_acquire_interval_ms": 52.2928,
+        "prior_source": 2552,
+        "source": 2553,
+        "sequence": 1161,
+        "native_present_count": 6,
+        "source_sim_divided_by_six_ms": 11.333533333333333,
+        "source_sim_divided_by_actual_multiplier_ms": 11.333533333333333,
+        "actual_display_deltas_ms": [
+          11.259499999999978,
+          11.354699999999996,
+          11.316099999999995,
+          11.337099999999989,
+          11.315700000000039
+        ],
+        "positive_display_intervals": 5,
+        "intervals_near_sim_divided_by_six": 5,
+        "intervals_near_multiple_of_sim_divided_by_six": 5,
+        "mean_near_interval_ms": 11.316619999999999
+      }
+    ]
+  },
+  "mouse_records": 491,
+  "foreground_samples": 519,
+  "window_samples": 519,
+  "main_dropped": 1,
+  "fine_truncated": 7,
+  "fg_summary": {
+    "recorded_evaluations": 653,
+    "completed_evaluations": 653,
+    "formal_gpu_start_evaluations": 640,
+    "formal_complete_batches": 89,
+    "formal_dynamic_complete_batches": 179,
+    "generated_count_per_batch": {
+      "2": 79,
+      "5": 89,
+      "3": 7,
+      "4": 4
+    },
+    "mean_five_evaluation_sum_ms": 23.68967838202247,
+    "per_generated_index_mean_ms": {
+      "1": 2.2767812290502794,
+      "2": 1.1747439553072625,
+      "3": 3.67569984,
+      "4": 7.137895225806452,
+      "5": 8.757336089887641
+    },
+    "clocks": {
+      "0": {
+        "samples": 728,
+        "valid": true,
+        "max_holdout_residual_ms": 0.0293107421875,
+        "max_call_us": 180.5,
+        "extrapolation_allowed": false
+      }
+    },
+    "scope": "Timestamps bracket commands recorded by NGX FrameGeneration EvaluateFeature on its supplied list. GPU elapsed includes preemption/barriers; independent-queue work is excluded. Generated ordinal comes from public NGX parameters. Source association uses an exact same-fence/value signal from an identified helper Present and the SDK queue input-wait epoch. This does not assign a native PresentId or prove pixel scanout identity.",
+    "pure_shader_occupancy_measured": false,
+    "generated_ordinal_to_present_id_verified": false
+  },
+  "sdk_batch_audit": {
+    "formal_input_batches": 179,
+    "six_native_calls": 90,
+    "native_calls_per_batch": {
+      "6": 90,
+      "3": 78,
+      "4": 7,
+      "5": 4
+    },
+    "native_present_timestamp_max_error_ms": 0.008,
+    "unique_display_times_per_formal_batch": {
+      "6": 85,
+      "1": 80,
+      "5": 7,
+      "3": 2,
+      "2": 1,
+      "4": 4
+    },
+    "association": "SDK input fence sequence -> six same-thread native Present calls -> PresentMon PresentId, matched by epoch, order and swapchain",
+    "generated_identity_verified": false,
+    "pixel_identity_verified": false,
+    "raw_formal_display_records": 823,
+    "source_associated_display_records": 823,
+    "exact_display_id_set_preserved": true,
+    "fg_work_breakdown_scope": "Per-batch SDK command-packet envelope and calibrated SDK-context RUNNING clipped to input lifetime; pure internal FG command/function identity remains unverified."
+  },
+  "runtime_admission_audit": null,
+  "five_frame_window": {
+    "start_seconds": 4.9665466,
+    "end_seconds": 5.1931148,
+    "duration_ms": 226.5682
+  }
+}

@@ -519,8 +519,9 @@ namespace
         const auto begin_ns = observe ? mgpu::official_bridge::source_clock_ns() : 0;
         const auto result = original(frame);
         const auto end_ns = observe ? mgpu::official_bridge::source_clock_ns() : 0;
-        if (result == sl::Result::eOk && identity.frame_known)
+        if (result == sl::Result::eOk && observe && identity.frame_known) {
             mgpu::official_bridge::source_sleep(identity.frame, begin_ns, end_ns);
+        }
         return result;
     }
 

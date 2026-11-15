@@ -1,4 +1,5 @@
 #include "../src/sl_tags.cpp"
+#include "../experimental/official_fg/source_admission_gate.hpp"
 #include <type_traits>
 
 namespace mgpu::source_fg_guard { extern bool test_ready; }
@@ -6,6 +7,10 @@ namespace mgpu::official_bridge
 {
 extern unsigned test_admit_count;
 extern unsigned test_input_count, test_phase;
+extern unsigned test_sleep_count;
+extern bool test_selected;
+extern void (*test_input_callback)();
+extern std::uint64_t test_native_begin_ns, test_native_end_ns;
 extern std::uint32_t test_admit_frame;
 }
 
@@ -29,6 +34,10 @@ unsigned original_calls = 0;
 unsigned constants_callbacks = 0;
 unsigned constants_admit_count = 0;
 unsigned sleep_calls = 0, sleep_admit_count = 0;
+unsigned sleep_input_count = 0;
+void (*sleep_callback)() = nullptr;
+mgpu::official_fg::source_admission_gate *active_gate = nullptr;
+mgpu::official_fg::source_admission_result input_result;
 unsigned fg_calls = 0;
 sl::DLSSGMode received_mode = sl::DLSSGMode::eCount;
 DWORD received_thread = 0;
@@ -62,6 +71,8 @@ sl::Result original_sleep(const sl::FrameToken &token)
     mgpu::official_bridge::test_phase = mgpu::official_bridge::test_phase == 1 ? 2 : 99;
     ++sleep_calls;
     sleep_admit_count = mgpu::official_bridge::test_admit_count;
+    sleep_input_count = mgpu::official_bridge::test_input_count;
+    if (sleep_callback) sleep_callback();
     forwarded = forwarded && &token == &frame;
     return static_cast<sl::Result>(status);
 }
@@ -210,15 +221,49 @@ int main()
         "constants recording never waits for source work that has not been submitted");
     g_real_source_sleep.store(original_sleep);
     const auto before_input = mgpu::official_bridge::test_input_count;
+    mgpu::official_bridge::test_phase = 0;
     check(hook_source_sleep(frame) == sl::Result::eOk && sleep_calls == 1 &&
         sleep_admit_count == before_admit && mgpu::official_bridge::test_admit_count == before_admit &&
         mgpu::official_bridge::test_input_count == before_input + 1 && mgpu::official_bridge::test_admit_frame == 23 &&
-        mgpu::official_bridge::test_phase == 3,
-        "input capacity check precedes native Sleep exactly once and successful native relay remains last");
+        sleep_input_count == before_input+1 && mgpu::official_bridge::test_phase == 3,
+        "input reservation check precedes native Sleep exactly once, then successful relay remains last before input");
     status = static_cast<int>(sl::Result::eErrorReflexAPI);
+    mgpu::official_bridge::test_phase = 0;
+    const auto before_relay = mgpu::official_bridge::test_sleep_count;
     check(hook_source_sleep(frame) == sl::Result::eErrorReflexAPI && sleep_calls == 2 &&
-        mgpu::official_bridge::test_input_count == before_input + 2 && mgpu::official_bridge::test_phase == 2,
-        "native Sleep errors are retained and cannot fabricate a successful helper relay");
+        mgpu::official_bridge::test_input_count == before_input + 2 && mgpu::official_bridge::test_phase == 2 &&
+        mgpu::official_bridge::test_sleep_count == before_relay,
+        "native Sleep errors preserve the original result and cannot fabricate a successful helper relay");
+    status = 0;
+    mgpu::official_fg::source_admission_gate gate;
+    active_gate = &gate;
+    gate.reset(true);
+    gate.complete(21);
+    gate.wait_submitted(22);
+    sleep_callback = [] { active_gate->complete(22); };
+    mgpu::official_bridge::test_input_callback = [] {
+        input_result = active_gate->wait_before_input(23, std::chrono::milliseconds(20));
+    };
+    mgpu::official_bridge::test_phase = 0;
+    check(hook_source_sleep(frame) == sl::Result::eOk && input_result.ready && !input_result.waited &&
+        !input_result.timed_out && input_result.completed == 21 && input_result.pending == 2 &&
+        mgpu::official_bridge::test_phase == 3,
+        "current input reserves a distinct credit before native Sleep while previous NR can complete concurrently");
+    check(mgpu::official_bridge::test_native_begin_ns > 0 &&
+        mgpu::official_bridge::test_native_end_ns == mgpu::official_bridge::test_native_begin_ns + 1,
+        "native Sleep timing retains actual boundaries without including input reservation wait");
+    sleep_callback = nullptr;
+    mgpu::official_bridge::test_input_callback = nullptr;
+    mgpu::official_bridge::test_selected = false;
+    const auto disabled_input = mgpu::official_bridge::test_input_count;
+    const auto disabled_relay = mgpu::official_bridge::test_sleep_count;
+    const auto disabled_calls = sleep_calls;
+    mgpu::official_bridge::test_phase = 0;
+    check(hook_source_sleep(frame) == sl::Result::eOk && sleep_calls == disabled_calls + 1 &&
+        mgpu::official_bridge::test_input_count == disabled_input &&
+        mgpu::official_bridge::test_sleep_count == disabled_relay,
+        "inactive MGPU forwards native Sleep without capacity wait or helper relay");
+    mgpu::official_bridge::test_selected = true;
     check(forwarded, "added frame admission preserves all original API arguments");
     return failures == 0 ? 0 : 1;
 }

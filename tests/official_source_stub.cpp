@@ -7,7 +7,9 @@ unsigned test_input_count = 0, test_phase = 0;
 std::uint32_t test_admit_frame = 0;
 std::uint32_t test_source_frame = 0;
 std::uint64_t test_native_begin_ns = 0, test_native_end_ns = 0;
-bool selected() { return true; }
+bool test_selected = true;
+void (*test_input_callback)() = nullptr;
+bool selected() { return test_selected; }
 void source_submitted(std::uint32_t frame)
 {
     ++test_admit_count;
@@ -19,6 +21,7 @@ void source_wait_input(std::uint32_t frame)
     ++test_input_count;
     test_admit_frame = frame;
     test_phase = 1;
+    if (test_input_callback) test_input_callback();
 }
 void source_completed(std::uint32_t) {}
 std::uint64_t source_clock_ns() { static std::uint64_t ticks = 0; return ++ticks; }

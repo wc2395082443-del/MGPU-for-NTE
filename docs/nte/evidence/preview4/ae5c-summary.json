@@ -1,0 +1,215 @@
+{
+  "version": "ae5c",
+  "capture": "20261116-034717-0839620",
+  "duration_seconds": 8.0073765,
+  "source_fps": 25.226739369629993,
+  "sdk_count_per_second": 151.36043621777995,
+  "sdk_count_distribution": {
+    "6": 202
+  },
+  "display_intervals_ms": {
+    "count": 1182,
+    "mean": 6.769261675126904,
+    "median": 6.6484,
+    "p95": 9.5193,
+    "p99": 13.8466,
+    "max": 19.4941
+  },
+  "display_gaps_over20ms": 0,
+  "source_cadence": {
+    "batches": 203,
+    "native_reflex_sleep_ms": {
+      "count": 202,
+      "mean": 24.528904504950496,
+      "median": 25.2833,
+      "p95": 31.148,
+      "minimum": 8.771099,
+      "maximum": 32.528699
+    },
+    "native_to_relayed_simulation_start_ms": {
+      "count": 202,
+      "mean": 0.0343520099009901,
+      "median": 0.0292,
+      "p95": 0.055001,
+      "minimum": 0.017001,
+      "maximum": 0.2417
+    },
+    "sim_interval_ms": {
+      "count": 203,
+      "mean": 39.25408719211823,
+      "median": 39.8003,
+      "p95": 41.2571,
+      "minimum": 34.456399,
+      "maximum": 42.8803
+    },
+    "helper_arrival_interval_ms": {
+      "count": 203,
+      "mean": 39.503232019704434,
+      "median": 39.4508,
+      "p95": 43.1148,
+      "minimum": 28.7695,
+      "maximum": 50.0443
+    },
+    "long_sim_batches": 0,
+    "long_sim_batches_with_display_interval_near_sim_divided_by_six": 0,
+    "normal_sim_batches": 203,
+    "normal_sim_batches_with_display_interval_near_sim_divided_by_six": 203,
+    "positive_within_batch_display_intervals": 982,
+    "intervals_near_sim_divided_by_six": 919,
+    "intervals_near_multiples_of_sim_divided_by_six": 934,
+    "long_sim_examples": []
+  },
+  "mouse_records": 122,
+  "foreground_samples": 517,
+  "window_samples": 517,
+  "main_dropped": 1,
+  "fine_truncated": 77,
+  "fg_summary": {
+    "recorded_evaluations": 1030,
+    "completed_evaluations": 1030,
+    "formal_gpu_start_evaluations": 1010,
+    "formal_complete_batches": 202,
+    "formal_dynamic_complete_batches": 202,
+    "generated_count_per_batch": {
+      "5": 202
+    },
+    "mean_five_evaluation_sum_ms": 12.038538772277228,
+    "per_generated_index_mean_ms": {
+      "1": 1.9096825346534654,
+      "2": 1.2522721584158416,
+      "3": 3.02962598019802,
+      "4": 1.3223355247524753,
+      "5": 4.5246225742574255
+    },
+    "clocks": {
+      "0": {
+        "samples": 1105,
+        "valid": true,
+        "raw_samples": 1107,
+        "rejected_long_call_samples": [
+          {
+            "gpu": 1794772053496839456,
+            "cpu": 9470303788602,
+            "before": 9470303787380,
+            "after": 9470303788618
+          },
+          {
+            "gpu": 1794772058401890816,
+            "cpu": 9470352843423,
+            "before": 9470352840199,
+            "after": 9470352843436
+          }
+        ],
+        "max_accepted_calibration_call_ms": 0.1,
+        "max_holdout_residual_ms": 0.044067578125,
+        "max_call_us": 64.2,
+        "extrapolation_allowed": false
+      }
+    },
+    "scope": "Timestamps bracket commands recorded by NGX FrameGeneration EvaluateFeature on its supplied list. GPU elapsed includes preemption/barriers; independent-queue work is excluded. Generated ordinal comes from public NGX parameters. Source association uses an exact same-fence/value signal from an identified helper Present and the SDK queue input-wait epoch. This does not assign a native PresentId or prove pixel scanout identity.",
+    "pure_shader_occupancy_measured": false,
+    "generated_ordinal_to_present_id_verified": false
+  },
+  "sdk_batch_audit": {
+    "formal_input_batches": 203,
+    "six_native_calls": 203,
+    "native_calls_per_batch": {
+      "6": 203
+    },
+    "native_present_timestamp_max_error_ms": 0.002,
+    "unique_display_times_per_formal_batch": {
+      "6": 177,
+      "5": 19,
+      "4": 7
+    },
+    "association": "SDK input fence sequence -> six same-thread native Present calls -> PresentMon PresentId, matched by epoch, order and swapchain",
+    "generated_identity_verified": false,
+    "pixel_identity_verified": false,
+    "raw_formal_display_records": 1217,
+    "source_associated_display_records": 1217,
+    "exact_display_id_set_preserved": true,
+    "fg_work_breakdown_scope": "Per-batch SDK command-packet envelope and calibrated SDK-context RUNNING clipped to input lifetime; pure internal FG command/function identity remains unverified."
+  },
+  "runtime_admission_audit": {
+    "input_status_at_or_before_capture": {
+      "call": 3360,
+      "frame": 4368,
+      "retire_target": 4368,
+      "completed": 1238,
+      "ready": 0,
+      "waited": 0,
+      "wait_ms": 0,
+      "waits": 215,
+      "timeout": 0,
+      "cancelled": 0,
+      "pending": 2,
+      "capacity": 3,
+      "begin_ns": 947027336475500,
+      "end_ns": 947027336475900,
+      "qpc": 9470273364755
+    },
+    "status_samples_within_capture": [
+      {
+        "call": 3480,
+        "frame": 4488,
+        "retire_target": 4488,
+        "completed": 1238,
+        "ready": 0,
+        "waited": 0,
+        "wait_ms": 0,
+        "waits": 215,
+        "timeout": 0,
+        "cancelled": 0,
+        "pending": 2,
+        "capacity": 3,
+        "begin_ns": 947032189249300,
+        "end_ns": 947032189249900,
+        "qpc": 9470321892493
+      },
+      {
+        "call": 3600,
+        "frame": 4608,
+        "retire_target": 4608,
+        "completed": 1238,
+        "ready": 0,
+        "waited": 0,
+        "wait_ms": 0,
+        "waits": 215,
+        "timeout": 0,
+        "cancelled": 0,
+        "pending": 2,
+        "capacity": 3,
+        "begin_ns": 947036866995799,
+        "end_ns": 947036866996100,
+        "qpc": 9470368669958
+      }
+    ],
+    "timeouts_before_capture_end": [
+      {
+        "call": 233,
+        "frame": 1241,
+        "retire_target": 1239,
+        "completed": 1238,
+        "ready": 1,
+        "waited": 1,
+        "wait_ms": 1001,
+        "waits": 215,
+        "timeout": 1,
+        "cancelled": 0,
+        "pending": 2,
+        "capacity": 3,
+        "begin_ns": 946908010543099,
+        "end_ns": 946909011926200,
+        "qpc": 9469080105431
+      }
+    ],
+    "disabled_in_all_available_capture_status_samples": true,
+    "observations": "Periodic status snapshots, not a continuous per-frame proof. Timeout plus subsequent ready=0 snapshots corroborate admission suspended/disabled during capture.",
+    "verdict": "Cannot validate active input credit policy: source admission was disabled before capture and remains disabled in all available snapshots."
+  },
+  "five_frame_window": {
+    "start_seconds": 4.9768567,
+    "end_seconds": 5.165883,
+    "duration_ms": 189.0263
+  }
+}

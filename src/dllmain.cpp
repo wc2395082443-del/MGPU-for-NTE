@@ -69,7 +69,7 @@
 // misidentifying a build. Caught by a control run rather than by a reader,
 // which is the only reason it is not in somebody's issue thread.
 // R141: the log must say which build wrote it. 0.2.5 + R210 + R208 (FP16, off).
-#define MGPU_VERSION_STR "0.3.1-t1-source-fg-off-20261031"
+#define MGPU_VERSION_STR "0.3.1-nte-NR-preset-20261111"
 
 
 // ---- P6.4: the overlay panel ----
@@ -1255,15 +1255,31 @@ static void draw_mgpu_overlay(reshade::api::effect_runtime *)
     // "the image looks wrong" is why most people will open this panel at all.
     // Burying them under four other groups meant nobody found them.
     ImGui::SeparatorText("Model");
+    ImGui::TextUnformatted("NR Preset");
+    int nr_preset_request = st.nr_preset_requested;
+    static bool nr_preset_save_failed = false;
+    if (ImGui::Combo("##nr-preset", &nr_preset_request,
+        "Runtime default\0Preset #1\0Preset #2\0Preset #3\0Preset #4\0"))
+        nr_preset_save_failed = !mgpu::gpu1::ui_set_nr_preset(nr_preset_request);
+    if (nr_preset_save_failed) ImGui::TextDisabled("Could not save NRPreset; selection unchanged.");
+    if (st.nr_preset_active < 0)
+        ImGui::TextDisabled("Applies at NR initialization.");
+    else
+    {
+        ImGui::TextDisabled("Creation hint #%d; weight selection unconfirmed.", st.nr_preset_active);
+        if (st.nr_preset_active != st.nr_preset_requested)
+            ImGui::TextDisabled("Pending: restart the game to apply.");
+    }
+    ImGui::TextDisabled("The reference 310.8 DLL has one weight set; other presets may fall back.");
 
     int style_i = (int)(st.style + 0.5f);
     ImGui::TextUnformatted("Style");
     ImGui::SameLine();
-    if (ImGui::RadioButton("A", &style_i, 0)) mgpu::gpu1::ui_set_tuning_value(3, 0.0f);
+    if (ImGui::RadioButton("Default", &style_i, 0)) mgpu::gpu1::ui_set_tuning_value(3, 0.0f);
     ImGui::SameLine();
-    if (ImGui::RadioButton("B", &style_i, 1)) mgpu::gpu1::ui_set_tuning_value(3, 1.0f);
+    if (ImGui::RadioButton("Natural", &style_i, 1)) mgpu::gpu1::ui_set_tuning_value(3, 1.0f);
     ImGui::SameLine();
-    if (ImGui::RadioButton("C", &style_i, 2)) mgpu::gpu1::ui_set_tuning_value(3, 2.0f);
+    if (ImGui::RadioButton("Cinematic", &style_i, 2)) mgpu::gpu1::ui_set_tuning_value(3, 2.0f);
 
     float tone = st.tone_strength;
     if (ImGui::SliderFloat("tone", &tone, 0.0f, 2.0f, "%.2f"))

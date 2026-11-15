@@ -4,7 +4,7 @@ Our code retains the upstream MIT license. ReShade header notices, ImGui notices
 
 ## Included in the binary release
 
-- Preview.3 main 8ADEAA05 and helper 446FD260, using the installed user-confirmed artifacts and their published source lineage.
+- Preview.4 accepted main B09C and helper E172, with lifecycle pacing fixes and diagnostic timing retained. Earlier preview.3 artifacts remain in their own release.
 - The project's `mgpu_depth_tap.fx`, configuration templates, installation/rollback and local runtime-import scripts, hashes and licenses.
 
 ## Supplied by the user

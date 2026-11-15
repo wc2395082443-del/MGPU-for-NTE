@@ -6,9 +6,15 @@ An experimental Neverness to Everness adaptation of [Neural Coprocessor](https:/
 
 The RTX 4080 SUPER renders the game and runs its game-side DLSS super resolution. The RTX 5080 receives matched color/depth/motion/camera inputs, runs neural rendering, and uses an independent Streamline/Reflex/PCL process for frame generation and presentation. This release targets the tested NTE build and **GeForce RTX 5080 helper**.
 
-The current [pipeline preview.3](https://github.com/wc2395082443-del/MGPU-for-NTE/releases/tag/nte-pipeline-preview.3), dated 2026-11-09, uses user-confirmed main `8ADEAA05` and helper `446FD260`. **The RTX 4080 SUPER's game-process frame generation is switched off; the RTX 5080 runs NVIDIA official frame generation after NR, with up to a sixfold request.** The separate [RTX 50-series compatibility candidate](docs/nte/RTX50-COMPAT.zh-CN.md) is not included; this helper accepts RTX 5080.
+The current [lifecycle preview.4](https://github.com/wc2395082443-del/MGPU-for-NTE/releases/tag/nte-lifecycle-preview.4), dated2026-11-16, ships accepted **B09C main + E172 helper**. RTX4080 SUPER renders with source FG disabled; RTX5080 performs NR and NVIDIA official FG, requesting up to6x. See [changes and five-frame measurements](docs/nte/LIFECYCLE-UPDATE.en.md).
 
-This update adds three-credit parallel backpressure, capacity waiting before native Reflex Sleep, asynchronous official dual-Pass NR, photo/menu recovery, stale-overlay expiry and staged optional instrumentation removal. The user confirmed login/dual-Pass flicker resolved, low latency, and normal operation after all three removal stages. See [changes and validation](docs/nte/PIPELINE-UPDATE.en.md); historical FPS figures below retain their original scope.
+Input admission reserves credits before render submission, uses a three-frame lifecycle budget and recovers after timeout when real NR completion releases capacity. The user confirms retained smoothness and noticeably lower latency. Versus AE5C, simulation→first display in the associated batch mean age falls **136.80→111.15ms**, with display interval P95 **9.52→9.68ms**. This is frame age, not hardware input-to-photon latency; camera actions/load differ, and measurement overhead is included.
+
+![Measured five-frame NR/FG pipeline](docs/nte/figures/lifecycle-five-frames.svg)
+
+[Offline viewer](docs/nte/lifecycle-five-frame-timeline.html) · [Three-version data](docs/nte/evidence/preview4/comparison.json). This release retains diagnostic code; measurement-disabled preview.3 remains available. One pre-capture1s timeout recovered, and loading/menu cases still need improvement. The separate other50-series candidate remains excluded; the helper accepts RTX5080.
+
+The previous preview.3 recovery, asynchronous dual-Pass and instrumentation-removal history remains in [its change record](docs/nte/PIPELINE-UPDATE.en.md). Historical FPS figures below retain their original scope.
 
 **Sixfold frame generation uses NVIDIA's official DLSS Frame Generation runtime through Streamline/DLSS-G, rather than Lossless Scaling. The user's latest feedback describes the visual result as excellent.** This project connects the NR image and guides to that runtime and manages the output window.
 
@@ -63,7 +69,7 @@ Historical unique neural completions increased from **26.699/s to 33.451/s (~25.
 
 Sixfold requests up to five generated frames per real frame. Visible pacing and latency remain areas for improvement. Post-generation buffering of six completed images is planned. M365 was withdrawn; M366/M367 experiments remain separate.
 
-The validated snapshot passed 14 main + 11 helper focused cases. Publication validation and historical hosted-CI limitations are recorded in [BUILD.md](docs/nte/BUILD.md). No new controlled FPS or end-to-end latency measurement was made. Some functional counters/logs remain; optional helper trace and pure rate statistics are disabled, so some panel fields no longer update. External RTSS can still monitor the helper.
+Preview.4 publication passes13 focused main +12 focused helper cases and24/24 complete helper cases. The full main build stops on the historical GPU-measurement-disabled static assertion; no complete-main pass is claimed. [Build records](docs/nte/BUILD.md) retain that failure. This release keeps timing and trace diagnostics; hardware input-to-photon latency remains unmeasured.
 
 ![Before and after, five measured cycles on one scale](docs/nte/figures/five-frame-comparison.svg)
 
@@ -77,6 +83,6 @@ The transport change allows color reception while the producer is still sending 
 
 The release ZIP contains our bridge/helper binaries, example configuration, shader, integrity checks, backup/rollback installer and local runtime import tool. NVIDIA runtime/model binaries, ReShade and game assets are **not redistributed**. Supply the matching dependencies from your own installation; see [dependencies](docs/nte/DEPENDENCIES.md).
 
-Tested game EXE SHA256: `E72655E227E17796D13EDF00F827DDFEBDE9859B3D758858F0FFC82765D84EFE`. Some integration routes use build-specific guards. The project loads through ReShade; compatibility depends on the game build and its anti-cheat policy.
+Tested game EXE SHA256: `64ED3CAE0B5FC61F3B56CDD933B4807CB23F0EC7913590DB60D1A8642DE2DFEC`. Some integration routes use build-specific guards. The project loads through ReShade; compatibility depends on the game build and its anti-cheat policy.
 
 MIT license and upstream attribution are retained. Maintained by [wc2395082443-del](https://github.com/wc2395082443-del). Exact source/binary provenance and test limits are documented in [PROVENANCE.md](docs/nte/PROVENANCE.md).

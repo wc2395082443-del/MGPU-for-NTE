@@ -39,6 +39,7 @@
 
 #include "adapter.hpp"
 #include "diag.hpp"
+#include "nr_preset.hpp"
 // [OURS] NRS (2026-10-11): the two MIT compute shaders from the Cost-Scaler
 // project, used by the caller-side NR scaling path. Bytecode only - nothing is
 // compiled at build or run time. See build\bridge-nrscale\PLAN_nr_scale_in_bridge.md.
@@ -10439,6 +10440,7 @@ namespace
         // published number the moment it is compiled in is not a knob, it is a
         // silent regression.
         bool  tuning_on = false;
+        mgpu::nr_preset::selection nr_preset;
         float tone_strength      = 1.0f;
         float structure_strength = 1.0f;
         float skin_strength      = 1.0f;
@@ -13972,6 +13974,7 @@ namespace
             s.nr_params->Set("DLSSNR.Width",  (unsigned int)cw);
             s.nr_params->Set("DLSSNR.Height", (unsigned int)chh);
             unsigned long seh_code = 0ul;
+            s.nr_preset.bind(s.nr_params);
             rr = ngx_create_guarded((ngx_pf_create_seh_fn)s.nrs_cre_v, s.nl,
                                     (NVSDK_NGX_Feature)NVSDK_NGX_Feature_Reserved18,
                                     s.nr_params, &s.nr_handle[i], &seh_code);
@@ -15264,6 +15267,12 @@ namespace
                 mgpu::diag::info("[MGPU][OURS][NRS] create-time block: Color/Output on the work scratch, "
                                  "subrects at the work extent (step 2)");
             }
+            s.nr_preset.load(ini_read_sr_int("NRPreset", 0, 0, 4));
+            s.nr_preset.begin_create();
+            snprintf(line, sizeof line,
+                "[MGPU][NR-PRESET] create-time requested hint=%d; unsigned DLSSNR.Hint.Render.Preset; runtime may fall back to shipping weights; selected weights unconfirmed",
+                s.nr_preset.active);
+            mgpu::diag::info(line);
             arm_sentinel_set();
             for (unsigned i = 0; i < stream_state::MAX_PASSES; ++i)
             {
@@ -15290,6 +15299,7 @@ namespace
                 // V44. Guarded. See ngx_create_guarded for why it is its own
                 // function and why we do not re-enter NGX after a catch.
                 unsigned long seh_code = 0ul;
+                s.nr_preset.bind(s.nr_params);
                 r = ngx_create_guarded((ngx_pf_create_seh_fn)p_cre, s.nl,
                                        (NVSDK_NGX_Feature)NVSDK_NGX_Feature_Reserved18,
                                        s.nr_params, &s.nr_handle[i], &seh_code);
@@ -15321,6 +15331,7 @@ namespace
             for (unsigned i = 0; i < s.p1f_n && r == NVSDK_NGX_Result_Success; ++i)
             {
                 unsigned long seh_p1 = 0ul;
+                s.nr_preset.bind(s.nr_params);
                 const NVSDK_NGX_Result rp =
                     ngx_create_guarded((ngx_pf_create_seh_fn)p_cre, s.nl,
                                        (NVSDK_NGX_Feature)NVSDK_NGX_Feature_Reserved18,
@@ -15349,6 +15360,7 @@ namespace
             for (unsigned i = 0; s.p2f_mode != 0u && i < 2u && r == NVSDK_NGX_Result_Success; ++i)
             {
                 unsigned long seh_p2 = 0ul;
+                s.nr_preset.bind(s.nr_params);
                 const NVSDK_NGX_Result rp =
                     ngx_create_guarded((ngx_pf_create_seh_fn)p_cre, s.nl,
                                        (NVSDK_NGX_Feature)NVSDK_NGX_Feature_Reserved18,
@@ -18581,6 +18593,9 @@ void ui_read(ui_state &out)
     out.skin_strength      = s.skin_strength;
     out.style              = s.style;
     out.auto_mask          = s.auto_mask;
+    if (!s.nr_preset.loaded) s.nr_preset.load(ini_read_sr_int("NRPreset", 0, 0, 4));
+    out.nr_preset_requested = s.nr_preset.requested;
+    out.nr_preset_active = s.nr_preset.active;
 
     out.passes      = s.passes;
     out.max_passes  = stream_state::MAX_PASSES;
@@ -18879,6 +18894,17 @@ void ui_nrs_set(int which, float v)
     const char *key = (which == 0) ? "NRDetailGain" : (which == 1) ? "NRSharpness"
                     : (which == 2) ? "NRColorStrength" : (which == 3) ? "NRMode" : nullptr;
     if (key != nullptr) (void)ui_ini_write_float(key, v);   // persists: panel and ini cannot drift
+}
+
+bool ui_set_nr_preset(int value)
+{
+    if (!mgpu::nr_preset::valid(value)) return false;
+    auto &stream = str();
+    std::lock_guard<std::mutex> lock(stream.cs);
+    if (!ui_ini_write("NRPreset", value)) return false;
+    stream.nr_preset.request(value);
+    mgpu::diag::info("[MGPU][NR-PRESET] request saved for next NR initialization; running feature handles unchanged");
+    return true;
 }
 
 void ui_set_tuning(bool on)
@@ -21012,7 +21038,7 @@ void stream_on_finish_effects(void *cmd_list_v, void *cmd_queue_v,
                 for (UINT i = 0; i + 1 < stream_state::TS_MARKS; ++i) s.ts_min[i] = 1e30;
                 for (UINT q = 0; q < stream_state::TS_SEGS; ++q) s.ts_seg_min[q] = 1e30;   // D5b
                 // R214: per-evaluate marks, off unless EvalTimes=1.
-                if (s.ts_ok && ini_read_flag("EvalTimes"))
+                if (s.ts_ok && (ini_read_flag("EvalTimes") || mgpu::gpu_measurement::timestamps))
                 {
                     D3D12_QUERY_HEAP_DESC evd{};
                     evd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
@@ -22704,6 +22730,9 @@ static void seal_consume(stream_state &s, unsigned long long f, unsigned slot,
     ID3D12Resource *const evaluate_readback = readback ? readback->evaluations.Get() : s.evread;
     ID3D12Resource *const sample_readback = readback ? readback->sample.Get() : s.nr_read;
     const auto evaluation_count = readback ? readback->evaluation_count : s.ev_count;
+    const std::uint64_t measurement_session = s.slot_measurement_session[slot] != 0
+        ? s.slot_measurement_session[slot]
+        : (asynchronous ? s.pipeline.current().measurement_session : 0);
     mgpu::timing::span neural_span{}, copy_span{}, local_copy_span{}, output_span{};
     mgpu::timing::span color_copy_span{}, guide_copy_span{};
     mgpu::timing::span depth_copy_span{}, motion_copy_span{};
@@ -22924,6 +22953,22 @@ static void seal_consume(stream_state &s, unsigned long long f, unsigned slot,
                     if (ms < s.ev_min[ro]) s.ev_min[ro] = ms;
                     if (ms > s.ev_max[ro]) s.ev_max[ro] = ms;
                     ++s.ev_n[ro];
+                    if (measurement_session != 0 && evaluation_count == 2u)
+                    {
+                        const auto evaluated = mgpu::timing::decode(ev[i], ev[i + 1], neural_clock);
+                        if (evaluated.start_ms >= 0 && evaluated.end_ms >= evaluated.start_ms)
+                        {
+                            char report[500];
+                            std::snprintf(report, sizeof(report),
+                                "[MGPU][M336] kind=neural_pass session=%llu seal=%llu engine_frame=%llu slot=%u "
+                                "%s_start=%.6f %s_end=%.6f role=%u per_evaluate=1",
+                                static_cast<unsigned long long>(measurement_session), f,
+                                static_cast<unsigned long long>(s.slot_game_frame[slot]), slot,
+                                i == 0 ? "neural_first" : "neural_second", evaluated.start_ms,
+                                i == 0 ? "neural_first" : "neural_second", evaluated.end_ms, ro);
+                            mgpu::measurement::emit(report);
+                        }
+                    }
                 }
                 D3D12_RANGE en{0, 0};
                 evaluate_readback->Unmap(0, &en);
@@ -22982,9 +23027,6 @@ static void seal_consume(stream_state &s, unsigned long long f, unsigned slot,
         // when the dedicated COPY queue is active, copy_start/copy_end are
         // replaced by its own calibrated timestamps and local_copy_* retains
         // the direct-list bracket. No stage is filled with zero on failure.
-        const std::uint64_t measurement_session = s.slot_measurement_session[slot] != 0
-            ? s.slot_measurement_session[slot]
-            : (asynchronous ? s.pipeline.current().measurement_session : 0);
         if (measurement_session != 0 && run_nr)
         {
             if (s.measurement_queue_session != measurement_session)

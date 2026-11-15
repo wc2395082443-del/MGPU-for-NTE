@@ -1,6 +1,18 @@
 # Release provenance
 
-## Current preview.3 — 2026-11-09
+## Current preview.4 — 2026-11-16
+
+This release distributes the exact user-accepted B09C main and E172 helper. Source starts from the NTE preset/diagnostic snapshot and applies lifecycle reservation, three total credits and timeout rearming. The snapshot's publication-only aligned-test fixtures are retained; source rebuilds are separately validated and are not substituted for accepted binaries.
+
+| Artifact | SHA256 |
+| --- | --- |
+| Main | `B09CA7B12A3B23069FFB35DDB9F08D8684239DBAFDFEBB486E78EEAFA7922BF0` |
+| Helper | `E172D87654241079991C3D8766BDCE66B7B763235720703EAA1F3B1DD3B0A767` |
+| Supported HTGame.exe | `64ED3CAE0B5FC61F3B56CDD933B4807CB23F0EC7913590DB60D1A8642DE2DFEC` |
+
+The deployed main retains GPU queries and CPU/queue measurement backends. Helper uses `MGPU_FG_GPU_AUDIT=1` and includes original trace code. Synthetic-focus test code is excluded from the helper artifact. NR creation-preset hints are included, with selected weights unverified. No CP or other50-series compatibility experiment is merged. Dependencies remain locally supplied. [Measurements and limits](LIFECYCLE-UPDATE.zh-CN.md).
+
+## Historical preview.3 — 2026-11-09
 
 The production sources match the unified validated measurement-stage3 snapshot, combining the stage2 main with the stage3 helper. The release packages the installed binaries instead of substituting rebuilds. See [changes](PIPELINE-UPDATE.zh-CN.md).
 
